@@ -34,12 +34,14 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>) {
         .layer(CorsLayer::permissive())
         .with_state(AppState { addr, tx });
 
-    tokio::spawn(async move {
+    let https_server = tokio::spawn(async move {
         axum_server::bind_rustls("0.0.0.0:8080".parse::<SocketAddr>().unwrap(), config)
             .serve(api.into_make_service())
             .await
             .expect("bind to 0.0.0.0:8080");
     });
+
+    let _ = tokio::join!(https_server);
 }
 
 async fn sdp_offer(
