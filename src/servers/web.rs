@@ -5,7 +5,6 @@ use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
 use serde_json::Value;
 use str0m::{Candidate, Rtc, change::SdpOffer};
-use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 use crate::types::{ClientRole, RoomId};
@@ -36,9 +35,10 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>) {
         .with_state(AppState { addr, tx });
 
     tokio::spawn(async move {
-        axum::serve(TcpListener::bind("0.0.0.0:8080").await.unwrap(), api)
+        axum_server::bind_rustls("0.0.0.0:8080".parse::<SocketAddr>().unwrap(), config)
+            .serve(api.into_make_service())
             .await
-            .unwrap();
+            .expect("bind to 0.0.0.0:8080");
     });
 }
 
