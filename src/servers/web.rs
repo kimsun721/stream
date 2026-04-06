@@ -88,6 +88,10 @@ async fn update_room(Path(room_id): Path<u64>, Json(payload): Json<UpdateRoomSta
     StatusCode::OK
 }
 
+async fn delete_room(Path(room_id): Path<u64>) -> StatusCode {
+    StatusCode::OK
+}
+
 async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
