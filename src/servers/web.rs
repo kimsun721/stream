@@ -1,18 +1,29 @@
 use std::{net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
-use axum::{Json, Router, extract::State, routing};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::StatusCode,
+    routing,
+};
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
 use serde_json::Value;
 use str0m::{Candidate, Rtc, change::SdpOffer};
+use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
-use crate::types::{ClientRole, RoomId};
+use crate::types::{ClientRole, RoomId, RoomState, Rooms};
 
 #[derive(Clone)]
-struct AppState {
+struct SdpState {
     addr: SocketAddr,
     tx: SyncSender<(Rtc, ClientRole, RoomId)>,
+}
+
+#[derive(Clone)]
+struct ApiState {
+    rooms: Rooms,
 }
 
 #[derive(Deserialize)]
@@ -24,31 +35,64 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>) {
+pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>, rooms: Rooms) {
     let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem")
         .await
         .expect("load pem files");
 
-    let api = Router::new()
+    let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .layer(CorsLayer::permissive())
-        .with_state(AppState { addr, tx });
+        .with_state(SdpState { addr, tx });
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls("0.0.0.0:8080".parse::<SocketAddr>().unwrap(), config)
-            .serve(api.into_make_service())
+            .serve(https_api.into_make_service())
             .await
             .expect("bind to 0.0.0.0:8080");
     });
 
-    let _ = tokio::join!(https_server);
+    let http_api = Router::new()
+        .route("/rooms/{room_id}", routing::post(create_room))
+        .route("/rooms/{room_id}", routing::get(get_room))
+        .with_state(ApiState { rooms });
+
+    let http_server = tokio::spawn(async move {
+        axum::serve(
+            TcpListener::bind("0.0.0.0:8443")
+                .await
+                .expect("bind to 0.0.0.0:8443"),
+            http_api,
+        )
+        .await
+        .unwrap();
+    });
+
+    let _ = tokio::join!(https_server, http_server);
+}
+
+async fn create_room(Path(room_id): Path<u64>) -> StatusCode {
+    StatusCode::CREATED
+}
+
+async fn get_room(Path(room_id): Path<u64>) -> StatusCode {
+    StatusCode::OK
+}
+
+#[derive(Deserialize)]
+struct UpdateRoomState {
+    state: RoomState,
+}
+
+async fn update_room(Path(room_id): Path<u64>, Json(payload): Json<UpdateRoomState>) -> StatusCode {
+    StatusCode::OK
 }
 
 async fn sdp_offer(
-    State(state): State<AppState>,
+    State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
 ) -> Json<Value> {
-    let AppState { addr, tx } = state;
+    let SdpState { addr, tx } = state;
     let OfferRequest {
         _sdp_type,
         sdp,
