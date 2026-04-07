@@ -18,9 +18,8 @@ async fn main() {
 
     from_feature_flags().install_process_default();
 
-    let host_addr = utils::addr::select_host_address();
-    let socket = UdpSocket::bind(format!("{host_addr}:0")).expect("binding a random UDP port");
-    let addr = socket.local_addr().expect("a local socket address");
+    let (addr, socket) = servers::udp::bind_udp_socket();
+
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
