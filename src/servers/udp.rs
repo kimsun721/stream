@@ -6,7 +6,7 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
-use crate::types::{ClientRole, RoomId};
+use crate::types::{ClientRole, RoomId, Rooms};
 
 use crate::utils;
 
@@ -18,7 +18,11 @@ pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
     (addr, socket)
 }
 
-pub fn run(rx: Receiver<(Rtc, ClientRole, RoomId)>, socket: UdpSocket) -> Result<(), RtcError> {
+pub fn run(
+    rx: Receiver<(Rtc, ClientRole, RoomId)>,
+    socket: UdpSocket,
+    rooms: Rooms,
+) -> Result<(), RtcError> {
     let mut buf = Vec::new();
     let (mut rtc, role, room_id) = rx.recv().expect("dk");
 

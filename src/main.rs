@@ -20,10 +20,12 @@ async fn main() {
     let (addr, socket) = servers::udp::bind_udp_socket();
 
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+    let rooms_for_sfu = rooms.clone();
+
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
     std::thread::spawn(move || {
-        servers::sfu::run(rx, socket);
+        servers::sfu::run(rx, socket, rooms_for_sfu);
     });
 
     servers::web::run(addr, tx, rooms).await;

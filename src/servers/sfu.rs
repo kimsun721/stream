@@ -5,11 +5,11 @@ use tracing::warn;
 
 use crate::{
     servers,
-    types::{ClientRole, RoomId},
+    types::{ClientRole, RoomId, Rooms},
 };
 
-pub fn run(rx: Receiver<(Rtc, ClientRole, RoomId)>, socket: UdpSocket) {
-    if let Err(e) = servers::udp::run(rx, socket) {
+pub fn run(rx: Receiver<(Rtc, ClientRole, RoomId)>, socket: UdpSocket, rooms: Rooms) {
+    if let Err(e) = servers::udp::run(rx, socket, rooms) {
         warn!("SFU error! {}", e);
     }
 }
