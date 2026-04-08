@@ -36,8 +36,9 @@ pub struct RoomId(pub u64);
 
 #[derive(Deserialize, Debug)]
 pub enum RoomState {
-    Public,
-    Private,
+    IDLE,
+    PREVIEW,
+    LIVE,
 }
 
 #[derive(Debug)]
