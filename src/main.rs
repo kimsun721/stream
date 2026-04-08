@@ -25,8 +25,12 @@ async fn main() {
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
     std::thread::spawn(move || {
-        servers::sfu::run(rx, socket, rooms_for_sfu);
+        if let Err(e) = servers::udp::run(rx, socket, rooms_for_sfu) {
+            tracing::error!("udp error : {}", e);
+        };
     });
 
-    servers::web::run(addr, tx, rooms).await;
+    if let Err(e) = servers::web::run(addr, tx, rooms).await {
+        tracing::error!("web server erorr : {}", e);
+    };
 }
