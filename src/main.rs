@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    net::UdpSocket,
     sync::{Arc, Mutex, mpsc},
 };
 
@@ -24,7 +23,7 @@ async fn main() {
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
     std::thread::spawn(move || {
-        servers::sfu::run(rx, socket).unwrap();
+        servers::sfu::run(rx, socket);
     });
 
     servers::web::run(addr, tx, rooms).await;
