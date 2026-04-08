@@ -15,7 +15,7 @@ use str0m::{
 #[derive(Deserialize, Debug)]
 pub enum ClientRole {
     Streamer,
-    ClientRole,
+    Viewer,
 }
 
 #[derive(Debug)]
