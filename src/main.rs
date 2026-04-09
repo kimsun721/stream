@@ -6,6 +6,7 @@ use std::{
 use str0m::{Rtc, crypto::from_feature_flags};
 
 use crate::types::{ClientRole, RoomId, Rooms};
+use ::tracing::error;
 
 mod servers;
 mod types;
@@ -26,11 +27,11 @@ async fn main() {
 
     std::thread::spawn(move || {
         if let Err(e) = servers::udp::run(rx, socket, rooms_for_sfu) {
-            tracing::error!("udp error : {}", e);
+            error!("udp error : {}", e);
         };
     });
 
     if let Err(e) = servers::web::run(addr, tx, rooms).await {
-        tracing::error!("web server erorr : {}", e);
+        error!("web server erorr : {}", e);
     };
 }

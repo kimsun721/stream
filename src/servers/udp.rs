@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
@@ -5,8 +6,9 @@ use str0m::{
     Event, IceConnectionState, Input, Output, Rtc, RtcError,
     net::{Protocol, Receive},
 };
+use tracing::warn;
 
-use crate::types::{ClientRole, RoomId, Rooms};
+use crate::types::{Client, ClientId, ClientRole, RoomId, RoomState, Rooms};
 
 use crate::utils;
 
@@ -21,12 +23,16 @@ pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
 pub fn run(
     rx: Receiver<(Rtc, ClientRole, RoomId)>,
     socket: UdpSocket,
-    rooms: Rooms,
-) -> Result<(), RtcError> {
+    rooms_arc: Rooms,
+) -> anyhow::Result<()> {
     let mut buf = Vec::new();
-    let (mut rtc, role, room_id) = rx.recv().expect("dk");
 
+    todo!("poll output and UDP recv loop");
     loop {
+        register_client(&rx, &rooms_arc);
+
+        let rooms = rooms_arc.lock().unwrap();
+
         let timeout = match rtc.poll_output()? {
             Output::Timeout(v) => v,
 
@@ -75,4 +81,38 @@ pub fn run(
 
         rtc.handle_input(input)?;
     }
+}
+
+fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) {
+    if let Ok((rtc, role, room_id)) = rx.try_recv() {
+        let mut rooms = rooms_arc.lock().unwrap();
+        let client = Client::new(rtc, role);
+
+        if let Some(room) = rooms.get_mut(&room_id.0) {
+            match role {
+                ClientRole::Streamer => {
+                    if room
+                        .clients
+                        .iter()
+                        .any(|c| matches!(c.role, ClientRole::Streamer))
+                    {
+                        warn!("Streamer already connected in room : {:?}", &room);
+                    } else {
+                        room.streamer_id = Some(client.id);
+                        room.clients.push(client);
+                    }
+                }
+                ClientRole::Viewer => match room.state {
+                    RoomState::IDLE | RoomState::PREVIEW => {
+                        warn!("Client connected to an {:?} room", room.state);
+                    }
+                    RoomState::LIVE => {
+                        room.clients.push(client);
+                    }
+                },
+            }
+        } else {
+            warn!("Room does not exist : {:?}", room_id);
+        };
+    };
 }
