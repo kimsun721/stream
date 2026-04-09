@@ -1,14 +1,13 @@
-use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
 use str0m::{
-    Event, IceConnectionState, Input, Output, Rtc, RtcError,
+    Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
 };
 use tracing::warn;
 
-use crate::types::{Client, ClientId, ClientRole, RoomId, RoomState, Rooms};
+use crate::types::{Client, ClientRole, RoomId, RoomState, Rooms};
 
 use crate::utils;
 
@@ -25,66 +24,16 @@ pub fn run(
     socket: UdpSocket,
     rooms_arc: Rooms,
 ) -> anyhow::Result<()> {
-    let mut buf = Vec::new();
+    let mut buf: Vec<u8> = Vec::new();
 
     loop {
         register_client(&rx, &rooms_arc);
 
         let mut rooms = rooms_arc.lock().unwrap();
 
-        for (room_id, room) in rooms.iter_mut() {
+        for (_, room) in rooms.iter_mut() {
             for client in room.clients.iter_mut() {
-                let timeout = loop {
-                    match client.rtc.poll_output()? {
-                        Output::Timeout(v) => break v,
-
-                        Output::Transmit(v) => {
-                            socket.send_to(&v.contents, v.destination)?;
-                        }
-
-                        Output::Event(v) => {
-                            if v == Event::IceConnectionStateChange(
-                                IceConnectionState::Disconnected,
-                            ) {
-                                return Ok(());
-                            }
-                        }
-                    };
-                };
-
-                let timeout = timeout - Instant::now();
-
-                if timeout.is_zero() {
-                    client.rtc.handle_input(Input::Timeout(Instant::now()))?;
-                    continue;
-                }
-
-                socket.set_read_timeout(Some(timeout))?;
-                buf.resize(2000, 0);
-
-                let input = match socket.recv_from(&mut buf) {
-                    Ok((n, source)) => {
-                        buf.truncate(n);
-                        Input::Receive(
-                            Instant::now(),
-                            Receive {
-                                proto: Protocol::Udp,
-                                source,
-                                destination: socket.local_addr().unwrap(),
-                                contents: buf.as_slice().try_into()?,
-                            },
-                        )
-                    }
-
-                    Err(e) => match e.kind() {
-                        ErrorKind::WouldBlock | ErrorKind::TimedOut => {
-                            Input::Timeout(Instant::now())
-                        }
-                        _ => return Err(e.into()),
-                    },
-                };
-
-                client.rtc.handle_input(input)?;
+                poll_client(&mut client.rtc, &socket, &mut buf)?;
             }
         }
     }
@@ -122,4 +71,55 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
             warn!("Room does not exist : {:?}", room_id);
         };
     };
+}
+
+fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<()> {
+    let timeout = loop {
+        match rtc.poll_output()? {
+            Output::Timeout(v) => break v,
+
+            Output::Transmit(v) => {
+                socket.send_to(&v.contents, v.destination)?;
+            }
+
+            Output::Event(v) => {
+                if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
+                    return Ok(());
+                }
+            }
+        };
+    };
+
+    let timeout = timeout - Instant::now();
+
+    if timeout.is_zero() {
+        rtc.handle_input(Input::Timeout(Instant::now()))?;
+        return Ok(());
+    }
+
+    socket.set_read_timeout(Some(timeout))?;
+    buf.resize(2000, 0);
+
+    let input = match socket.recv_from(buf) {
+        Ok((n, source)) => {
+            buf.truncate(n);
+            Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination: socket.local_addr().unwrap(),
+                    contents: buf.as_slice().try_into()?,
+                },
+            )
+        }
+
+        Err(e) => match e.kind() {
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => Input::Timeout(Instant::now()),
+            _ => return Err(e.into()),
+        },
+    };
+
+    rtc.handle_input(input)?;
+    Ok(())
 }
