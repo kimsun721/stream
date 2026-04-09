@@ -27,59 +27,66 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let mut buf = Vec::new();
 
-    todo!("poll output and UDP recv loop");
     loop {
         register_client(&rx, &rooms_arc);
 
-        let rooms = rooms_arc.lock().unwrap();
+        let mut rooms = rooms_arc.lock().unwrap();
 
-        let timeout = match rtc.poll_output()? {
-            Output::Timeout(v) => v,
+        for (room_id, room) in rooms.iter_mut() {
+            for client in room.clients.iter_mut() {
+                let timeout = loop {
+                    match client.rtc.poll_output()? {
+                        Output::Timeout(v) => break v,
 
-            Output::Transmit(v) => {
-                socket.send_to(&v.contents, v.destination)?;
-                continue;
-            }
+                        Output::Transmit(v) => {
+                            socket.send_to(&v.contents, v.destination)?;
+                        }
 
-            Output::Event(v) => {
-                if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
-                    return Ok(());
+                        Output::Event(v) => {
+                            if v == Event::IceConnectionStateChange(
+                                IceConnectionState::Disconnected,
+                            ) {
+                                return Ok(());
+                            }
+                        }
+                    };
+                };
+
+                let timeout = timeout - Instant::now();
+
+                if timeout.is_zero() {
+                    client.rtc.handle_input(Input::Timeout(Instant::now()))?;
+                    continue;
                 }
-                continue;
-            }
-        };
 
-        let timeout = timeout - Instant::now();
+                socket.set_read_timeout(Some(timeout))?;
+                buf.resize(2000, 0);
 
-        if timeout.is_zero() {
-            rtc.handle_input(Input::Timeout(Instant::now()))?;
-            continue;
-        }
+                let input = match socket.recv_from(&mut buf) {
+                    Ok((n, source)) => {
+                        buf.truncate(n);
+                        Input::Receive(
+                            Instant::now(),
+                            Receive {
+                                proto: Protocol::Udp,
+                                source,
+                                destination: socket.local_addr().unwrap(),
+                                contents: buf.as_slice().try_into()?,
+                            },
+                        )
+                    }
 
-        socket.set_read_timeout(Some(timeout))?;
-        buf.resize(2000, 0);
-
-        let input = match socket.recv_from(&mut buf) {
-            Ok((n, source)) => {
-                buf.truncate(n);
-                Input::Receive(
-                    Instant::now(),
-                    Receive {
-                        proto: Protocol::Udp,
-                        source,
-                        destination: socket.local_addr().unwrap(),
-                        contents: buf.as_slice().try_into()?,
+                    Err(e) => match e.kind() {
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut => {
+                            Input::Timeout(Instant::now())
+                        }
+                        _ => return Err(e.into()),
                     },
-                )
+                };
+
+                client.rtc.handle_input(input)?;
             }
-
-            Err(e) => match e.kind() {
-                ErrorKind::WouldBlock | ErrorKind::TimedOut => Input::Timeout(Instant::now()),
-                _ => return Err(e.into()),
-            },
-        };
-
-        rtc.handle_input(input)?;
+        }
     }
 }
 
