@@ -33,7 +33,7 @@ pub struct Client {
     chosen_rid: Option<Rid>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClientId(u64);
 
 #[derive(Debug)]

@@ -32,8 +32,16 @@ pub fn run(
         let mut rooms = rooms_arc.lock().unwrap();
 
         for (_, room) in rooms.iter_mut() {
-            for client in room.clients.iter_mut() {
-                poll_client(&mut client.rtc, &socket, &mut buf)?;
+            let mut to_remove = Vec::new();
+
+            for (idx, client) in room.clients.iter_mut().enumerate() {
+                if poll_client(&mut client.rtc, &socket, &mut buf)? {
+                    to_remove.push(idx);
+                }
+            }
+
+            for idx in to_remove.iter().rev() {
+                room.clients.remove(*idx);
             }
         }
     }
@@ -73,7 +81,7 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
     };
 }
 
-fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<()> {
+fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<bool> {
     let timeout = loop {
         match rtc.poll_output()? {
             Output::Timeout(v) => break v,
@@ -84,7 +92,8 @@ fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::
 
             Output::Event(v) => {
                 if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
-                    return Ok(());
+                    rtc.disconnect();
+                    return Ok(false);
                 }
             }
         };
@@ -94,7 +103,7 @@ fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::
 
     if timeout.is_zero() {
         rtc.handle_input(Input::Timeout(Instant::now()))?;
-        return Ok(());
+        return Ok(true);
     }
 
     socket.set_read_timeout(Some(timeout))?;
@@ -121,5 +130,5 @@ fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::
     };
 
     rtc.handle_input(input)?;
-    Ok(())
+    Ok(true)
 }
