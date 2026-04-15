@@ -98,3 +98,8 @@ impl Client {
         }
     }
 }
+
+pub enum PollResult {
+    Timeout(Instant),
+    Disconnected,
+}

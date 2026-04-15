@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, UdpSocket};
+use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
 use str0m::{
@@ -7,7 +8,7 @@ use str0m::{
 };
 use tracing::warn;
 
-use crate::types::{Client, ClientRole, RoomId, RoomState, Rooms};
+use crate::types::{Client, ClientRole, PollResult, RoomId, RoomState, Rooms};
 
 use crate::utils;
 
@@ -30,13 +31,16 @@ pub fn run(
         register_client(&rx, &rooms_arc);
 
         let mut rooms = rooms_arc.lock().unwrap();
+        let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for (_, room) in rooms.iter_mut() {
             let mut to_remove = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                if poll_client(&mut client.rtc, &socket, &mut buf)? {
-                    to_remove.push(idx);
+                let t = poll_client(&mut client.rtc, &socket, &mut buf)?;
+                match t {
+                    PollResult::Timeout(v) => timeout = timeout.min(v),
+                    PollResult::Disconnected => to_remove.push(idx),
                 }
             }
 
@@ -44,6 +48,12 @@ pub fn run(
                 room.clients.remove(*idx);
             }
         }
+
+        let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
+
+        socket
+            .set_read_timeout(Some(timeout_duration))
+            .expect("setting socket read timeout");
     }
 }
 
@@ -81,7 +91,7 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
     };
 }
 
-fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<bool> {
+fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<PollResult> {
     let timeout = loop {
         match rtc.poll_output()? {
             Output::Timeout(v) => break v,
@@ -93,42 +103,37 @@ fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::
             Output::Event(v) => {
                 if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
                     rtc.disconnect();
-                    return Ok(false);
+                    return Ok(PollResult::Disconnected);
                 }
             }
         };
     };
 
-    let timeout = timeout - Instant::now();
+    Ok(PollResult::Timeout(timeout))
+}
 
-    if timeout.is_zero() {
-        rtc.handle_input(Input::Timeout(Instant::now()))?;
-        return Ok(true);
-    }
-
-    socket.set_read_timeout(Some(timeout))?;
-    buf.resize(2000, 0);
-
+fn read_socket_input<'a>(
+    socket: &UdpSocket,
+    buf: &'a mut Vec<u8>,
+) -> anyhow::Result<Option<Input<'a>>> {
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
             buf.truncate(n);
-            Input::Receive(
+            Some(Input::Receive(
                 Instant::now(),
                 Receive {
                     proto: Protocol::Udp,
                     source,
-                    destination: socket.local_addr().unwrap(),
+                    destination: socket.local_addr()?,
                     contents: buf.as_slice().try_into()?,
                 },
-            )
+            ))
         }
 
         Err(e) => match e.kind() {
-            ErrorKind::WouldBlock | ErrorKind::TimedOut => Input::Timeout(Instant::now()),
+            ErrorKind::WouldBlock | ErrorKind::TimedOut => None,
             _ => return Err(e.into()),
         },
     };
-
-    rtc.handle_input(input)?;
-    Ok(true)
+    Ok(input)
 }
