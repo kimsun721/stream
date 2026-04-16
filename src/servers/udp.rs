@@ -25,7 +25,7 @@ pub fn run(
     socket: UdpSocket,
     rooms_arc: Rooms,
 ) -> anyhow::Result<()> {
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: Vec<u8> = vec![0; 2000];
 
     loop {
         register_client(&rx, &rooms_arc);
@@ -37,7 +37,7 @@ pub fn run(
             let mut to_remove = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                let t = poll_client(&mut client.rtc, &socket, &mut buf)?;
+                let t = poll_client(&mut client.rtc, &socket)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
@@ -107,7 +107,7 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
     };
 }
 
-fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<PollResult> {
+fn poll_client(rtc: &mut Rtc, socket: &UdpSocket) -> anyhow::Result<PollResult> {
     let timeout = loop {
         match rtc.poll_output()? {
             Output::Timeout(v) => break v,
@@ -132,6 +132,7 @@ fn read_socket_input<'a>(
     socket: &UdpSocket,
     buf: &'a mut Vec<u8>,
 ) -> anyhow::Result<Option<Input<'a>>> {
+    buf.resize(2000, 0);
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
             buf.truncate(n);
