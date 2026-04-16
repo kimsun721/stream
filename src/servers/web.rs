@@ -1,16 +1,18 @@
 use std::{net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
+use anyhow::Ok;
 use axum::{
-    Json, Router,
+    Error, Json, Router,
     extract::{Path, State},
     http::StatusCode,
+    response::Result,
     routing,
 };
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
 use serde_json::Value;
 use str0m::{Candidate, Rtc, change::SdpOffer};
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinError};
 use tower_http::cors::CorsLayer;
 
 use crate::types::{ClientRole, RoomId, RoomState, Rooms};
@@ -35,27 +37,34 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>, rooms: Rooms) {
-    let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem")
-        .await
-        .expect("load pem files");
+pub async fn run(
+    addr: SocketAddr,
+    tx: SyncSender<(Rtc, ClientRole, RoomId)>,
+    rooms: Rooms,
+) -> anyhow::Result<()> {
+    let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
 
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .layer(CorsLayer::permissive())
         .with_state(SdpState { addr, tx });
 
-    let https_server = tokio::spawn(async move {
-        axum_server::bind_rustls("0.0.0.0:8080".parse::<SocketAddr>().unwrap(), config)
-            .serve(https_api.into_make_service())
-            .await
-            .expect("bind to 0.0.0.0:8080");
-    });
-
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .with_state(ApiState { rooms });
+
+    let https_server = tokio::spawn(async move {
+        axum_server::bind_rustls(
+            "0.0.0.0:8080"
+                .parse::<SocketAddr>()
+                .expect("bind to 0.0.0.0:8080"),
+            config,
+        )
+        .serve(https_api.into_make_service())
+        .await
+        .expect("start to 0.0.0.0:8080");
+    });
 
     let http_server = tokio::spawn(async move {
         axum::serve(
@@ -65,10 +74,12 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<(Rtc, ClientRole, RoomId)>, ro
             http_api,
         )
         .await
-        .unwrap();
+        .expect("start to 0.0.0.0:8443");
     });
 
     let _ = tokio::join!(https_server, http_server);
+
+    Ok(())
 }
 
 async fn create_room(Path(room_id): Path<u64>) -> StatusCode {

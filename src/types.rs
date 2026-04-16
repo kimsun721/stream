@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Instant,
 };
 
@@ -12,16 +15,16 @@ use str0m::{
     media::{MediaKind, Mid, Rid},
 };
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub enum ClientRole {
     Streamer,
-    ClientRole,
+    Viewer,
 }
 
 #[derive(Debug)]
 pub struct Client {
-    id: ClientId,
-    rtc: Rtc,
+    pub id: ClientId,
+    pub rtc: Rtc,
     pub role: ClientRole,
     pending: Option<SdpPendingOffer>,
     cid: Option<ChannelId>,
@@ -30,14 +33,17 @@ pub struct Client {
     chosen_rid: Option<Rid>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClientId(u64);
+
+#[derive(Debug)]
 pub struct RoomId(pub u64);
 
 #[derive(Deserialize, Debug)]
 pub enum RoomState {
-    Public,
-    Private,
+    IDLE,
+    PREVIEW,
+    LIVE,
 }
 
 #[derive(Debug)]
@@ -73,4 +79,27 @@ enum TrackOutState {
     ToOpen,
     Negotiating(Mid),
     Open(Mid),
+}
+
+impl Client {
+    pub fn new(rtc: Rtc, role: ClientRole) -> Client {
+        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+
+        Client {
+            id: ClientId(next_id),
+            role,
+            rtc,
+            pending: None,
+            cid: None,
+            tracks_in: vec![],
+            tracks_out: vec![],
+            chosen_rid: None,
+        }
+    }
+}
+
+pub enum PollResult {
+    Timeout(Instant),
+    Disconnected,
 }

@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
-    net::UdpSocket,
     sync::{Arc, Mutex, mpsc},
 };
 
 use str0m::{Rtc, crypto::from_feature_flags};
 
 use crate::types::{ClientRole, RoomId, Rooms};
+use ::tracing::error;
 
 mod servers;
 mod types;
@@ -18,15 +18,20 @@ async fn main() {
 
     from_feature_flags().install_process_default();
 
-    let host_addr = utils::addr::select_host_address();
-    let socket = UdpSocket::bind(format!("{host_addr}:0")).expect("binding a random UDP port");
-    let addr = socket.local_addr().expect("a local socket address");
+    let (addr, socket) = servers::udp::bind_udp_socket();
+
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+    let rooms_for_sfu = rooms.clone();
+
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
     std::thread::spawn(move || {
-        servers::sfu::run(rx, socket).unwrap();
+        if let Err(e) = servers::udp::run(rx, socket, rooms_for_sfu) {
+            error!("udp error : {}", e);
+        };
     });
 
-    servers::web::run(addr, tx, rooms).await;
+    if let Err(e) = servers::web::run(addr, tx, rooms).await {
+        error!("web server erorr : {}", e);
+    };
 }
