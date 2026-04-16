@@ -6,7 +6,7 @@ use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::types::{Client, ClientRole, PollResult, RoomId, RoomState, Rooms};
 
@@ -49,11 +49,27 @@ pub fn run(
             }
         }
 
+        drop(rooms);
+
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
 
         socket
             .set_read_timeout(Some(timeout_duration))
             .expect("setting socket read timeout");
+
+        if let Ok(Some(input)) = read_socket_input(&socket, &mut buf) {
+            let mut rooms = rooms_arc.lock().unwrap();
+            let client = rooms
+                .iter_mut()
+                .flat_map(|(_, room)| room.clients.iter_mut())
+                .find(|c| c.rtc.accepts(&input));
+
+            if let Some(client) = client {
+                client.handle_input(input);
+            } else {
+                debug!("No client accepts UDP input");
+            };
+        };
     }
 }
 
@@ -70,7 +86,7 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
                         .iter()
                         .any(|c| matches!(c.role, ClientRole::Streamer))
                     {
-                        warn!("Streamer already connected in room : {:?}", &room);
+                        warn!("Streamer already connected in room {:?}", &room);
                     } else {
                         room.streamer_id = Some(client.id);
                         room.clients.push(client);
@@ -136,4 +152,16 @@ fn read_socket_input<'a>(
         },
     };
     Ok(input)
+}
+
+impl Client {
+    fn handle_input(&mut self, input: Input) {
+        if !self.rtc.is_alive() {
+            return;
+        }
+        if let Err(e) = self.rtc.handle_input(input) {
+            warn!("Client ({:?}) disconnected: {:?}", self.id, e);
+            self.rtc.disconnect();
+        }
+    }
 }
