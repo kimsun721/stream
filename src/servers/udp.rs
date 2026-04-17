@@ -1,14 +1,18 @@
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
+use str0m::media::{MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
 };
 use tracing::{debug, warn};
 
-use crate::types::{Client, ClientRole, PollResult, RoomId, RoomState, Rooms};
+use crate::types::{
+    Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry,
+};
 
 use crate::utils;
 
@@ -37,7 +41,7 @@ pub fn run(
             let mut to_remove = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                let t = poll_client(&mut client.rtc, &socket, &mut buf)?;
+                let t = client.poll_output(&socket, &mut buf)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
@@ -107,27 +111,6 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
     };
 }
 
-fn poll_client(rtc: &mut Rtc, socket: &UdpSocket, buf: &mut Vec<u8>) -> anyhow::Result<PollResult> {
-    let timeout = loop {
-        match rtc.poll_output()? {
-            Output::Timeout(v) => break v,
-
-            Output::Transmit(v) => {
-                socket.send_to(&v.contents, v.destination)?;
-            }
-
-            Output::Event(v) => {
-                if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
-                    rtc.disconnect();
-                    return Ok(PollResult::Disconnected);
-                }
-            }
-        };
-    };
-
-    Ok(PollResult::Timeout(timeout))
-}
-
 fn read_socket_input<'a>(
     socket: &UdpSocket,
     buf: &'a mut Vec<u8>,
@@ -164,4 +147,52 @@ impl Client {
             self.rtc.disconnect();
         }
     }
+
+    fn poll_output(
+        self: &mut Client,
+        socket: &UdpSocket,
+        buf: &mut Vec<u8>,
+    ) -> anyhow::Result<PollResult> {
+        let timeout = loop {
+            match self.rtc.poll_output()? {
+                Output::Timeout(v) => break v,
+                Output::Transmit(v) => {
+                    socket.send_to(&v.contents, v.destination)?;
+                }
+
+                Output::Event(e) => match e {
+                    Event::IceConnectionStateChange(v) => {
+                        if v == IceConnectionState::Disconnected {
+                            self.rtc.disconnect();
+                            return Ok(PollResult::Disconnected);
+                        }
+                    }
+                    Event::MediaAdded(m) => {
+                        self.handle_media_added(m.mid, m.kind);
+                    }
+                    Event::MediaData(data) => {
+                        self.handle_media_data(data);
+                    }
+                    _ => {}
+                },
+            };
+        };
+
+        Ok(PollResult::Timeout(timeout))
+    }
+
+    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) {
+        let track_in = TrackInEntry {
+            id: Arc::new(TrackIn {
+                origin: self.id,
+                mid,
+                kind,
+            }),
+            last_keyframe_request: None,
+        };
+
+        self.tracks_in.push(track_in);
+    }
+
+    fn handle_media_data(&mut self, data: MediaData) {}
 }

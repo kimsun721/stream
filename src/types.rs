@@ -28,7 +28,7 @@ pub struct Client {
     pub role: ClientRole,
     pending: Option<SdpPendingOffer>,
     cid: Option<ChannelId>,
-    tracks_in: Vec<TrackInEntry>,
+    pub tracks_in: Vec<TrackInEntry>,
     tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 }
@@ -56,16 +56,16 @@ pub struct Room {
 pub type Rooms = Arc<Mutex<HashMap<u64, Room>>>;
 
 #[derive(Debug)]
-struct TrackIn {
-    origin: ClientId,
-    mid: Mid,
-    kind: MediaKind,
+pub struct TrackIn {
+    pub origin: ClientId,
+    pub mid: Mid,
+    pub kind: MediaKind,
 }
 
 #[derive(Debug)]
-struct TrackInEntry {
-    id: Arc<TrackIn>,
-    last_keyframe_request: Option<Instant>,
+pub struct TrackInEntry {
+    pub id: Arc<TrackIn>,
+    pub last_keyframe_request: Option<Instant>,
 }
 
 #[derive(Debug)]
