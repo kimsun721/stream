@@ -168,7 +168,9 @@ impl Client {
                         }
                     }
                     Event::MediaAdded(m) => {
-                        self.handle_media_added(m.mid, m.kind);
+                        if self.role == ClientRole::Streamer {
+                            self.handle_media_added(m.mid, m.kind);
+                        }
                     }
                     Event::MediaData(data) => {
                         self.handle_media_data(data);

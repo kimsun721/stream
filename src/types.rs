@@ -15,7 +15,7 @@ use str0m::{
     media::{MediaKind, Mid, Rid},
 };
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
     Streamer,
     Viewer,
