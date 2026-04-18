@@ -1,9 +1,9 @@
 use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
-use str0m::media::{MediaData, MediaKind, Mid};
+use str0m::media::{MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
@@ -11,7 +11,8 @@ use str0m::{
 use tracing::{debug, warn};
 
 use crate::types::{
-    Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry,
+    Client, ClientId, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry,
+    TrackOut, TrackOutState,
 };
 
 use crate::utils;
@@ -39,12 +40,26 @@ pub fn run(
 
         for (_, room) in rooms.iter_mut() {
             let mut to_remove = Vec::new();
+            let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                let t = client.poll_output(&socket, &mut buf)?;
+                let t = client.poll_output(&socket, &mut new_tracks)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
+                }
+            }
+
+            for track in &new_tracks {
+                for client in room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer)
+                {
+                    client.tracks_out.push(TrackOut {
+                        track_in: Arc::downgrade(&track),
+                        state: TrackOutState::ToOpen,
+                    });
                 }
             }
 
@@ -151,7 +166,7 @@ impl Client {
     fn poll_output(
         self: &mut Client,
         socket: &UdpSocket,
-        buf: &mut Vec<u8>,
+        new_tracks: &mut Vec<Arc<TrackIn>>,
     ) -> anyhow::Result<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -169,7 +184,8 @@ impl Client {
                     }
                     Event::MediaAdded(m) => {
                         if self.role == ClientRole::Streamer {
-                            self.handle_media_added(m.mid, m.kind);
+                            let track_in = self.handle_media_added(m.mid, m.kind);
+                            new_tracks.push(track_in);
                         }
                     }
                     Event::MediaData(data) => {
@@ -183,17 +199,20 @@ impl Client {
         Ok(PollResult::Timeout(timeout))
     }
 
-    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) {
-        let track_in = TrackInEntry {
-            id: Arc::new(TrackIn {
-                origin: self.id,
-                mid,
-                kind,
-            }),
+    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Arc<TrackIn> {
+        let track_in = Arc::new(TrackIn {
+            origin: self.id,
+            mid,
+            kind,
+        });
+
+        let track_in_entry = TrackInEntry {
+            id: track_in.clone(),
             last_keyframe_request: None,
         };
 
-        self.tracks_in.push(track_in);
+        self.tracks_in.push(track_in_entry);
+        track_in
     }
 
     fn handle_media_data(&mut self, data: MediaData) {}

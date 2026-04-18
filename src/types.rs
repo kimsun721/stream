@@ -12,7 +12,7 @@ use str0m::{
     Rtc,
     change::SdpPendingOffer,
     channel::ChannelId,
-    media::{MediaKind, Mid, Rid},
+    media::{MediaAdded, MediaKind, Mid, Rid},
 };
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
@@ -29,7 +29,7 @@ pub struct Client {
     pending: Option<SdpPendingOffer>,
     cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
-    tracks_out: Vec<TrackOut>,
+    pub tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 }
 
@@ -69,13 +69,13 @@ pub struct TrackInEntry {
 }
 
 #[derive(Debug)]
-struct TrackOut {
-    track_in: Weak<TrackIn>,
-    state: TrackOutState,
+pub struct TrackOut {
+    pub track_in: Weak<TrackIn>,
+    pub state: TrackOutState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrackOutState {
+pub enum TrackOutState {
     ToOpen,
     Negotiating(Mid),
     Open(Mid),
