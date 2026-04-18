@@ -12,10 +12,10 @@ use str0m::{
     Rtc,
     change::SdpPendingOffer,
     channel::ChannelId,
-    media::{MediaKind, Mid, Rid},
+    media::{MediaAdded, MediaKind, Mid, Rid},
 };
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
     Streamer,
     Viewer,
@@ -28,8 +28,8 @@ pub struct Client {
     pub role: ClientRole,
     pending: Option<SdpPendingOffer>,
     cid: Option<ChannelId>,
-    tracks_in: Vec<TrackInEntry>,
-    tracks_out: Vec<TrackOut>,
+    pub tracks_in: Vec<TrackInEntry>,
+    pub tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 }
 
@@ -56,26 +56,26 @@ pub struct Room {
 pub type Rooms = Arc<Mutex<HashMap<u64, Room>>>;
 
 #[derive(Debug)]
-struct TrackIn {
-    origin: ClientId,
-    mid: Mid,
-    kind: MediaKind,
+pub struct TrackIn {
+    pub origin: ClientId,
+    pub mid: Mid,
+    pub kind: MediaKind,
 }
 
 #[derive(Debug)]
-struct TrackInEntry {
-    id: Arc<TrackIn>,
-    last_keyframe_request: Option<Instant>,
+pub struct TrackInEntry {
+    pub id: Arc<TrackIn>,
+    pub last_keyframe_request: Option<Instant>,
 }
 
 #[derive(Debug)]
-struct TrackOut {
-    track_in: Weak<TrackIn>,
-    state: TrackOutState,
+pub struct TrackOut {
+    pub track_in: Weak<TrackIn>,
+    pub state: TrackOutState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TrackOutState {
+pub enum TrackOutState {
     ToOpen,
     Negotiating(Mid),
     Open(Mid),

@@ -1,14 +1,19 @@
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
+use str0m::media::{MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
 };
 use tracing::{debug, warn};
 
-use crate::types::{Client, ClientRole, PollResult, RoomId, RoomState, Rooms};
+use crate::types::{
+    Client, ClientId, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry,
+    TrackOut, TrackOutState,
+};
 
 use crate::utils;
 
@@ -35,12 +40,26 @@ pub fn run(
 
         for (_, room) in rooms.iter_mut() {
             let mut to_remove = Vec::new();
+            let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                let t = poll_client(&mut client.rtc, &socket)?;
+                let t = client.poll_output(&socket, &mut new_tracks)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
+                }
+            }
+
+            for track in &new_tracks {
+                for client in room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer)
+                {
+                    client.tracks_out.push(TrackOut {
+                        track_in: Arc::downgrade(&track),
+                        state: TrackOutState::ToOpen,
+                    });
                 }
             }
 
@@ -76,7 +95,8 @@ pub fn run(
 fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) {
     if let Ok((rtc, role, room_id)) = rx.try_recv() {
         let mut rooms = rooms_arc.lock().unwrap();
-        let client = Client::new(rtc, role);
+
+        let mut client = Client::new(rtc, role);
 
         if let Some(room) = rooms.get_mut(&room_id.0) {
             match role {
@@ -97,6 +117,20 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
                         warn!("Client connected to an {:?} room", room.state);
                     }
                     RoomState::LIVE => {
+                        let tracks: Vec<Weak<TrackIn>> = room
+                            .clients
+                            .iter()
+                            .filter(|c| c.role == ClientRole::Streamer)
+                            .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
+                            .collect();
+
+                        for track_in in tracks {
+                            client.tracks_out.push(TrackOut {
+                                track_in,
+                                state: TrackOutState::ToOpen,
+                            });
+                        }
+
                         room.clients.push(client);
                     }
                 },
@@ -105,27 +139,6 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
             warn!("Room does not exist : {:?}", room_id);
         };
     };
-}
-
-fn poll_client(rtc: &mut Rtc, socket: &UdpSocket) -> anyhow::Result<PollResult> {
-    let timeout = loop {
-        match rtc.poll_output()? {
-            Output::Timeout(v) => break v,
-
-            Output::Transmit(v) => {
-                socket.send_to(&v.contents, v.destination)?;
-            }
-
-            Output::Event(v) => {
-                if v == Event::IceConnectionStateChange(IceConnectionState::Disconnected) {
-                    rtc.disconnect();
-                    return Ok(PollResult::Disconnected);
-                }
-            }
-        };
-    };
-
-    Ok(PollResult::Timeout(timeout))
 }
 
 fn read_socket_input<'a>(
@@ -165,4 +178,58 @@ impl Client {
             self.rtc.disconnect();
         }
     }
+
+    fn poll_output(
+        self: &mut Client,
+        socket: &UdpSocket,
+        new_tracks: &mut Vec<Arc<TrackIn>>,
+    ) -> anyhow::Result<PollResult> {
+        let timeout = loop {
+            match self.rtc.poll_output()? {
+                Output::Timeout(v) => break v,
+                Output::Transmit(v) => {
+                    socket.send_to(&v.contents, v.destination)?;
+                }
+
+                Output::Event(e) => match e {
+                    Event::IceConnectionStateChange(v) => {
+                        if v == IceConnectionState::Disconnected {
+                            self.rtc.disconnect();
+                            return Ok(PollResult::Disconnected);
+                        }
+                    }
+                    Event::MediaAdded(m) => {
+                        if self.role == ClientRole::Streamer {
+                            let track_in = self.handle_media_added(m.mid, m.kind);
+                            new_tracks.push(track_in);
+                        }
+                    }
+                    Event::MediaData(data) => {
+                        self.handle_media_data(data);
+                    }
+                    _ => {}
+                },
+            };
+        };
+
+        Ok(PollResult::Timeout(timeout))
+    }
+
+    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Arc<TrackIn> {
+        let track_in = Arc::new(TrackIn {
+            origin: self.id,
+            mid,
+            kind,
+        });
+
+        let track_in_entry = TrackInEntry {
+            id: track_in.clone(),
+            last_keyframe_request: None,
+        };
+
+        self.tracks_in.push(track_in_entry);
+        track_in
+    }
+
+    fn handle_media_data(&mut self, data: MediaData) {}
 }
