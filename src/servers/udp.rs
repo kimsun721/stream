@@ -30,7 +30,7 @@ pub fn run(
     socket: UdpSocket,
     rooms_arc: Rooms,
 ) -> anyhow::Result<()> {
-    let mut buf: Vec<u8> = Vec::new();
+    let mut buf: Vec<u8> = vec![0; 2000];
 
     loop {
         register_client(&rx, &rooms_arc);
@@ -145,6 +145,7 @@ fn read_socket_input<'a>(
     socket: &UdpSocket,
     buf: &'a mut Vec<u8>,
 ) -> anyhow::Result<Option<Input<'a>>> {
+    buf.resize(2000, 0);
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
             buf.truncate(n);
