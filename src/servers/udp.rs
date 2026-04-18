@@ -207,6 +207,7 @@ impl Client {
                     Event::MediaData(data) => {
                         self.handle_media_data(data);
                     }
+                    Event::ChannelOpen(cid, label) => self.cid = Some(cid),
                     _ => {}
                 },
             };

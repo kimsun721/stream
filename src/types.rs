@@ -27,7 +27,7 @@ pub struct Client {
     pub rtc: Rtc,
     pub role: ClientRole,
     pending: Option<SdpPendingOffer>,
-    cid: Option<ChannelId>,
+    pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
