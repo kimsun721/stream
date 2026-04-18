@@ -95,7 +95,8 @@ pub fn run(
 fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) {
     if let Ok((rtc, role, room_id)) = rx.try_recv() {
         let mut rooms = rooms_arc.lock().unwrap();
-        let client = Client::new(rtc, role);
+
+        let mut client = Client::new(rtc, role);
 
         if let Some(room) = rooms.get_mut(&room_id.0) {
             match role {
@@ -116,6 +117,20 @@ fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) 
                         warn!("Client connected to an {:?} room", room.state);
                     }
                     RoomState::LIVE => {
+                        let tracks: Vec<Weak<TrackIn>> = room
+                            .clients
+                            .iter()
+                            .filter(|c| c.role == ClientRole::Streamer)
+                            .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
+                            .collect();
+
+                        for track_in in tracks {
+                            client.tracks_out.push(TrackOut {
+                                track_in,
+                                state: TrackOutState::ToOpen,
+                            });
+                        }
+
                         room.clients.push(client);
                     }
                 },
