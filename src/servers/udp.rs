@@ -3,7 +3,9 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
-use str0m::media::{MediaAdded, MediaData, MediaKind, Mid};
+use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::channel::ChannelData;
+use str0m::media::{Direction, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
@@ -43,6 +45,43 @@ pub fn run(
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
+                let mut change = client.rtc.sdp_api();
+
+                for track_out in client.tracks_out.iter_mut() {
+                    if track_out.state == TrackOutState::ToOpen && client.cid.is_some() {
+                        if let Some(track_in) = track_out.track_in.upgrade() {
+                            let stream_id = track_in.origin.to_string();
+                            let mid = change.add_media(
+                                track_in.kind,
+                                Direction::RecvOnly,
+                                Some(stream_id),
+                                None,
+                                None,
+                            );
+
+                            track_out.state = TrackOutState::Negotiating(mid);
+                        }
+                    }
+                }
+
+                if !change.has_changes() {
+                    let Some((offer, pending)) = change.apply() else {
+                        warn!("add_media returned None");
+                        continue;
+                    };
+
+                    let Some(mut channel) = client.cid.and_then(|id| client.rtc.channel(id)) else {
+                        warn!("channel not found");
+                        continue;
+                    };
+
+                    let json = serde_json::to_string(&offer)?;
+
+                    channel.write(false, json.as_bytes())?;
+
+                    client.pending = Some(pending);
+                }
+
                 let t = client.poll_output(&socket, &mut new_tracks)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
@@ -207,6 +246,8 @@ impl Client {
                     Event::MediaData(data) => {
                         self.handle_media_data(data);
                     }
+                    Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
+                    Event::ChannelData(data) => self.handle_channel_data(data)?,
                     _ => {}
                 },
             };
@@ -232,4 +273,24 @@ impl Client {
     }
 
     fn handle_media_data(&mut self, data: MediaData) {}
+
+    fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
+        if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
+            self.handle_answer(answer)?;
+        }
+        Ok(())
+    }
+
+    fn handle_answer(&mut self, answer: SdpAnswer) -> anyhow::Result<()> {
+        if let Some(pending) = self.pending.take() {
+            self.rtc.sdp_api().accept_answer(pending, answer)?;
+
+            for track in &mut self.tracks_out {
+                if let TrackOutState::Negotiating(m) = track.state {
+                    track.state = TrackOutState::Open(m);
+                }
+            }
+        }
+        Ok(())
+    }
 }

@@ -15,6 +15,8 @@ use str0m::{
     media::{MediaAdded, MediaKind, Mid, Rid},
 };
 
+use derive_more::Display;
+
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
     Streamer,
@@ -26,14 +28,14 @@ pub struct Client {
     pub id: ClientId,
     pub rtc: Rtc,
     pub role: ClientRole,
-    pending: Option<SdpPendingOffer>,
-    cid: Option<ChannelId>,
+    pub pending: Option<SdpPendingOffer>,
+    pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     chosen_rid: Option<Rid>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Display)]
 pub struct ClientId(u64);
 
 #[derive(Debug)]
