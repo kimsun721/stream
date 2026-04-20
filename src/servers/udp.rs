@@ -127,11 +127,7 @@ pub fn run(
                 .iter_mut()
                 .find(|c| c.role == ClientRole::Streamer)
             {
-                for req in keyframe_requests {
-                    if let Some(mut writer) = streamer.rtc.writer(req.mid) {
-                        writer.request_keyframe(req.rid, req.kind)?;
-                    }
-                }
+                streamer.handle_keyframe_requests(keyframe_requests)?;
             };
         }
 
@@ -351,7 +347,16 @@ impl Client {
         Ok(())
     }
 
-    fn handle_keyframe_request(&mut self, request: KeyframeRequest) -> anyhow::Result<()> {
+    fn handle_keyframe_requests(
+        &mut self,
+        keyframe_requests: Vec<KeyframeRequest>,
+    ) -> anyhow::Result<()> {
+        for req in keyframe_requests {
+            if let Some(mut writer) = self.rtc.writer(req.mid) {
+                writer.request_keyframe(req.rid, req.kind)?;
+            }
+        }
+
         Ok(())
     }
 }
