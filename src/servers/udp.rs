@@ -282,15 +282,21 @@ impl Client {
 
     fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> anyhow::Result<()> {
         for data in datas {
-            if let None = self
-                .tracks_out
-                .iter()
-                .find(|t| t.state == TrackOutState::Open(data.mid))
-            {
+            let Some(mid) = self.tracks_out.iter().find_map(|t| {
+                let track_in = t.track_in.upgrade()?;
+                if track_in.mid != data.mid {
+                    return None;
+                }
+                if let TrackOutState::Open(viewer_mid) = t.state {
+                    Some(viewer_mid)
+                } else {
+                    None
+                }
+            }) else {
                 continue;
             };
 
-            let Some(writer) = self.rtc.writer(data.mid) else {
+            let Some(writer) = self.rtc.writer(mid) else {
                 continue;
             };
 
