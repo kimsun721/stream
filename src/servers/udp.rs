@@ -43,6 +43,7 @@ pub fn run(
         for (_, room) in rooms.iter_mut() {
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
+            let mut media_datas = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 let mut change = client.rtc.sdp_api();
@@ -82,7 +83,7 @@ pub fn run(
                     client.pending = Some(pending);
                 }
 
-                let t = client.poll_output(&socket, &mut new_tracks)?;
+                let t = client.poll_output(&socket, &mut new_tracks, &mut media_datas)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
@@ -104,6 +105,14 @@ pub fn run(
 
             for idx in to_remove.iter().rev() {
                 room.clients.remove(*idx);
+            }
+
+            for c in room
+                .clients
+                .iter_mut()
+                .filter(|c| c.role == ClientRole::Viewer)
+            {
+                c.handle_media_data(&media_datas);
             }
         }
 
@@ -222,6 +231,7 @@ impl Client {
         self: &mut Client,
         socket: &UdpSocket,
         new_tracks: &mut Vec<Arc<TrackIn>>,
+        media_datas: &mut Vec<MediaData>,
     ) -> anyhow::Result<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -243,9 +253,7 @@ impl Client {
                             new_tracks.push(track_in);
                         }
                     }
-                    Event::MediaData(data) => {
-                        self.handle_media_data(data);
-                    }
+                    Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(data)?,
                     _ => {}
@@ -272,7 +280,7 @@ impl Client {
         track_in
     }
 
-    fn handle_media_data(&mut self, data: MediaData) {}
+    fn handle_media_data(&mut self, datas: &Vec<MediaData>) {}
 
     fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
         if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
