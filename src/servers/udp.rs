@@ -3,7 +3,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
-use str0m::media::{MediaAdded, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
@@ -43,6 +43,41 @@ pub fn run(
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
+                let mut change = client.rtc.sdp_api();
+
+                for track_out in client.tracks_out.iter_mut() {
+                    if track_out.state == TrackOutState::ToOpen && client.cid.is_some() {
+                        if let Some(track_in) = track_out.track_in.upgrade() {
+                            let stream_id = track_in.origin.to_string();
+                            let mid = change.add_media(
+                                track_in.kind,
+                                Direction::RecvOnly,
+                                Some(stream_id),
+                                None,
+                                None,
+                            );
+
+                            track_out.state = TrackOutState::Negotiating(mid);
+                        }
+                    }
+                }
+
+                let Some((offer, pending)) = change.apply() else {
+                    warn!("add_media returned None");
+                    continue;
+                };
+
+                let Some(mut channel) = client.cid.and_then(|id| client.rtc.channel(id)) else {
+                    warn!("channel not found");
+                    continue;
+                };
+
+                let answer = serde_json::to_string(&offer)?;
+
+                channel.write(false, answer.as_bytes())?;
+
+                client.pending = Some(pending);
+
                 let t = client.poll_output(&socket, &mut new_tracks)?;
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
