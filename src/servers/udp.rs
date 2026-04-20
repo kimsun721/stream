@@ -62,6 +62,10 @@ pub fn run(
                     }
                 }
 
+                if !change.has_changes() {
+                    continue;
+                }
+
                 let Some((offer, pending)) = change.apply() else {
                     warn!("add_media returned None");
                     continue;
@@ -72,9 +76,9 @@ pub fn run(
                     continue;
                 };
 
-                let answer = serde_json::to_string(&offer)?;
+                let json = serde_json::to_string(&offer)?;
 
-                channel.write(false, answer.as_bytes())?;
+                channel.write(false, json.as_bytes())?;
 
                 client.pending = Some(pending);
 
@@ -242,7 +246,7 @@ impl Client {
                     Event::MediaData(data) => {
                         self.handle_media_data(data);
                     }
-                    Event::ChannelOpen(cid, label) => self.cid = Some(cid),
+                    Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     _ => {}
                 },
             };
