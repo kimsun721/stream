@@ -5,7 +5,7 @@ use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
 use str0m::change::{SdpAnswer, SdpOffer};
 use str0m::channel::ChannelData;
-use str0m::media::{Direction, MediaAdded, MediaData, MediaKind, Mid};
+use str0m::media::{Direction, KeyframeRequest, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
     net::{Protocol, Receive},
@@ -256,6 +256,8 @@ impl Client {
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(data)?,
+
+                    Event::KeyframeRequest(request) => self.handle_keyframe_request(request),
                     _ => {}
                 },
             };
@@ -328,4 +330,6 @@ impl Client {
         }
         Ok(())
     }
+
+    fn handle_keyframe_request(&mut self, request: KeyframeRequest) {}
 }
