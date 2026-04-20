@@ -3,6 +3,8 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use std::{io::ErrorKind, sync::mpsc::Receiver, time::Instant};
 
+use str0m::change::{SdpAnswer, SdpOffer};
+use str0m::channel::ChannelData;
 use str0m::media::{Direction, MediaAdded, MediaData, MediaKind, Mid};
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
@@ -247,6 +249,7 @@ impl Client {
                         self.handle_media_data(data);
                     }
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
+                    Event::ChannelData(data) => self.handle_channel_data(data)?,
                     _ => {}
                 },
             };
@@ -272,4 +275,24 @@ impl Client {
     }
 
     fn handle_media_data(&mut self, data: MediaData) {}
+
+    fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
+        if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
+            self.handle_answer(answer)?;
+        }
+        Ok(())
+    }
+
+    fn handle_answer(&mut self, answer: SdpAnswer) -> anyhow::Result<()> {
+        if let Some(pending) = self.pending.take() {
+            self.rtc.sdp_api().accept_answer(pending, answer)?;
+
+            for track in &mut self.tracks_out {
+                if let TrackOutState::Negotiating(m) = track.state {
+                    track.state = TrackOutState::Open(m);
+                }
+            }
+        }
+        Ok(())
+    }
 }
