@@ -65,24 +65,22 @@ pub fn run(
                 }
 
                 if !change.has_changes() {
-                    continue;
+                    let Some((offer, pending)) = change.apply() else {
+                        warn!("add_media returned None");
+                        continue;
+                    };
+
+                    let Some(mut channel) = client.cid.and_then(|id| client.rtc.channel(id)) else {
+                        warn!("channel not found");
+                        continue;
+                    };
+
+                    let json = serde_json::to_string(&offer)?;
+
+                    channel.write(false, json.as_bytes())?;
+
+                    client.pending = Some(pending);
                 }
-
-                let Some((offer, pending)) = change.apply() else {
-                    warn!("add_media returned None");
-                    continue;
-                };
-
-                let Some(mut channel) = client.cid.and_then(|id| client.rtc.channel(id)) else {
-                    warn!("channel not found");
-                    continue;
-                };
-
-                let json = serde_json::to_string(&offer)?;
-
-                channel.write(false, json.as_bytes())?;
-
-                client.pending = Some(pending);
 
                 let t = client.poll_output(&socket, &mut new_tracks)?;
                 match t {
