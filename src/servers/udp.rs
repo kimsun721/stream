@@ -112,7 +112,7 @@ pub fn run(
                 .iter_mut()
                 .filter(|c| c.role == ClientRole::Viewer)
             {
-                c.handle_media_data(&media_datas);
+                c.handle_media_datas(&media_datas)?;
             }
         }
 
@@ -280,7 +280,28 @@ impl Client {
         track_in
     }
 
-    fn handle_media_data(&mut self, datas: &Vec<MediaData>) {}
+    fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> anyhow::Result<()> {
+        for data in datas {
+            if let None = self
+                .tracks_out
+                .iter()
+                .find(|t| t.state == TrackOutState::Open(data.mid))
+            {
+                continue;
+            };
+
+            let Some(writer) = self.rtc.writer(data.mid) else {
+                continue;
+            };
+
+            let Some(pt) = writer.match_params(data.params) else {
+                continue;
+            };
+
+            writer.write(pt, data.network_time, data.time, data.data.clone())?;
+        }
+        Ok(())
+    }
 
     fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
         if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
