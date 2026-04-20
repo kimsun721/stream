@@ -44,6 +44,7 @@ pub fn run(
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
+            let mut keyframe_requests = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 let mut change = client.rtc.sdp_api();
@@ -83,7 +84,13 @@ pub fn run(
                     client.pending = Some(pending);
                 }
 
-                let t = client.poll_output(&socket, &mut new_tracks, &mut media_datas)?;
+                let t = client.poll_output(
+                    &socket,
+                    &mut new_tracks,
+                    &mut media_datas,
+                    &mut keyframe_requests,
+                )?;
+
                 match t {
                     PollResult::Timeout(v) => timeout = timeout.min(v),
                     PollResult::Disconnected => to_remove.push(idx),
@@ -114,6 +121,18 @@ pub fn run(
             {
                 c.handle_media_datas(&media_datas)?;
             }
+
+            if let Some(streamer) = room
+                .clients
+                .iter_mut()
+                .find(|c| c.role == ClientRole::Streamer)
+            {
+                for req in keyframe_requests {
+                    if let Some(mut writer) = streamer.rtc.writer(req.mid) {
+                        writer.request_keyframe(req.rid, req.kind)?;
+                    }
+                }
+            };
         }
 
         drop(rooms);
@@ -232,6 +251,7 @@ impl Client {
         socket: &UdpSocket,
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
     ) -> anyhow::Result<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -257,7 +277,7 @@ impl Client {
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(data)?,
 
-                    Event::KeyframeRequest(request) => self.handle_keyframe_request(request),
+                    Event::KeyframeRequest(request) => keyframe_requests.push(request),
                     _ => {}
                 },
             };
@@ -331,5 +351,7 @@ impl Client {
         Ok(())
     }
 
-    fn handle_keyframe_request(&mut self, request: KeyframeRequest) {}
+    fn handle_keyframe_request(&mut self, request: KeyframeRequest) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
