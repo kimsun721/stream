@@ -55,7 +55,7 @@ pub fn run(
                             let stream_id = track_in.origin.to_string();
                             let mid = change.add_media(
                                 track_in.kind,
-                                Direction::RecvOnly,
+                                Direction::SendOnly,
                                 Some(stream_id),
                                 None,
                                 None,
@@ -66,7 +66,7 @@ pub fn run(
                     }
                 }
 
-                if !change.has_changes() {
+                if change.has_changes() {
                     let Some((offer, pending)) = change.apply() else {
                         warn!("add_media returned None");
                         continue;

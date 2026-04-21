@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
+use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
 use anyhow::Ok;
 use axum::{
@@ -15,7 +15,7 @@ use str0m::{Candidate, Rtc, change::SdpOffer};
 use tokio::{net::TcpListener, task::JoinError};
 use tower_http::cors::CorsLayer;
 
-use crate::types::{ClientRole, RoomId, RoomState, Rooms};
+use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms};
 
 #[derive(Clone)]
 struct SdpState {
@@ -82,8 +82,18 @@ pub async fn run(
     Ok(())
 }
 
-async fn create_room(Path(room_id): Path<u64>) -> StatusCode {
-    StatusCode::CREATED
+async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
+    match state.rooms.lock().unwrap().entry(room_id) {
+        Entry::Occupied(_) => StatusCode::CONFLICT,
+        Entry::Vacant(e) => {
+            e.insert(Room {
+                streamer_id: None,
+                clients: vec![],
+                state: RoomState::IDLE,
+            });
+            StatusCode::CREATED
+        }
+    }
 }
 
 async fn get_room(Path(room_id): Path<u64>) -> StatusCode {
@@ -123,8 +133,6 @@ async fn sdp_offer(
         .sdp_api()
         .accept_offer(offer)
         .expect("offer to be accepted");
-
-    rtc.sdp_api().add_channel("sdp".to_string());
 
     tx.send((rtc, role, RoomId(room_id)))
         .expect("to send Rtc instance");
