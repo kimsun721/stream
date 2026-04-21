@@ -273,7 +273,20 @@ impl Client {
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(data)?,
 
-                    Event::KeyframeRequest(request) => keyframe_requests.push(request),
+                    Event::KeyframeRequest(request) => {
+                        if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
+                            if t.state == TrackOutState::Open(request.mid) {
+                                t.track_in.upgrade().map(|ti| ti.mid)
+                            } else {
+                                None
+                            }
+                        }) {
+                            keyframe_requests.push(KeyframeRequest {
+                                mid: streamer_mid,
+                                ..request
+                            });
+                        };
+                    }
                     _ => {}
                 },
             };
