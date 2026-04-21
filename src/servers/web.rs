@@ -134,8 +134,6 @@ async fn sdp_offer(
         .accept_offer(offer)
         .expect("offer to be accepted");
 
-    rtc.sdp_api().add_channel("sdp".to_string());
-
     tx.send((rtc, role, RoomId(room_id)))
         .expect("to send Rtc instance");
 
