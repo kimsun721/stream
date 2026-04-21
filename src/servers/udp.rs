@@ -358,7 +358,7 @@ impl Client {
                 {
                     let should_request = track_entry
                         .last_keyframe_request
-                        .map_or(true, |r| r.elapsed() >= Duration::from_secs(1));
+                        .map_or(true, |r| r.elapsed() >= Duration::from_millis(1000));
 
                     if should_request {
                         writer.request_keyframe(req.rid, req.kind)?;
