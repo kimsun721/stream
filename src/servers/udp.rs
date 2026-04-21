@@ -353,7 +353,18 @@ impl Client {
     ) -> anyhow::Result<()> {
         for req in keyframe_requests {
             if let Some(mut writer) = self.rtc.writer(req.mid) {
-                writer.request_keyframe(req.rid, req.kind)?;
+                if let Some(mut track_entry) =
+                    self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid)
+                {
+                    let should_request = track_entry
+                        .last_keyframe_request
+                        .map_or(true, |r| r.elapsed() >= Duration::from_millis(1000));
+
+                    if should_request {
+                        writer.request_keyframe(req.rid, req.kind)?;
+                        track_entry.last_keyframe_request = Some(Instant::now());
+                    };
+                };
             }
         }
 
