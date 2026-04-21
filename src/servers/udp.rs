@@ -66,7 +66,7 @@ pub fn run(
                     }
                 }
 
-                if !change.has_changes() {
+                if change.has_changes() {
                     let Some((offer, pending)) = change.apply() else {
                         warn!("add_media returned None");
                         continue;
