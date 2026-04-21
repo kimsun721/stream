@@ -55,7 +55,7 @@ pub fn run(
                             let stream_id = track_in.origin.to_string();
                             let mid = change.add_media(
                                 track_in.kind,
-                                Direction::RecvOnly,
+                                Direction::SendOnly,
                                 Some(stream_id),
                                 None,
                                 None,
