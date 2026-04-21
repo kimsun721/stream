@@ -356,10 +356,11 @@ impl Client {
                 if let Some(mut track_entry) =
                     self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid)
                 {
-                    if track_entry
+                    let should_request = track_entry
                         .last_keyframe_request
-                        .is_some_and(|r| r.elapsed() >= Duration::from_secs(1))
-                    {
+                        .map_or(true, |r| r.elapsed() >= Duration::from_secs(1));
+
+                    if should_request {
                         writer.request_keyframe(req.rid, req.kind)?;
                         track_entry.last_keyframe_request = Some(Instant::now());
                     };
