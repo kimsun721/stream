@@ -1,6 +1,5 @@
 use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
-use anyhow::Ok;
 use axum::{
     Error, Json, Router,
     extract::{Path, State},
@@ -9,8 +8,8 @@ use axum::{
     routing,
 };
 use axum_server::tls_rustls::RustlsConfig;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use str0m::{Candidate, Rtc, change::SdpOffer};
 use tokio::{net::TcpListener, task::JoinError};
 use tower_http::cors::CorsLayer;
@@ -98,11 +97,26 @@ async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) ->
     }
 }
 
-async fn get_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
+#[derive(Serialize)]
+struct GetRoomResponse {
+    views: usize,
+}
+
+async fn get_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<Json<GetRoomResponse>, StatusCode> {
     if let Some(room) = state.rooms.lock().unwrap().get(&room_id) {
-        return StatusCode::OK;
+        let views = room
+            .clients
+            .iter()
+            .filter(|c| c.role == ClientRole::Viewer)
+            .count();
+
+        let res = Json(GetRoomResponse { views });
+        return Ok(res);
     };
-    StatusCode::NOT_FOUND
+    Err(StatusCode::NOT_FOUND)
 }
 
 #[derive(Deserialize)]
