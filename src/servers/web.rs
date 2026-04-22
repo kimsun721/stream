@@ -52,6 +52,8 @@ pub async fn run(
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
+        .route("/rooms/{room_id}", routing::patch(update_room))
+        .route("/rooms/{room_id}", routing::delete(delete_room))
         .with_state(ApiState { rooms });
 
     let https_server = tokio::spawn(async move {
@@ -108,12 +110,25 @@ struct UpdateRoomState {
     state: RoomState,
 }
 
-async fn update_room(Path(room_id): Path<u64>, Json(payload): Json<UpdateRoomState>) -> StatusCode {
-    StatusCode::OK
+async fn update_room(
+    State(state): State<ApiState>,
+    Path(room_id): Path<u64>,
+    Json(payload): Json<UpdateRoomState>,
+) -> StatusCode {
+    if let Some(room) = state.rooms.lock().unwrap().get_mut(&room_id) {
+        room.state = payload.state;
+
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
-async fn delete_room(Path(room_id): Path<u64>) -> StatusCode {
-    StatusCode::OK
+async fn delete_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
+    match state.rooms.lock().unwrap().remove(&room_id) {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn sdp_offer(
