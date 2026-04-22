@@ -1,6 +1,5 @@
 use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
-use anyhow::Ok;
 use axum::{
     Error, Json, Router,
     extract::{Path, State},
@@ -9,8 +8,8 @@ use axum::{
     routing,
 };
 use axum_server::tls_rustls::RustlsConfig;
-use serde::Deserialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use str0m::{Candidate, Rtc, change::SdpOffer};
 use tokio::{net::TcpListener, task::JoinError};
 use tower_http::cors::CorsLayer;
@@ -52,6 +51,8 @@ pub async fn run(
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
+        .route("/rooms/{room_id}", routing::patch(update_room))
+        .route("/rooms/{room_id}", routing::delete(delete_room))
         .with_state(ApiState { rooms });
 
     let https_server = tokio::spawn(async move {
@@ -96,8 +97,26 @@ async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) ->
     }
 }
 
-async fn get_room(Path(room_id): Path<u64>) -> StatusCode {
-    StatusCode::OK
+#[derive(Serialize)]
+struct GetRoomResponse {
+    views: usize,
+}
+
+async fn get_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<Json<GetRoomResponse>, StatusCode> {
+    if let Some(room) = state.rooms.lock().unwrap().get(&room_id) {
+        let views = room
+            .clients
+            .iter()
+            .filter(|c| c.role == ClientRole::Viewer)
+            .count();
+
+        let res = Json(GetRoomResponse { views });
+        return Ok(res);
+    };
+    Err(StatusCode::NOT_FOUND)
 }
 
 #[derive(Deserialize)]
@@ -105,12 +124,25 @@ struct UpdateRoomState {
     state: RoomState,
 }
 
-async fn update_room(Path(room_id): Path<u64>, Json(payload): Json<UpdateRoomState>) -> StatusCode {
-    StatusCode::OK
+async fn update_room(
+    State(state): State<ApiState>,
+    Path(room_id): Path<u64>,
+    Json(payload): Json<UpdateRoomState>,
+) -> StatusCode {
+    if let Some(room) = state.rooms.lock().unwrap().get_mut(&room_id) {
+        room.state = payload.state;
+
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
+    }
 }
 
-async fn delete_room(Path(room_id): Path<u64>) -> StatusCode {
-    StatusCode::OK
+async fn delete_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
+    match state.rooms.lock().unwrap().remove(&room_id) {
+        Some(_) => StatusCode::OK,
+        None => StatusCode::NOT_FOUND,
+    }
 }
 
 async fn sdp_offer(
