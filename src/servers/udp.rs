@@ -349,9 +349,22 @@ impl Client {
     }
 
     fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
-        if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
+        if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&data.data) {
+            self.handle_offer(offer)?;
+        } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
             self.handle_answer(answer)?;
         }
+        Ok(())
+    }
+
+    fn handle_offer(&mut self, offer: SdpOffer) -> anyhow::Result<()> {
+        let answer = self.rtc.sdp_api().accept_offer(offer)?;
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&answer)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
         Ok(())
     }
 
