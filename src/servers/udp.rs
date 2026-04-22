@@ -152,6 +152,14 @@ pub fn run(
                 debug!("No client accepts UDP input");
             };
         };
+
+        let now = Instant::now();
+        let mut rooms = rooms_arc.lock().unwrap();
+        for (_, room) in rooms.iter_mut() {
+            for client in room.clients.iter_mut() {
+                client.handle_input(Input::Timeout(now));
+            }
+        }
     }
 }
 
