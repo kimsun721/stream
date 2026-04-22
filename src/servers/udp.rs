@@ -358,6 +358,13 @@ impl Client {
     }
 
     fn handle_offer(&mut self, offer: SdpOffer) -> anyhow::Result<()> {
+        let answer = self.rtc.sdp_api().accept_offer(offer)?;
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&answer)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
         Ok(())
     }
 
