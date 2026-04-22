@@ -96,8 +96,11 @@ async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) ->
     }
 }
 
-async fn get_room(Path(room_id): Path<u64>) -> StatusCode {
-    StatusCode::OK
+async fn get_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
+    if let Some(room) = state.rooms.lock().unwrap().get(&room_id) {
+        return StatusCode::OK;
+    };
+    StatusCode::NOT_FOUND
 }
 
 #[derive(Deserialize)]
