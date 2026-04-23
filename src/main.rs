@@ -9,6 +9,7 @@ use crate::types::{ClientRole, RoomId, Rooms};
 use ::tracing::error;
 
 mod servers;
+mod sfu;
 mod types;
 mod utils;
 
@@ -18,7 +19,7 @@ async fn main() {
 
     from_feature_flags().install_process_default();
 
-    let (addr, socket) = servers::udp::bind_udp_socket();
+    let (addr, socket) = sfu::udp::bind_udp_socket();
 
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
     let rooms_for_sfu = rooms.clone();
@@ -26,7 +27,7 @@ async fn main() {
     let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
 
     std::thread::spawn(move || {
-        if let Err(e) = servers::udp::run(rx, socket, rooms_for_sfu) {
+        if let Err(e) = sfu::udp::run(rx, socket, rooms_for_sfu) {
             error!("udp error : {}", e);
         };
     });
