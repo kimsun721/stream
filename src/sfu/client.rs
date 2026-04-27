@@ -12,9 +12,12 @@ use str0m::{
 };
 use tracing::warn;
 
-use crate::types::{
-    Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
-    TrackOutState,
+use crate::{
+    sfu::error::ClientResult,
+    types::{
+        Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
+        TrackOutState,
+    },
 };
 
 pub fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) {
@@ -83,7 +86,7 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
-    ) -> anyhow::Result<PollResult> {
+    ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
                 Output::Timeout(v) => break v,
@@ -130,7 +133,7 @@ impl Client {
         Ok(PollResult::Timeout(timeout))
     }
 
-    pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> anyhow::Result<()> {
+    pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> ClientResult<()> {
         for data in datas {
             let Some(mid) = self.tracks_out.iter().find_map(|t| {
                 let track_in = t.track_in.upgrade()?;
@@ -162,7 +165,7 @@ impl Client {
     pub fn handle_keyframe_requests(
         &mut self,
         keyframe_requests: Vec<KeyframeRequest>,
-    ) -> anyhow::Result<()> {
+    ) -> ClientResult<()> {
         for req in keyframe_requests {
             if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
                 let should_request = track_entry
@@ -197,7 +200,7 @@ impl Client {
         track_in
     }
 
-    fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
+    fn handle_channel_data(&mut self, data: ChannelData) -> ClientResult<()> {
         if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&data.data) {
             self.handle_offer(offer)?;
         } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
@@ -206,7 +209,7 @@ impl Client {
         Ok(())
     }
 
-    fn handle_offer(&mut self, offer: SdpOffer) -> anyhow::Result<()> {
+    fn handle_offer(&mut self, offer: SdpOffer) -> ClientResult<()> {
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
@@ -217,7 +220,7 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: SdpAnswer) -> anyhow::Result<()> {
+    fn handle_answer(&mut self, answer: SdpAnswer) -> ClientResult<()> {
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
 

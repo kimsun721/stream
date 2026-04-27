@@ -8,7 +8,7 @@ use str0m::{Input, Rtc, media::Direction};
 use tracing::{debug, warn};
 
 use crate::{
-    sfu::{client::register_client, socket::read_socket_input},
+    sfu::{client::register_client, error::ClientResult, socket::read_socket_input},
     types::{ClientRole, PollResult, RoomId, Rooms, TrackIn, TrackOut, TrackOutState},
 };
 
@@ -16,7 +16,7 @@ pub fn run(
     rx: Receiver<(Rtc, ClientRole, RoomId)>,
     socket: UdpSocket,
     rooms_arc: Rooms,
-) -> anyhow::Result<()> {
+) -> ClientResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
     loop {
