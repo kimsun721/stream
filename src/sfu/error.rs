@@ -24,3 +24,14 @@ pub enum SocketError {
 }
 
 pub type SocketResult<T> = Result<T, SocketError>;
+
+#[derive(Debug, Error)]
+pub enum SfuError {
+    #[error("client: {0}")]
+    Client(#[from] ClientError),
+
+    #[error("custom: {0}")]
+    Socket(#[from] SocketError),
+}
+
+pub type SfuResult<T> = Result<T, SfuError>;
