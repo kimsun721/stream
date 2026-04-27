@@ -1293,6 +1293,7 @@ dependencies = [
  "serde_json",
  "str0m",
  "systemstat",
+ "thiserror",
  "tokio",
  "tower-http",
  "tracing",

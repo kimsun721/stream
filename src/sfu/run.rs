@@ -8,7 +8,11 @@ use str0m::{Input, Rtc, media::Direction};
 use tracing::{debug, warn};
 
 use crate::{
-    sfu::{client::register_client, socket::read_socket_input},
+    sfu::{
+        client::register_client,
+        error::{ClientResult, SfuResult},
+        socket::read_socket_input,
+    },
     types::{ClientRole, PollResult, RoomId, Rooms, TrackIn, TrackOut, TrackOutState},
 };
 
@@ -16,7 +20,7 @@ pub fn run(
     rx: Receiver<(Rtc, ClientRole, RoomId)>,
     socket: UdpSocket,
     rooms_arc: Rooms,
-) -> anyhow::Result<()> {
+) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
     loop {
@@ -32,42 +36,7 @@ pub fn run(
             let mut keyframe_requests = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                let mut change = client.rtc.sdp_api();
-
-                for track_out in client.tracks_out.iter_mut() {
-                    if track_out.state == TrackOutState::ToOpen && client.cid.is_some() {
-                        if let Some(track_in) = track_out.track_in.upgrade() {
-                            let stream_id = track_in.origin.to_string();
-                            let mid = change.add_media(
-                                track_in.kind,
-                                Direction::SendOnly,
-                                Some(stream_id),
-                                None,
-                                None,
-                            );
-
-                            track_out.state = TrackOutState::Negotiating(mid);
-                        }
-                    }
-                }
-
-                if change.has_changes() {
-                    let Some((offer, pending)) = change.apply() else {
-                        warn!("add_media returned None");
-                        continue;
-                    };
-
-                    let Some(mut channel) = client.cid.and_then(|id| client.rtc.channel(id)) else {
-                        warn!("channel not found");
-                        continue;
-                    };
-
-                    let json = serde_json::to_string(&offer)?;
-
-                    channel.write(false, json.as_bytes())?;
-
-                    client.pending = Some(pending);
-                }
+                client.renegotiate()?;
 
                 let t = client.poll_output(
                     &socket,

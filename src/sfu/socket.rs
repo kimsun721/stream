@@ -9,7 +9,7 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
-use crate::utils;
+use crate::{sfu::error::SocketResult, utils};
 
 pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
     let host_addr = utils::addr::select_host_address();
@@ -22,7 +22,7 @@ pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
 pub fn read_socket_input<'a>(
     socket: &UdpSocket,
     buf: &'a mut Vec<u8>,
-) -> anyhow::Result<Option<Input<'a>>> {
+) -> SocketResult<Option<Input<'a>>> {
     buf.resize(2000, 0);
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {

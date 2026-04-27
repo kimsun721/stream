@@ -6,15 +6,18 @@ use std::{
 
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
-    change::{SdpAnswer, SdpOffer},
+    change::{SdpAnswer, SdpApi, SdpOffer},
     channel::ChannelData,
-    media::{KeyframeRequest, MediaData, MediaKind, Mid},
+    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
 };
 use tracing::warn;
 
-use crate::types::{
-    Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
-    TrackOutState,
+use crate::{
+    sfu::error::ClientResult,
+    types::{
+        Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
+        TrackOutState,
+    },
 };
 
 pub fn register_client(rx: &Receiver<(Rtc, ClientRole, RoomId)>, rooms_arc: &Rooms) {
@@ -83,7 +86,7 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
-    ) -> anyhow::Result<PollResult> {
+    ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
                 Output::Timeout(v) => break v,
@@ -130,7 +133,7 @@ impl Client {
         Ok(PollResult::Timeout(timeout))
     }
 
-    pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> anyhow::Result<()> {
+    pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> ClientResult<()> {
         for data in datas {
             let Some(mid) = self.tracks_out.iter().find_map(|t| {
                 let track_in = t.track_in.upgrade()?;
@@ -162,7 +165,7 @@ impl Client {
     pub fn handle_keyframe_requests(
         &mut self,
         keyframe_requests: Vec<KeyframeRequest>,
-    ) -> anyhow::Result<()> {
+    ) -> ClientResult<()> {
         for req in keyframe_requests {
             if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
                 let should_request = track_entry
@@ -178,6 +181,46 @@ impl Client {
             };
         }
 
+        Ok(())
+    }
+
+    pub fn renegotiate(&mut self) -> ClientResult<()> {
+        let mut change = self.rtc.sdp_api();
+
+        for track_out in self.tracks_out.iter_mut() {
+            if track_out.state == TrackOutState::ToOpen && self.cid.is_some() {
+                if let Some(track_in) = track_out.track_in.upgrade() {
+                    let stream_id = track_in.origin.to_string();
+                    let mid = change.add_media(
+                        track_in.kind,
+                        Direction::SendOnly,
+                        Some(stream_id),
+                        None,
+                        None,
+                    );
+
+                    track_out.state = TrackOutState::Negotiating(mid);
+                }
+            }
+        }
+
+        if change.has_changes() {
+            let Some((offer, pending)) = change.apply() else {
+                warn!("add_media returned None");
+                return Ok(());
+            };
+
+            let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) else {
+                warn!("channel not found");
+                return Ok(());
+            };
+
+            let json = serde_json::to_string(&offer)?;
+
+            channel.write(false, json.as_bytes())?;
+
+            self.pending = Some(pending);
+        }
         Ok(())
     }
 
@@ -197,7 +240,7 @@ impl Client {
         track_in
     }
 
-    fn handle_channel_data(&mut self, data: ChannelData) -> anyhow::Result<()> {
+    fn handle_channel_data(&mut self, data: ChannelData) -> ClientResult<()> {
         if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&data.data) {
             self.handle_offer(offer)?;
         } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
@@ -206,7 +249,7 @@ impl Client {
         Ok(())
     }
 
-    fn handle_offer(&mut self, offer: SdpOffer) -> anyhow::Result<()> {
+    fn handle_offer(&mut self, offer: SdpOffer) -> ClientResult<()> {
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
@@ -217,7 +260,7 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: SdpAnswer) -> anyhow::Result<()> {
+    fn handle_answer(&mut self, answer: SdpAnswer) -> ClientResult<()> {
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
 
