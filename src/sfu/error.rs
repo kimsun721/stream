@@ -19,7 +19,7 @@ pub enum SocketError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("custom: {0}")]
+    #[error("str0m: {0}")]
     Net(#[from] str0m::error::NetError),
 }
 
@@ -30,7 +30,7 @@ pub enum SfuError {
     #[error("client: {0}")]
     Client(#[from] ClientError),
 
-    #[error("custom: {0}")]
+    #[error("socket: {0}")]
     Socket(#[from] SocketError),
 }
 

@@ -6,9 +6,9 @@ use std::{
 
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
-    change::{SdpAnswer, SdpOffer},
+    change::{SdpAnswer, SdpApi, SdpOffer},
     channel::ChannelData,
-    media::{KeyframeRequest, MediaData, MediaKind, Mid},
+    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
 };
 use tracing::warn;
 
@@ -181,6 +181,46 @@ impl Client {
             };
         }
 
+        Ok(())
+    }
+
+    pub fn renegotiate(&mut self) -> ClientResult<()> {
+        let mut change = self.rtc.sdp_api();
+
+        for track_out in self.tracks_out.iter_mut() {
+            if track_out.state == TrackOutState::ToOpen && self.cid.is_some() {
+                if let Some(track_in) = track_out.track_in.upgrade() {
+                    let stream_id = track_in.origin.to_string();
+                    let mid = change.add_media(
+                        track_in.kind,
+                        Direction::SendOnly,
+                        Some(stream_id),
+                        None,
+                        None,
+                    );
+
+                    track_out.state = TrackOutState::Negotiating(mid);
+                }
+            }
+        }
+
+        if change.has_changes() {
+            let Some((offer, pending)) = change.apply() else {
+                warn!("add_media returned None");
+                return Ok(());
+            };
+
+            let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) else {
+                warn!("channel not found");
+                return Ok(());
+            };
+
+            let json = serde_json::to_string(&offer)?;
+
+            channel.write(false, json.as_bytes())?;
+
+            self.pending = Some(pending);
+        }
         Ok(())
     }
 
