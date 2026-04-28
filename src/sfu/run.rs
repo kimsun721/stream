@@ -73,7 +73,9 @@ pub fn run(
                 .iter_mut()
                 .filter(|c| c.role == ClientRole::Viewer)
             {
-                c.handle_media_datas(&media_datas)?;
+                if let Err(e) = c.handle_media_datas(&media_datas) {
+                    error!("handle_media_datas failed: {}", e);
+                };
             }
 
             if let Some(streamer) = room
@@ -81,7 +83,9 @@ pub fn run(
                 .iter_mut()
                 .find(|c| c.role == ClientRole::Streamer)
             {
-                streamer.handle_keyframe_requests(keyframe_requests)?;
+                if let Err(e) = streamer.handle_keyframe_requests(keyframe_requests) {
+                    error!("handle_keyframe_requests failed: {}", e);
+                };
             };
         }
 
