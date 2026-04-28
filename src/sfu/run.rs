@@ -46,7 +46,7 @@ pub fn run(
                     Ok(PollResult::Disconnected) => to_remove.push(idx),
                     Err(e) => {
                         to_remove.push(idx);
-                        error!("Client Tick Error: {}", e);
+                        error!("client tick failed: {}", e);
                     }
                 };
             }
