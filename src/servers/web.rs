@@ -1,7 +1,7 @@
 use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
 
 use axum::{
-    Error, Json, Router,
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::Result,
@@ -9,10 +9,11 @@ use axum::{
 };
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use str0m::{Candidate, Rtc, change::SdpOffer};
-use tokio::{net::TcpListener, task::JoinError};
+use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
+use tracing::error;
 
 use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms};
 
@@ -148,7 +149,7 @@ async fn delete_room(Path(room_id): Path<u64>, State(state): State<ApiState>) ->
 async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
-) -> Json<Value> {
+) -> Result<Json<Value>, StatusCode> {
     let SdpState { addr, tx } = state;
     let OfferRequest {
         _sdp_type,
@@ -158,16 +159,27 @@ async fn sdp_offer(
     } = payload;
 
     let mut rtc = Rtc::builder().build(Instant::now());
-    rtc.add_local_candidate(Candidate::host(addr, "udp").expect("host candidate"));
+    rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
+        error!("add local candidate failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?);
 
-    let offer = SdpOffer::from_sdp_string(&sdp).expect("valid SDP");
-    let answer = rtc
-        .sdp_api()
-        .accept_offer(offer)
-        .expect("offer to be accepted");
+    let offer = SdpOffer::from_sdp_string(&sdp).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    tx.send((rtc, role, RoomId(room_id)))
-        .expect("to send Rtc instance");
+    let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
+        error!("accept offer failed: {}", e);
+        StatusCode::BAD_REQUEST
+    })?;
 
-    Json(serde_json::to_value(&answer).expect("answer to serialize"))
+    tx.send((rtc, role, RoomId(room_id))).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let value = serde_json::to_value(&answer).map_err(|e| {
+        error!("json to value failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(value))
 }
