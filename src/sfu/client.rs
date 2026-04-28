@@ -224,6 +224,19 @@ impl Client {
         Ok(())
     }
 
+    pub fn tick(
+        &mut self,
+        socket: &UdpSocket,
+        new_tracks: &mut Vec<Arc<TrackIn>>,
+        media_datas: &mut Vec<MediaData>,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<PollResult> {
+        self.renegotiate()?;
+        let result = self.poll_output(socket, new_tracks, media_datas, keyframe_requests)?;
+
+        Ok(result)
+    }
+
     fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Arc<TrackIn> {
         let track_in = Arc::new(TrackIn {
             origin: self.id,

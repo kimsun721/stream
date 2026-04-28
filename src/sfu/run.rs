@@ -5,7 +5,7 @@ use std::{
 };
 
 use str0m::{Input, Rtc, media::Direction};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     sfu::{
@@ -36,19 +36,19 @@ pub fn run(
             let mut keyframe_requests = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                client.renegotiate()?;
-
-                let t = client.poll_output(
+                match client.tick(
                     &socket,
                     &mut new_tracks,
                     &mut media_datas,
                     &mut keyframe_requests,
-                )?;
-
-                match t {
-                    PollResult::Timeout(v) => timeout = timeout.min(v),
-                    PollResult::Disconnected => to_remove.push(idx),
-                }
+                ) {
+                    Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
+                    Ok(PollResult::Disconnected) => to_remove.push(idx),
+                    Err(e) => {
+                        to_remove.push(idx);
+                        error!("client tick failed: {}", e);
+                    }
+                };
             }
 
             for track in &new_tracks {
@@ -73,7 +73,9 @@ pub fn run(
                 .iter_mut()
                 .filter(|c| c.role == ClientRole::Viewer)
             {
-                c.handle_media_datas(&media_datas)?;
+                if let Err(e) = c.handle_media_datas(&media_datas) {
+                    error!("handle_media_datas failed: {}", e);
+                };
             }
 
             if let Some(streamer) = room
@@ -81,7 +83,9 @@ pub fn run(
                 .iter_mut()
                 .find(|c| c.role == ClientRole::Streamer)
             {
-                streamer.handle_keyframe_requests(keyframe_requests)?;
+                if let Err(e) = streamer.handle_keyframe_requests(keyframe_requests) {
+                    error!("handle_keyframe_requests failed: {}", e);
+                };
             };
         }
 
