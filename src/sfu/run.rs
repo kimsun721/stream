@@ -5,7 +5,7 @@ use std::{
 };
 
 use str0m::{Input, Rtc, media::Direction};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     sfu::{
@@ -36,19 +36,19 @@ pub fn run(
             let mut keyframe_requests = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
-                client.renegotiate()?;
-
-                let t = client.poll_output(
+                match client.tick(
                     &socket,
                     &mut new_tracks,
                     &mut media_datas,
                     &mut keyframe_requests,
-                )?;
-
-                match t {
-                    PollResult::Timeout(v) => timeout = timeout.min(v),
-                    PollResult::Disconnected => to_remove.push(idx),
-                }
+                ) {
+                    Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
+                    Ok(PollResult::Disconnected) => to_remove.push(idx),
+                    Err(e) => {
+                        to_remove.push(idx);
+                        error!("Client Tick Error: {}", e);
+                    }
+                };
             }
 
             for track in &new_tracks {
