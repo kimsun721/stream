@@ -185,6 +185,10 @@ impl Client {
     }
 
     pub fn renegotiate(&mut self) -> ClientResult<()> {
+        if self.pending.is_some() || self.cid.is_none() {
+            return Ok(());
+        }
+
         let mut change = self.rtc.sdp_api();
 
         for track_out in self.tracks_out.iter_mut() {
