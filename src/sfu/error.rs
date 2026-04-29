@@ -10,6 +10,12 @@ pub enum ClientError {
 
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+
+    #[error("sdp_api apply returned None")]
+    ApplyFailed,
+
+    #[error("channel id set but channel is not found")]
+    ChannelNotFound,
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
