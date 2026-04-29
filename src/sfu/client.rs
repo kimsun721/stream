@@ -13,7 +13,7 @@ use str0m::{
 use tracing::warn;
 
 use crate::{
-    sfu::error::ClientResult,
+    sfu::error::{ClientError, ClientResult},
     types::{
         Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
         TrackOutState,
@@ -192,7 +192,7 @@ impl Client {
         let mut change = self.rtc.sdp_api();
 
         for track_out in self.tracks_out.iter_mut() {
-            if track_out.state == TrackOutState::ToOpen && self.cid.is_some() {
+            if track_out.state == TrackOutState::ToOpen {
                 if let Some(track_in) = track_out.track_in.upgrade() {
                     let stream_id = track_in.origin.to_string();
                     let mid = change.add_media(
@@ -209,15 +209,12 @@ impl Client {
         }
 
         if change.has_changes() {
-            let Some((offer, pending)) = change.apply() else {
-                warn!("add_media returned None");
-                return Ok(());
-            };
+            let (offer, pending) = change.apply().ok_or(ClientError::ApplyFailed)?;
 
-            let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) else {
-                warn!("channel not found");
-                return Ok(());
-            };
+            let mut channel = self
+                .cid
+                .and_then(|id| self.rtc.channel(id))
+                .ok_or(ClientError::ChannelNotFound)?;
 
             let json = serde_json::to_string(&offer)?;
 
