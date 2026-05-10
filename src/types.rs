@@ -3,6 +3,7 @@ use std::{
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicU64, Ordering},
+        mpsc::SyncSender,
     },
     time::Instant,
 };
@@ -104,4 +105,26 @@ impl Client {
 pub enum PollResult {
     Timeout(Instant),
     Disconnected,
+}
+
+pub enum SfuMessage {
+    RegisterClient {
+        rtc: Rtc,
+        role: ClientRole,
+        room_id: RoomId,
+    },
+    CreateRoom {
+        room_id: RoomId,
+    },
+    DeleteRoom {
+        room_id: RoomId,
+    },
+    UpdateRoomState {
+        room_id: RoomId,
+        state: RoomState,
+    },
+    GetViews {
+        room_id: RoomId,
+        reply: SyncSender<usize>,
+    },
 }
