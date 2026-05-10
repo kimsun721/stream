@@ -15,12 +15,12 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms};
+use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms, SfuMessage};
 
 #[derive(Clone)]
 struct SdpState {
     addr: SocketAddr,
-    tx: SyncSender<(Rtc, ClientRole, RoomId)>,
+    tx: SyncSender<SfuMessage>,
 }
 
 #[derive(Clone)]
@@ -37,11 +37,7 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(
-    addr: SocketAddr,
-    tx: SyncSender<(Rtc, ClientRole, RoomId)>,
-    rooms: Rooms,
-) -> anyhow::Result<()> {
+pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>, rooms: Rooms) -> anyhow::Result<()> {
     let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
 
     let https_api = Router::new()
@@ -171,7 +167,13 @@ async fn sdp_offer(
         StatusCode::BAD_REQUEST
     })?;
 
-    tx.send((rtc, role, RoomId(room_id))).map_err(|e| {
+    let msg = SfuMessage::RegisterClient {
+        rtc,
+        role,
+        room_id: RoomId(room_id),
+    };
+
+    tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;

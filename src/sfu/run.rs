@@ -13,18 +13,23 @@ use crate::{
         error::{ClientResult, SfuResult},
         socket::read_socket_input,
     },
-    types::{ClientRole, PollResult, RoomId, Rooms, TrackIn, TrackOut, TrackOutState},
+    types::{ClientRole, PollResult, RoomId, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
 };
 
-pub fn run(
-    rx: Receiver<(Rtc, ClientRole, RoomId)>,
-    socket: UdpSocket,
-    rooms_arc: Rooms,
-) -> SfuResult<()> {
+pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
     loop {
-        register_client(&rx, &rooms_arc);
+        while let Ok(message) = rx.try_recv() {
+            match message {
+                SfuMessage::RegisterClient { rtc, role, room_id } => {
+                    register_client(rtc, role, room_id, &rooms_arc);
+                }
+                _ => {}
+            }
+        }
+
+        // register_client(&rx, &rooms_arc);
 
         let mut rooms = rooms_arc.lock().unwrap();
         let mut timeout = Instant::now() + Duration::from_millis(100);

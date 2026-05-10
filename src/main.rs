@@ -5,7 +5,7 @@ use std::{
 
 use str0m::{Rtc, crypto::from_feature_flags};
 
-use crate::types::{ClientRole, RoomId, Rooms};
+use crate::types::{ClientRole, RoomId, Rooms, SfuMessage};
 use ::tracing::error;
 
 mod servers;
@@ -24,7 +24,7 @@ async fn main() {
     let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
     let rooms_for_sfu = rooms.clone();
 
-    let (tx, rx) = mpsc::sync_channel::<(Rtc, ClientRole, RoomId)>(16);
+    let (tx, rx) = mpsc::sync_channel::<SfuMessage>(32);
 
     std::thread::spawn(move || {
         if let Err(e) = sfu::run::run(rx, socket, rooms_for_sfu) {
