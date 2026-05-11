@@ -141,21 +141,37 @@ async fn update_room(
     State(state): State<ApiState>,
     Path(room_id): Path<u64>,
     Json(payload): Json<UpdateRoomState>,
-) -> StatusCode {
-    if let Some(room) = state.rooms.lock().unwrap().get_mut(&room_id) {
-        room.state = payload.state;
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
 
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    }
+    let msg = SfuMessage::UpdateRoomState {
+        room_id: RoomId(room_id),
+        state: payload.state,
+        reply: tx,
+    };
+    state.tx.send(msg).ok();
+
+    rx.recv()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn delete_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
-    match state.rooms.lock().unwrap().remove(&room_id) {
-        Some(_) => StatusCode::OK,
-        None => StatusCode::NOT_FOUND,
-    }
+async fn delete_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::DeleteRoom {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).ok();
+
+    rx.recv()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn sdp_offer(

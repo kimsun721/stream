@@ -118,10 +118,12 @@ pub enum SfuMessage {
     },
     DeleteRoom {
         room_id: RoomId,
+        reply: SyncSender<Option<()>>,
     },
     UpdateRoomState {
         room_id: RoomId,
         state: RoomState,
+        reply: SyncSender<Option<()>>,
     },
     GetViews {
         room_id: RoomId,

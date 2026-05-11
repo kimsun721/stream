@@ -55,6 +55,25 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
                         reply.send(None).ok();
                     };
                 }
+                SfuMessage::UpdateRoomState {
+                    room_id,
+                    state,
+                    reply,
+                } => {
+                    if let Some(room) = rooms_arc.lock().unwrap().get_mut(&room_id.0) {
+                        room.state = state;
+
+                        reply.send(Some(())).ok();
+                    } else {
+                        reply.send(None).ok();
+                    }
+                }
+                SfuMessage::DeleteRoom { room_id, reply } => {
+                    match rooms_arc.lock().unwrap().remove(&room_id.0) {
+                        Some(_) => reply.send(Some(())).ok(),
+                        None => reply.send(None).ok(),
+                    };
+                }
                 _ => {}
             }
         }
