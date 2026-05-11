@@ -42,6 +42,19 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
                         }
                     }
                 }
+                SfuMessage::GetViews { room_id, reply } => {
+                    if let Some(room) = rooms_arc.lock().unwrap().get(&room_id.0) {
+                        let views = room
+                            .clients
+                            .iter()
+                            .filter(|c| c.role == ClientRole::Viewer)
+                            .count();
+
+                        reply.send(Some(views)).ok();
+                    } else {
+                        reply.send(None).ok();
+                    };
+                }
                 _ => {}
             }
         }

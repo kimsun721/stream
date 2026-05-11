@@ -1,4 +1,9 @@
-use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
+use std::{
+    collections::hash_map::Entry,
+    net::SocketAddr,
+    sync::mpsc::{self, SyncSender},
+    time::Instant,
+};
 
 use axum::{
     Json, Router,
@@ -109,17 +114,22 @@ async fn get_room(
     Path(room_id): Path<u64>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
-    if let Some(room) = state.rooms.lock().unwrap().get(&room_id) {
-        let views = room
-            .clients
-            .iter()
-            .filter(|c| c.role == ClientRole::Viewer)
-            .count();
+    let (tx, rx) = mpsc::sync_channel::<Option<usize>>(1);
 
-        let res = Json(GetRoomResponse { views });
-        return Ok(res);
-    };
-    Err(StatusCode::NOT_FOUND)
+    state
+        .tx
+        .send(SfuMessage::GetViews {
+            room_id: RoomId(room_id),
+            reply: tx,
+        })
+        .ok();
+
+    let views = rx
+        .recv()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(GetRoomResponse { views }))
 }
 
 #[derive(Deserialize)]

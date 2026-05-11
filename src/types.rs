@@ -125,6 +125,6 @@ pub enum SfuMessage {
     },
     GetViews {
         room_id: RoomId,
-        reply: SyncSender<usize>,
+        reply: SyncSender<Option<usize>>,
     },
 }
