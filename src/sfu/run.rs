@@ -1,49 +1,50 @@
 use std::{
-    collections::hash_map::Entry,
+    collections::HashMap,
     net::UdpSocket,
     sync::{Arc, mpsc::Receiver},
     time::{Duration, Instant},
 };
 
-use axum::http::StatusCode;
-use str0m::{Input, Rtc, media::Direction};
-use tracing::{debug, error, warn};
+use str0m::Input;
+use tracing::{debug, error};
 
 use crate::{
-    sfu::{
-        client::register_client,
-        error::{ClientResult, SfuResult},
-        socket::read_socket_input,
-    },
+    sfu::{client::register_client, error::SfuResult, socket::read_socket_input},
     types::{
-        ClientRole, PollResult, Room, RoomId, RoomState, Rooms, SfuMessage, TrackIn, TrackOut,
+        ClientRole, PollResult, Room, RoomState, Rooms, SfuMessage, TrackIn, TrackOut,
         TrackOutState,
     },
 };
 
-pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> SfuResult<()> {
+pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
+
+    let mut rooms: Rooms = HashMap::new();
 
     loop {
         while let Ok(message) = rx.try_recv() {
             match message {
                 SfuMessage::RegisterClient { rtc, role, room_id } => {
-                    register_client(rtc, role, room_id, &rooms_arc);
+                    register_client(rtc, role, room_id, &mut rooms);
                 }
-                SfuMessage::CreateRoom { room_id } => {
-                    match rooms_arc.lock().unwrap().entry(room_id.0) {
-                        Entry::Occupied(_) => {}
-                        Entry::Vacant(e) => {
-                            e.insert(Room {
+                SfuMessage::CreateRoom { room_id, reply } => {
+                    if rooms.contains_key(&room_id.0) {
+                        reply.send(None).ok();
+                    } else {
+                        rooms.insert(
+                            room_id.0,
+                            Room {
                                 streamer_id: None,
                                 clients: vec![],
                                 state: RoomState::IDLE,
-                            });
-                        }
+                            },
+                        );
+
+                        reply.send(Some(())).ok();
                     }
                 }
                 SfuMessage::GetViews { room_id, reply } => {
-                    if let Some(room) = rooms_arc.lock().unwrap().get(&room_id.0) {
+                    if let Some(room) = rooms.get(&room_id.0) {
                         let views = room
                             .clients
                             .iter()
@@ -60,7 +61,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
                     state,
                     reply,
                 } => {
-                    if let Some(room) = rooms_arc.lock().unwrap().get_mut(&room_id.0) {
+                    if let Some(room) = rooms.get_mut(&room_id.0) {
                         room.state = state;
 
                         reply.send(Some(())).ok();
@@ -69,16 +70,14 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
                     }
                 }
                 SfuMessage::DeleteRoom { room_id, reply } => {
-                    match rooms_arc.lock().unwrap().remove(&room_id.0) {
+                    match rooms.remove(&room_id.0) {
                         Some(_) => reply.send(Some(())).ok(),
                         None => reply.send(None).ok(),
                     };
                 }
-                _ => {}
             }
         }
 
-        let mut rooms = rooms_arc.lock().unwrap();
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for (_, room) in rooms.iter_mut() {
@@ -141,8 +140,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
             };
         }
 
-        drop(rooms);
-
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
 
         socket
@@ -150,7 +147,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
             .expect("setting socket read timeout");
 
         if let Ok(Some(input)) = read_socket_input(&socket, &mut buf) {
-            let mut rooms = rooms_arc.lock().unwrap();
             let client = rooms
                 .iter_mut()
                 .flat_map(|(_, room)| room.clients.iter_mut())
@@ -164,7 +160,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
         };
 
         let now = Instant::now();
-        let mut rooms = rooms_arc.lock().unwrap();
         for (_, room) in rooms.iter_mut() {
             for client in room.clients.iter_mut() {
                 client.handle_input(Input::Timeout(now));

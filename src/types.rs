@@ -56,7 +56,7 @@ pub struct Room {
     pub state: RoomState,
 }
 
-pub type Rooms = Arc<Mutex<HashMap<u64, Room>>>;
+pub type Rooms = HashMap<u64, Room>;
 
 #[derive(Debug)]
 pub struct TrackIn {
@@ -115,6 +115,7 @@ pub enum SfuMessage {
     },
     CreateRoom {
         room_id: RoomId,
+        reply: SyncSender<Option<()>>,
     },
     DeleteRoom {
         room_id: RoomId,

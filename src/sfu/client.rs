@@ -20,9 +20,7 @@ use crate::{
     },
 };
 
-pub fn register_client(rtc: Rtc, role: ClientRole, room_id: RoomId, rooms_arc: &Rooms) {
-    let mut rooms = rooms_arc.lock().unwrap();
-
+pub fn register_client(rtc: Rtc, role: ClientRole, room_id: RoomId, rooms: &mut Rooms) {
     let mut client = Client::new(rtc, role);
 
     if let Some(room) = rooms.get_mut(&room_id.0) {

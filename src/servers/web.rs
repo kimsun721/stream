@@ -30,7 +30,6 @@ struct SdpState {
 
 #[derive(Clone)]
 struct ApiState {
-    rooms: Rooms,
     tx: SyncSender<SfuMessage>,
 }
 
@@ -43,7 +42,7 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>, rooms: Rooms) -> anyhow::Result<()> {
+pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result<()> {
     let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
 
     let https_api = Router::new()
@@ -59,7 +58,7 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>, rooms: Rooms) -> 
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
-        .with_state(ApiState { rooms, tx });
+        .with_state(ApiState { tx });
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls(
@@ -93,8 +92,11 @@ async fn create_room(
     Path(room_id): Path<u64>,
     State(state): State<ApiState>,
 ) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
     let msg = SfuMessage::CreateRoom {
         room_id: RoomId(room_id),
+        reply: tx,
     };
 
     state.tx.send(msg).map_err(|e| {
@@ -102,7 +104,9 @@ async fn create_room(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    Ok(())
+    rx.recv()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::CONFLICT)
 }
 
 #[derive(Serialize)]

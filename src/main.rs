@@ -21,18 +21,15 @@ async fn main() {
 
     let (addr, socket) = sfu::socket::bind_udp_socket();
 
-    let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
-    let rooms_for_sfu = rooms.clone();
-
     let (tx, rx) = mpsc::sync_channel::<SfuMessage>(32);
 
     std::thread::spawn(move || {
-        if let Err(e) = sfu::run::run(rx, socket, rooms_for_sfu) {
+        if let Err(e) = sfu::run::run(rx, socket) {
             error!("udp error : {}", e);
         };
     });
 
-    if let Err(e) = servers::web::run(addr, tx, rooms).await {
+    if let Err(e) = servers::web::run(addr, tx).await {
         error!("web server erorr : {}", e);
     };
 }
