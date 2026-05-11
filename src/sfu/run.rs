@@ -9,10 +9,7 @@ use tracing::{debug, error};
 
 use crate::{
     sfu::{client::register_client, error::SfuResult, socket::read_socket_input},
-    types::{
-        ClientRole, PollResult, Room, RoomState, Rooms, SfuMessage, TrackIn, TrackOut,
-        TrackOutState,
-    },
+    types::{ClientRole, PollResult, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
 };
 
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
@@ -24,57 +21,17 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         while let Ok(message) = rx.try_recv() {
             match message {
                 SfuMessage::RegisterClient { rtc, role, room_id } => {
-                    register_client(rtc, role, room_id, &mut rooms);
+                    register_client(rtc, role, room_id, &mut rooms)
                 }
-                SfuMessage::CreateRoom { room_id, reply } => {
-                    if rooms.contains_key(&room_id.0) {
-                        reply.send(None).ok();
-                    } else {
-                        rooms.insert(
-                            room_id.0,
-                            Room {
-                                streamer_id: None,
-                                clients: vec![],
-                                state: RoomState::IDLE,
-                            },
-                        );
-
-                        reply.send(Some(())).ok();
-                    }
-                }
-                SfuMessage::GetViews { room_id, reply } => {
-                    if let Some(room) = rooms.get(&room_id.0) {
-                        let views = room
-                            .clients
-                            .iter()
-                            .filter(|c| c.role == ClientRole::Viewer)
-                            .count();
-
-                        reply.send(Some(views)).ok();
-                    } else {
-                        reply.send(None).ok();
-                    };
-                }
+                SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
+                SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
                 SfuMessage::UpdateRoomState {
                     room_id,
                     state,
                     reply,
-                } => {
-                    if let Some(room) = rooms.get_mut(&room_id.0) {
-                        room.state = state;
-
-                        reply.send(Some(())).ok();
-                    } else {
-                        reply.send(None).ok();
-                    }
-                }
-                SfuMessage::DeleteRoom { room_id, reply } => {
-                    match rooms.remove(&room_id.0) {
-                        Some(_) => reply.send(Some(())).ok(),
-                        None => reply.send(None).ok(),
-                    };
-                }
-            }
+                } => rooms.update_state(room_id, state, reply),
+                SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
+            };
         }
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
