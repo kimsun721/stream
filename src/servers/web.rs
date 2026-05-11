@@ -26,6 +26,7 @@ struct SdpState {
 #[derive(Clone)]
 struct ApiState {
     rooms: Rooms,
+    tx: SyncSender<SfuMessage>,
 }
 
 #[derive(Deserialize)]
@@ -43,14 +44,17 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>, rooms: Rooms) -> 
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .layer(CorsLayer::permissive())
-        .with_state(SdpState { addr, tx });
+        .with_state(SdpState {
+            addr,
+            tx: tx.clone(),
+        });
 
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
-        .with_state(ApiState { rooms });
+        .with_state(ApiState { rooms, tx });
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls(
@@ -80,18 +84,20 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>, rooms: Rooms) -> 
     Ok(())
 }
 
-async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
-    match state.rooms.lock().unwrap().entry(room_id) {
-        Entry::Occupied(_) => StatusCode::CONFLICT,
-        Entry::Vacant(e) => {
-            e.insert(Room {
-                streamer_id: None,
-                clients: vec![],
-                state: RoomState::IDLE,
-            });
-            StatusCode::CREATED
-        }
-    }
+async fn create_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<(), StatusCode> {
+    let msg = SfuMessage::CreateRoom {
+        room_id: RoomId(room_id),
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(())
 }
 
 #[derive(Serialize)]

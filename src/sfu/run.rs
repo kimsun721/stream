@@ -1,9 +1,11 @@
 use std::{
+    collections::hash_map::Entry,
     net::UdpSocket,
     sync::{Arc, mpsc::Receiver},
     time::{Duration, Instant},
 };
 
+use axum::http::StatusCode;
 use str0m::{Input, Rtc, media::Direction};
 use tracing::{debug, error, warn};
 
@@ -13,7 +15,10 @@ use crate::{
         error::{ClientResult, SfuResult},
         socket::read_socket_input,
     },
-    types::{ClientRole, PollResult, RoomId, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
+    types::{
+        ClientRole, PollResult, Room, RoomId, RoomState, Rooms, SfuMessage, TrackIn, TrackOut,
+        TrackOutState,
+    },
 };
 
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> SfuResult<()> {
@@ -25,11 +30,21 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket, rooms_arc: Rooms) -> Sfu
                 SfuMessage::RegisterClient { rtc, role, room_id } => {
                     register_client(rtc, role, room_id, &rooms_arc);
                 }
+                SfuMessage::CreateRoom { room_id } => {
+                    match rooms_arc.lock().unwrap().entry(room_id.0) {
+                        Entry::Occupied(_) => {}
+                        Entry::Vacant(e) => {
+                            e.insert(Room {
+                                streamer_id: None,
+                                clients: vec![],
+                                state: RoomState::IDLE,
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
-
-        // register_client(&rx, &rooms_arc);
 
         let mut rooms = rooms_arc.lock().unwrap();
         let mut timeout = Instant::now() + Duration::from_millis(100);
