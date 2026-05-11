@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::UdpSocket,
     sync::{Arc, mpsc::Receiver},
     time::{Duration, Instant},
@@ -19,7 +18,7 @@ use crate::{
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
-    let mut rooms: Rooms = HashMap::new();
+    let mut rooms = Rooms::new();
 
     loop {
         while let Ok(message) = rx.try_recv() {

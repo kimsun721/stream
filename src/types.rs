@@ -56,7 +56,7 @@ pub struct Room {
     pub state: RoomState,
 }
 
-pub type Rooms = HashMap<u64, Room>;
+pub struct Rooms(pub HashMap<u64, Room>);
 
 #[derive(Debug)]
 pub struct TrackIn {
