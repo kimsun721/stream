@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
         mpsc::SyncSender,
     },
@@ -13,7 +13,7 @@ use str0m::{
     Rtc,
     change::SdpPendingOffer,
     channel::ChannelId,
-    media::{MediaAdded, MediaKind, Mid, Rid},
+    media::{MediaKind, Mid, Rid},
 };
 
 use derive_more::Display;

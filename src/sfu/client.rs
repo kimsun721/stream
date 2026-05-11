@@ -1,12 +1,12 @@
 use std::{
     net::UdpSocket,
-    sync::{Arc, Weak, mpsc::Receiver},
+    sync::{Arc, Weak},
     time::{Duration, Instant},
 };
 
 use str0m::{
     Event, IceConnectionState, Input, Output, Rtc,
-    change::{SdpAnswer, SdpApi, SdpOffer},
+    change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
     media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
 };

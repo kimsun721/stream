@@ -1,5 +1,4 @@
 use std::{
-    collections::hash_map::Entry,
     net::SocketAddr,
     sync::mpsc::{self, SyncSender},
     time::Instant,
@@ -20,7 +19,7 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms, SfuMessage};
+use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
 
 #[derive(Clone)]
 struct SdpState {

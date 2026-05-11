@@ -1,11 +1,8 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, mpsc},
-};
+use std::sync::mpsc;
 
-use str0m::{Rtc, crypto::from_feature_flags};
+use str0m::crypto::from_feature_flags;
 
-use crate::types::{ClientRole, RoomId, Rooms, SfuMessage};
+use crate::types::SfuMessage;
 use ::tracing::error;
 
 mod servers;
