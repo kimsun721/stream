@@ -1,11 +1,11 @@
 use std::{
     net::UdpSocket,
-    sync::{Arc, Weak},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use str0m::{
-    Event, IceConnectionState, Input, Output, Rtc,
+    Event, IceConnectionState, Input, Output,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
     media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
@@ -14,56 +14,8 @@ use tracing::warn;
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
-    types::{
-        Client, ClientRole, PollResult, RoomId, RoomState, Rooms, TrackIn, TrackInEntry, TrackOut,
-        TrackOutState,
-    },
+    types::{Client, ClientRole, PollResult, TrackIn, TrackInEntry, TrackOutState},
 };
-
-pub fn register_client(rtc: Rtc, role: ClientRole, room_id: RoomId, rooms: &mut Rooms) {
-    let mut client = Client::new(rtc, role);
-
-    if let Some(room) = rooms.get_mut(&room_id.0) {
-        match role {
-            ClientRole::Streamer => {
-                if room
-                    .clients
-                    .iter()
-                    .any(|c| matches!(c.role, ClientRole::Streamer))
-                {
-                    warn!("Streamer already connected in room {:?}", &room);
-                } else {
-                    room.streamer_id = Some(client.id);
-                    room.clients.push(client);
-                }
-            }
-            ClientRole::Viewer => match room.state {
-                RoomState::IDLE | RoomState::PREVIEW => {
-                    warn!("Client connected to an {:?} room", room.state);
-                }
-                RoomState::LIVE => {
-                    let tracks: Vec<Weak<TrackIn>> = room
-                        .clients
-                        .iter()
-                        .filter(|c| c.role == ClientRole::Streamer)
-                        .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
-                        .collect();
-
-                    for track_in in tracks {
-                        client.tracks_out.push(TrackOut {
-                            track_in,
-                            state: TrackOutState::ToOpen,
-                        });
-                    }
-
-                    room.clients.push(client);
-                }
-            },
-        }
-    } else {
-        warn!("Room does not exist : {:?}", room_id);
-    };
-}
 
 impl Client {
     pub fn handle_input(&mut self, input: Input) {

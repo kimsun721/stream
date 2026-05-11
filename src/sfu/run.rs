@@ -8,7 +8,7 @@ use str0m::Input;
 use tracing::{debug, error};
 
 use crate::{
-    sfu::{client::register_client, error::SfuResult, socket::read_socket_input},
+    sfu::{error::SfuResult, socket::read_socket_input},
     types::{ClientRole, PollResult, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
 };
 
@@ -21,7 +21,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         while let Ok(message) = rx.try_recv() {
             match message {
                 SfuMessage::RegisterClient { rtc, role, room_id } => {
-                    register_client(rtc, role, room_id, &mut rooms)
+                    rooms.register_client(rtc, role, room_id)
                 }
                 SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
                 SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),

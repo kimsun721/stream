@@ -1,14 +1,27 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     ops::{Deref, DerefMut},
-    sync::mpsc::SyncSender,
+    sync::{Arc, Weak, mpsc::SyncSender},
 };
 
-use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms};
+use str0m::Rtc;
+use tracing::warn;
+
+use crate::types::{
+    Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackIn, TrackOut, TrackOutState,
+};
 
 impl Rooms {
     pub fn new() -> Self {
         Rooms(HashMap::new())
+    }
+
+    pub fn register_client(&mut self, rtc: Rtc, role: ClientRole, room_id: RoomId) {
+        if let Some(room) = self.get_mut(&room_id.0) {
+            room.add_client(rtc, role);
+        } else {
+            warn!("Room does not exist : {:?}", room_id);
+        };
     }
 
     pub fn create(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
@@ -66,6 +79,47 @@ impl Room {
 
     fn set_state(&mut self, state: RoomState) {
         self.state = state;
+    }
+
+    fn add_client(&mut self, rtc: Rtc, role: ClientRole) {
+        let mut client = Client::new(rtc, role);
+
+        match role {
+            ClientRole::Streamer => {
+                if self
+                    .clients
+                    .iter()
+                    .any(|c| matches!(c.role, ClientRole::Streamer))
+                {
+                    warn!("Streamer already connected in room {:?}", &self);
+                } else {
+                    self.streamer_id = Some(client.id);
+                    self.clients.push(client);
+                }
+            }
+            ClientRole::Viewer => match self.state {
+                RoomState::IDLE | RoomState::PREVIEW => {
+                    warn!("Client connected to an {:?} room", self.state);
+                }
+                RoomState::LIVE => {
+                    let tracks: Vec<Weak<TrackIn>> = self
+                        .clients
+                        .iter()
+                        .filter(|c| c.role == ClientRole::Streamer)
+                        .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
+                        .collect();
+
+                    for track_in in tracks {
+                        client.tracks_out.push(TrackOut {
+                            track_in,
+                            state: TrackOutState::ToOpen,
+                        });
+                    }
+
+                    self.clients.push(client);
+                }
+            },
+        };
     }
 }
 
