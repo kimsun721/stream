@@ -1,8 +1,9 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
+        mpsc::SyncSender,
     },
     time::Instant,
 };
@@ -12,7 +13,7 @@ use str0m::{
     Rtc,
     change::SdpPendingOffer,
     channel::ChannelId,
-    media::{MediaAdded, MediaKind, Mid, Rid},
+    media::{MediaKind, Mid, Rid},
 };
 
 use derive_more::Display;
@@ -55,7 +56,7 @@ pub struct Room {
     pub state: RoomState,
 }
 
-pub type Rooms = Arc<Mutex<HashMap<u64, Room>>>;
+pub type Rooms = HashMap<u64, Room>;
 
 #[derive(Debug)]
 pub struct TrackIn {
@@ -104,4 +105,29 @@ impl Client {
 pub enum PollResult {
     Timeout(Instant),
     Disconnected,
+}
+
+pub enum SfuMessage {
+    RegisterClient {
+        rtc: Rtc,
+        role: ClientRole,
+        room_id: RoomId,
+    },
+    CreateRoom {
+        room_id: RoomId,
+        reply: SyncSender<Option<()>>,
+    },
+    DeleteRoom {
+        room_id: RoomId,
+        reply: SyncSender<Option<()>>,
+    },
+    UpdateRoomState {
+        room_id: RoomId,
+        state: RoomState,
+        reply: SyncSender<Option<()>>,
+    },
+    GetViews {
+        room_id: RoomId,
+        reply: SyncSender<Option<usize>>,
+    },
 }

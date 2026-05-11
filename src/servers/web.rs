@@ -1,4 +1,8 @@
-use std::{collections::hash_map::Entry, net::SocketAddr, sync::mpsc::SyncSender, time::Instant};
+use std::{
+    net::SocketAddr,
+    sync::mpsc::{self, SyncSender},
+    time::Instant,
+};
 
 use axum::{
     Json, Router,
@@ -15,17 +19,17 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{ClientRole, Room, RoomId, RoomState, Rooms};
+use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
 
 #[derive(Clone)]
 struct SdpState {
     addr: SocketAddr,
-    tx: SyncSender<(Rtc, ClientRole, RoomId)>,
+    tx: SyncSender<SfuMessage>,
 }
 
 #[derive(Clone)]
 struct ApiState {
-    rooms: Rooms,
+    tx: SyncSender<SfuMessage>,
 }
 
 #[derive(Deserialize)]
@@ -37,24 +41,23 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(
-    addr: SocketAddr,
-    tx: SyncSender<(Rtc, ClientRole, RoomId)>,
-    rooms: Rooms,
-) -> anyhow::Result<()> {
+pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result<()> {
     let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
 
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .layer(CorsLayer::permissive())
-        .with_state(SdpState { addr, tx });
+        .with_state(SdpState {
+            addr,
+            tx: tx.clone(),
+        });
 
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
-        .with_state(ApiState { rooms });
+        .with_state(ApiState { tx });
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls(
@@ -84,18 +87,28 @@ pub async fn run(
     Ok(())
 }
 
-async fn create_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
-    match state.rooms.lock().unwrap().entry(room_id) {
-        Entry::Occupied(_) => StatusCode::CONFLICT,
-        Entry::Vacant(e) => {
-            e.insert(Room {
-                streamer_id: None,
-                clients: vec![],
-                state: RoomState::IDLE,
-            });
-            StatusCode::CREATED
-        }
-    }
+async fn create_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::CreateRoom {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::CONFLICT)
 }
 
 #[derive(Serialize)]
@@ -107,17 +120,25 @@ async fn get_room(
     Path(room_id): Path<u64>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
-    if let Some(room) = state.rooms.lock().unwrap().get(&room_id) {
-        let views = room
-            .clients
-            .iter()
-            .filter(|c| c.role == ClientRole::Viewer)
-            .count();
+    let (tx, rx) = mpsc::sync_channel::<Option<usize>>(1);
 
-        let res = Json(GetRoomResponse { views });
-        return Ok(res);
-    };
-    Err(StatusCode::NOT_FOUND)
+    state
+        .tx
+        .send(SfuMessage::GetViews {
+            room_id: RoomId(room_id),
+            reply: tx,
+        })
+        .ok();
+
+    let views = rx
+        .recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(GetRoomResponse { views }))
 }
 
 #[derive(Deserialize)]
@@ -129,21 +150,50 @@ async fn update_room(
     State(state): State<ApiState>,
     Path(room_id): Path<u64>,
     Json(payload): Json<UpdateRoomState>,
-) -> StatusCode {
-    if let Some(room) = state.rooms.lock().unwrap().get_mut(&room_id) {
-        room.state = payload.state;
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
 
-        StatusCode::OK
-    } else {
-        StatusCode::NOT_FOUND
-    }
+    let msg = SfuMessage::UpdateRoomState {
+        room_id: RoomId(room_id),
+        state: payload.state,
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
-async fn delete_room(Path(room_id): Path<u64>, State(state): State<ApiState>) -> StatusCode {
-    match state.rooms.lock().unwrap().remove(&room_id) {
-        Some(_) => StatusCode::OK,
-        None => StatusCode::NOT_FOUND,
-    }
+async fn delete_room(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::DeleteRoom {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn sdp_offer(
@@ -171,7 +221,13 @@ async fn sdp_offer(
         StatusCode::BAD_REQUEST
     })?;
 
-    tx.send((rtc, role, RoomId(room_id))).map_err(|e| {
+    let msg = SfuMessage::RegisterClient {
+        rtc,
+        role,
+        room_id: RoomId(room_id),
+    };
+
+    tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
