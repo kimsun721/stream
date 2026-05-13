@@ -66,7 +66,9 @@ Relay:    SFU ──► Client A (relay) ──► Client B
 
 ## Roadmap
 
+- [ ] Simulcast — manual quality selection
 - [ ] P2P relay
+- [ ] Simulcast — BWE-driven auto-switching
 - [ ] WHIP support (OBS integration)
 - [ ] gRPC for external backend ↔ SFU communication
 - [ ] VOD / replay support
@@ -77,3 +79,4 @@ Relay:    SFU ──► Client A (relay) ──► Client B
 - Data Channel message priority policy
 - Relay node selection criteria
 - Latency minimization on SFU fallback
+- HTTP/SFU latency under load — blocking `sync_channel::recv` in async handlers
