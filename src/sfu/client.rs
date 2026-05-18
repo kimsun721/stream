@@ -8,7 +8,7 @@ use str0m::{
     Event, IceConnectionState, Input, Output,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
-    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
+    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid, Rid},
 };
 use tracing::warn;
 
@@ -51,7 +51,14 @@ impl Client {
                     }
                     Event::MediaAdded(m) => {
                         if self.role == ClientRole::Streamer {
-                            let track_in = self.handle_media_added(m.mid, m.kind);
+                            let mut rids: Vec<Rid> = Vec::new();
+                            if let Some(simulcast) = m.simulcast {
+                                for layer in simulcast.send {
+                                    rids.push(layer.rid);
+                                }
+                            };
+
+                            let track_in = self.handle_media_added(m.mid, m.kind, rids);
                             new_tracks.push(track_in);
                         }
                     }
@@ -186,11 +193,17 @@ impl Client {
         Ok(result)
     }
 
-    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Arc<TrackIn> {
+    fn handle_media_added(
+        &mut self,
+        mid: Mid,
+        kind: MediaKind,
+        available_rids: Vec<Rid>,
+    ) -> Arc<TrackIn> {
         let track_in = Arc::new(TrackIn {
             origin: self.id,
             mid,
             kind,
+            available_rids,
         });
 
         let track_in_entry = TrackInEntry {

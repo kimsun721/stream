@@ -63,6 +63,7 @@ pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
+    pub available_rids: Vec<Rid>,
 }
 
 #[derive(Debug)]
