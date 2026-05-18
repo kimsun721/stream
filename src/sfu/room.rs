@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Weak, mpsc::SyncSender},
 };
 
-use str0m::Rtc;
+use str0m::{Rtc, media::Rid};
 use tracing::warn;
 
 use crate::types::{
@@ -109,10 +109,22 @@ impl Room {
                         .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
                         .collect();
 
+                    let available_rids: Vec<Rid> = self
+                        .clients
+                        .iter()
+                        .filter(|c| c.role == ClientRole::Streamer)
+                        .flat_map(|c| c.tracks_in.iter())
+                        .flat_map(|t| t.id.available_rids.clone())
+                        .collect();
+
+                    let default_rid = Rid::from("l");
+                    let chosen_rid = available_rids.contains(&default_rid).then(|| default_rid);
+
                     for track_in in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
+                            chosen_rid,
                         });
                     }
 

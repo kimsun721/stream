@@ -33,7 +33,6 @@ pub struct Client {
     pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
-    chosen_rid: Option<Rid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -76,6 +75,7 @@ pub struct TrackInEntry {
 pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
+    pub chosen_rid: Option<Rid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +98,6 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
-            chosen_rid: None,
         }
     }
 }

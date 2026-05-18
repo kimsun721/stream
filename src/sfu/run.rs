@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use str0m::Input;
+use str0m::{Input, media::Rid};
 use tracing::{debug, error};
 
 use crate::{
@@ -64,9 +64,19 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     .iter_mut()
                     .filter(|c| c.role == ClientRole::Viewer)
                 {
+                    let available_rids: Vec<Rid> = client
+                        .tracks_in
+                        .iter()
+                        .flat_map(|t| t.id.available_rids.clone())
+                        .collect();
+
+                    let default_rid = Rid::from("l");
+                    let chosen_rid = available_rids.contains(&default_rid).then(|| default_rid);
+
                     client.tracks_out.push(TrackOut {
                         track_in: Arc::downgrade(&track),
                         state: TrackOutState::ToOpen,
+                        chosen_rid,
                     });
                 }
             }
