@@ -64,7 +64,9 @@ impl Client {
                     }
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
-                    Event::ChannelData(data) => self.handle_channel_data(data)?,
+                    Event::ChannelData(data) => {
+                        self.handle_channel_data(data, keyframe_requests)?
+                    }
 
                     Event::KeyframeRequest(mut request) => {
                         if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
@@ -219,13 +221,17 @@ impl Client {
         track_in
     }
 
-    fn handle_channel_data(&mut self, data: ChannelData) -> ClientResult<()> {
+    fn handle_channel_data(
+        &mut self,
+        data: ChannelData,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
         let payload: DcPayload = serde_json::from_slice(&data.data)?;
 
         match payload {
             DcPayload::Offer { sdp } => self.handle_offer(&sdp),
             DcPayload::Answer { sdp } => self.handle_answer(&sdp),
-            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid),
+            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
         }
     }
 
@@ -257,7 +263,12 @@ impl Client {
         Ok(())
     }
 
-    fn set_layer(&mut self, mid: Mid, rid: Rid) -> ClientResult<()> {
+    fn set_layer(
+        &mut self,
+        mid: Mid,
+        rid: Rid,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
         let Some(track_out) = self
             .tracks_out
             .iter_mut()
@@ -275,6 +286,13 @@ impl Client {
         };
 
         track_out.chosen_rid = Some(rid);
+
+        keyframe_requests.push(KeyframeRequest {
+            mid: track_in.mid,
+            rid: Some(rid),
+            kind: str0m::media::KeyframeRequestKind::Fir,
+        });
+
         Ok(())
     }
 }
