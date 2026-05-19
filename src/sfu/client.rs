@@ -94,12 +94,17 @@ impl Client {
                 let track_in = t.track_in.upgrade()?;
                 if track_in.mid != data.mid {
                     return None;
-                }
-                if let TrackOutState::Open(viewer_mid) = t.state {
-                    Some(viewer_mid)
-                } else {
-                    None
-                }
+                };
+
+                if data.rid != t.chosen_rid {
+                    return None;
+                };
+
+                let TrackOutState::Open(viewer_mid) = t.state else {
+                    return None;
+                };
+
+                Some(viewer_mid)
             }) else {
                 continue;
             };
