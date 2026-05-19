@@ -229,8 +229,8 @@ impl Client {
         }
     }
 
-    fn handle_offer(&mut self, offer: &String) -> ClientResult<()> {
-        let offer = SdpOffer::from_sdp_string(&offer)?;
+    fn handle_offer(&mut self, offer: &str) -> ClientResult<()> {
+        let offer = SdpOffer::from_sdp_string(offer)?;
 
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
@@ -242,8 +242,8 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: &String) -> ClientResult<()> {
-        let answer = SdpAnswer::from_sdp_string(&answer)?;
+    fn handle_answer(&mut self, answer: &str) -> ClientResult<()> {
+        let answer = SdpAnswer::from_sdp_string(answer)?;
 
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
@@ -258,6 +258,23 @@ impl Client {
     }
 
     fn set_layer(&mut self, mid: Mid, rid: Rid) -> ClientResult<()> {
+        let Some(track_out) = self
+            .tracks_out
+            .iter_mut()
+            .find(|t| t.state == TrackOutState::Open(mid))
+        else {
+            return Ok(());
+        };
+
+        let Some(track_in) = track_out.track_in.upgrade() else {
+            return Ok(());
+        };
+
+        if !track_in.available_rids.contains(&rid) {
+            return Ok(());
+        };
+
+        track_out.chosen_rid = Some(rid);
         Ok(())
     }
 }
