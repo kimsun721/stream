@@ -102,6 +102,17 @@ impl Client {
     }
 }
 
+impl TrackIn {
+    pub fn default_rid(&self) -> Option<Rid> {
+        let default = Rid::from("l");
+
+        self.available_rids
+            .contains(&default)
+            .then_some(default)
+            .or_else(|| self.available_rids.first().copied())
+    }
+}
+
 pub enum PollResult {
     Timeout(Instant),
     Disconnected,

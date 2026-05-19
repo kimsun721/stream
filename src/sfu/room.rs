@@ -1,15 +1,13 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     ops::{Deref, DerefMut},
-    sync::{Arc, Weak, mpsc::SyncSender},
+    sync::{Arc, mpsc::SyncSender},
 };
 
-use str0m::{Rtc, media::Rid};
+use str0m::Rtc;
 use tracing::warn;
 
-use crate::types::{
-    Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackIn, TrackOut, TrackOutState,
-};
+use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState};
 
 impl Rooms {
     pub fn new() -> Self {
@@ -102,25 +100,18 @@ impl Room {
                     warn!("Client connected to an {:?} room", self.state);
                 }
                 RoomState::LIVE => {
-                    let tracks: Vec<Weak<TrackIn>> = self
+                    let tracks: Vec<_> = self
                         .clients
                         .iter()
                         .filter(|c| c.role == ClientRole::Streamer)
-                        .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
+                        .flat_map(|c| {
+                            c.tracks_in
+                                .iter()
+                                .map(|t| (Arc::downgrade(&t.id), t.id.default_rid()))
+                        })
                         .collect();
 
-                    let available_rids: Vec<Rid> = self
-                        .clients
-                        .iter()
-                        .filter(|c| c.role == ClientRole::Streamer)
-                        .flat_map(|c| c.tracks_in.iter())
-                        .flat_map(|t| t.id.available_rids.clone())
-                        .collect();
-
-                    let default_rid = Rid::from("l");
-                    let chosen_rid = available_rids.contains(&default_rid).then(|| default_rid);
-
-                    for track_in in tracks {
+                    for (track_in, chosen_rid) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
