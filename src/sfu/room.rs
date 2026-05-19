@@ -29,7 +29,7 @@ impl Rooms {
                 e.insert(Room {
                     streamer_id: None,
                     clients: vec![],
-                    state: RoomState::IDLE,
+                    state: RoomState::Idle,
                 });
 
                 reply.send(Some(())).ok()
@@ -96,10 +96,10 @@ impl Room {
                 }
             }
             ClientRole::Viewer => match self.state {
-                RoomState::IDLE | RoomState::PREVIEW => {
+                RoomState::Idle | RoomState::Preview => {
                     warn!("Client connected to an {:?} room", self.state);
                 }
-                RoomState::LIVE => {
+                RoomState::Live => {
                     let tracks: Vec<_> = self
                         .clients
                         .iter()

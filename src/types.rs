@@ -43,9 +43,9 @@ pub struct RoomId(pub u64);
 
 #[derive(Deserialize, Debug)]
 pub enum RoomState {
-    IDLE,
-    PREVIEW,
-    LIVE,
+    Idle,
+    Preview,
+    Live,
 }
 
 #[derive(Debug)]
@@ -120,7 +120,7 @@ pub enum PollResult {
 
 pub enum SfuMessage {
     RegisterClient {
-        rtc: Rtc,
+        rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
     },
