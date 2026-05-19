@@ -23,11 +23,11 @@ str0m based WebRTC SFU Streaming server
 └──────────────────────────────────────────────────┘
 ```
 
-Three threads run concurrently. The HTTP and HTTPS servers run on tokio threads; the SFU runs on a dedicated std thread. `Rooms` is shared across all three via `Arc<Mutex<_>>`. New WebRTC clients are handed off from the HTTPS server to the SFU via `mpsc::sync_channel`.
+Three threads run concurrently. The HTTP and HTTPS servers run on tokio threads; the SFU runs on a dedicated std thread and solely owns `Rooms`. Cross-thread communication (new clients, room CRUD, state queries) goes through `mpsc::sync_channel<SfuMessage>`.
 
 ## Internal API
 
-HTTP `:8443` — consumed by the backend (NestJS).
+HTTP `:8443` — consumed by an external backend.
 
 | Method   | Path          | Description                  |
 | -------- | ------------- | ---------------------------- |
@@ -66,9 +66,11 @@ Relay:    SFU ──► Client A (relay) ──► Client B
 
 ## Roadmap
 
+- [ ] Simulcast — manual quality selection
 - [ ] P2P relay
+- [ ] Simulcast — BWE-driven auto-switching
 - [ ] WHIP support (OBS integration)
-- [ ] gRPC for NestJS ↔ SFU communication
+- [ ] gRPC for external backend ↔ SFU communication
 - [ ] VOD / replay support
 - [ ] Stream thumbnail API
 
@@ -77,4 +79,4 @@ Relay:    SFU ──► Client A (relay) ──► Client B
 - Data Channel message priority policy
 - Relay node selection criteria
 - Latency minimization on SFU fallback
-- `Arc<Mutex<_>>` lock contention under high load
+- HTTP/SFU latency under load — blocking `sync_channel::recv` in async handlers
