@@ -125,13 +125,11 @@ impl Client {
             if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
                 let should_request = track_entry
                     .last_keyframe_request
-                    .map_or(true, |r| r.elapsed() >= Duration::from_millis(1000));
+                    .is_none_or(|r| r.elapsed() >= Duration::from_millis(1000));
 
-                if should_request {
-                    if let Some(mut writer) = self.rtc.writer(req.mid) {
-                        writer.request_keyframe(req.rid, req.kind)?;
-                        track_entry.last_keyframe_request = Some(Instant::now());
-                    }
+                if should_request && let Some(mut writer) = self.rtc.writer(req.mid) {
+                    writer.request_keyframe(req.rid, req.kind)?;
+                    track_entry.last_keyframe_request = Some(Instant::now());
                 };
             };
         }
@@ -147,19 +145,19 @@ impl Client {
         let mut change = self.rtc.sdp_api();
 
         for track_out in self.tracks_out.iter_mut() {
-            if track_out.state == TrackOutState::ToOpen {
-                if let Some(track_in) = track_out.track_in.upgrade() {
-                    let stream_id = track_in.origin.to_string();
-                    let mid = change.add_media(
-                        track_in.kind,
-                        Direction::SendOnly,
-                        Some(stream_id),
-                        None,
-                        None,
-                    );
+            if track_out.state == TrackOutState::ToOpen
+                && let Some(track_in) = track_out.track_in.upgrade()
+            {
+                let stream_id = track_in.origin.to_string();
+                let mid = change.add_media(
+                    track_in.kind,
+                    Direction::SendOnly,
+                    Some(stream_id),
+                    None,
+                    None,
+                );
 
-                    track_out.state = TrackOutState::Negotiating(mid);
-                }
+                track_out.state = TrackOutState::Negotiating(mid);
             }
         }
 

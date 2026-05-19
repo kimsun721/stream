@@ -67,7 +67,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     let chosen_rid = track.default_rid();
 
                     client.tracks_out.push(TrackOut {
-                        track_in: Arc::downgrade(&track),
+                        track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         chosen_rid,
                     });
@@ -92,10 +92,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 .clients
                 .iter_mut()
                 .find(|c| c.role == ClientRole::Streamer)
+                && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
             {
-                if let Err(e) = streamer.handle_keyframe_requests(keyframe_requests) {
-                    error!("handle_keyframe_requests failed: {}", e);
-                };
+                error!("handle_keyframe_requests failed: {}", e);
             };
         }
 
