@@ -8,13 +8,13 @@ use str0m::{
     Event, IceConnectionState, Input, Output,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
-    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid},
+    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid, Rid},
 };
 use tracing::warn;
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
-    types::{Client, ClientRole, PollResult, TrackIn, TrackInEntry, TrackOutState},
+    types::{Client, ClientRole, DcPayload, PollResult, TrackIn, TrackInEntry, TrackOutState},
 };
 
 impl Client {
@@ -51,17 +51,27 @@ impl Client {
                     }
                     Event::MediaAdded(m) => {
                         if self.role == ClientRole::Streamer {
-                            let track_in = self.handle_media_added(m.mid, m.kind);
+                            let mut rids: Vec<Rid> = Vec::new();
+                            if let Some(simulcast) = m.simulcast {
+                                for layer in simulcast.send {
+                                    rids.push(layer.rid);
+                                }
+                            };
+
+                            let track_in = self.handle_media_added(m.mid, m.kind, rids);
                             new_tracks.push(track_in);
                         }
                     }
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
-                    Event::ChannelData(data) => self.handle_channel_data(data)?,
+                    Event::ChannelData(data) => {
+                        self.handle_channel_data(data, keyframe_requests)?
+                    }
 
-                    Event::KeyframeRequest(request) => {
+                    Event::KeyframeRequest(mut request) => {
                         if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
                             if t.state == TrackOutState::Open(request.mid) {
+                                request.rid = t.chosen_rid;
                                 t.track_in.upgrade().map(|ti| ti.mid)
                             } else {
                                 None
@@ -87,12 +97,17 @@ impl Client {
                 let track_in = t.track_in.upgrade()?;
                 if track_in.mid != data.mid {
                     return None;
-                }
-                if let TrackOutState::Open(viewer_mid) = t.state {
-                    Some(viewer_mid)
-                } else {
-                    None
-                }
+                };
+
+                if data.rid != t.chosen_rid {
+                    return None;
+                };
+
+                let TrackOutState::Open(viewer_mid) = t.state else {
+                    return None;
+                };
+
+                Some(viewer_mid)
             }) else {
                 continue;
             };
@@ -118,13 +133,11 @@ impl Client {
             if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
                 let should_request = track_entry
                     .last_keyframe_request
-                    .map_or(true, |r| r.elapsed() >= Duration::from_millis(1000));
+                    .is_none_or(|r| r.elapsed() >= Duration::from_millis(1000));
 
-                if should_request {
-                    if let Some(mut writer) = self.rtc.writer(req.mid) {
-                        writer.request_keyframe(req.rid, req.kind)?;
-                        track_entry.last_keyframe_request = Some(Instant::now());
-                    }
+                if should_request && let Some(mut writer) = self.rtc.writer(req.mid) {
+                    writer.request_keyframe(req.rid, req.kind)?;
+                    track_entry.last_keyframe_request = Some(Instant::now());
                 };
             };
         }
@@ -140,19 +153,19 @@ impl Client {
         let mut change = self.rtc.sdp_api();
 
         for track_out in self.tracks_out.iter_mut() {
-            if track_out.state == TrackOutState::ToOpen {
-                if let Some(track_in) = track_out.track_in.upgrade() {
-                    let stream_id = track_in.origin.to_string();
-                    let mid = change.add_media(
-                        track_in.kind,
-                        Direction::SendOnly,
-                        Some(stream_id),
-                        None,
-                        None,
-                    );
+            if track_out.state == TrackOutState::ToOpen
+                && let Some(track_in) = track_out.track_in.upgrade()
+            {
+                let stream_id = track_in.origin.to_string();
+                let mid = change.add_media(
+                    track_in.kind,
+                    Direction::SendOnly,
+                    Some(stream_id),
+                    None,
+                    None,
+                );
 
-                    track_out.state = TrackOutState::Negotiating(mid);
-                }
+                track_out.state = TrackOutState::Negotiating(mid);
             }
         }
 
@@ -186,11 +199,17 @@ impl Client {
         Ok(result)
     }
 
-    fn handle_media_added(&mut self, mid: Mid, kind: MediaKind) -> Arc<TrackIn> {
+    fn handle_media_added(
+        &mut self,
+        mid: Mid,
+        kind: MediaKind,
+        available_rids: Vec<Rid>,
+    ) -> Arc<TrackIn> {
         let track_in = Arc::new(TrackIn {
             origin: self.id,
             mid,
             kind,
+            available_rids,
         });
 
         let track_in_entry = TrackInEntry {
@@ -202,16 +221,23 @@ impl Client {
         track_in
     }
 
-    fn handle_channel_data(&mut self, data: ChannelData) -> ClientResult<()> {
-        if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&data.data) {
-            self.handle_offer(offer)?;
-        } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
-            self.handle_answer(answer)?;
+    fn handle_channel_data(
+        &mut self,
+        data: ChannelData,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        let payload: DcPayload = serde_json::from_slice(&data.data)?;
+
+        match payload {
+            DcPayload::Offer { sdp } => self.handle_offer(&sdp),
+            DcPayload::Answer { sdp } => self.handle_answer(&sdp),
+            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
         }
-        Ok(())
     }
 
-    fn handle_offer(&mut self, offer: SdpOffer) -> ClientResult<()> {
+    fn handle_offer(&mut self, offer: &str) -> ClientResult<()> {
+        let offer = SdpOffer::from_sdp_string(offer)?;
+
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
@@ -222,7 +248,9 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: SdpAnswer) -> ClientResult<()> {
+    fn handle_answer(&mut self, answer: &str) -> ClientResult<()> {
+        let answer = SdpAnswer::from_sdp_string(answer)?;
+
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
 
@@ -232,6 +260,39 @@ impl Client {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn set_layer(
+        &mut self,
+        mid: Mid,
+        rid: Rid,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        let Some(track_out) = self
+            .tracks_out
+            .iter_mut()
+            .find(|t| t.state == TrackOutState::Open(mid))
+        else {
+            return Ok(());
+        };
+
+        let Some(track_in) = track_out.track_in.upgrade() else {
+            return Ok(());
+        };
+
+        if !track_in.available_rids.contains(&rid) {
+            return Ok(());
+        };
+
+        track_out.chosen_rid = Some(rid);
+
+        keyframe_requests.push(KeyframeRequest {
+            mid: track_in.mid,
+            rid: Some(rid),
+            kind: str0m::media::KeyframeRequestKind::Fir,
+        });
+
         Ok(())
     }
 }

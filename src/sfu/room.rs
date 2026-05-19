@@ -1,15 +1,13 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     ops::{Deref, DerefMut},
-    sync::{Arc, Weak, mpsc::SyncSender},
+    sync::{Arc, mpsc::SyncSender},
 };
 
 use str0m::Rtc;
 use tracing::warn;
 
-use crate::types::{
-    Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackIn, TrackOut, TrackOutState,
-};
+use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState};
 
 impl Rooms {
     pub fn new() -> Self {
@@ -31,7 +29,7 @@ impl Rooms {
                 e.insert(Room {
                     streamer_id: None,
                     clients: vec![],
-                    state: RoomState::IDLE,
+                    state: RoomState::Idle,
                 });
 
                 reply.send(Some(())).ok()
@@ -98,21 +96,26 @@ impl Room {
                 }
             }
             ClientRole::Viewer => match self.state {
-                RoomState::IDLE | RoomState::PREVIEW => {
+                RoomState::Idle | RoomState::Preview => {
                     warn!("Client connected to an {:?} room", self.state);
                 }
-                RoomState::LIVE => {
-                    let tracks: Vec<Weak<TrackIn>> = self
+                RoomState::Live => {
+                    let tracks: Vec<_> = self
                         .clients
                         .iter()
                         .filter(|c| c.role == ClientRole::Streamer)
-                        .flat_map(|c| c.tracks_in.iter().map(|t| Arc::downgrade(&t.id)))
+                        .flat_map(|c| {
+                            c.tracks_in
+                                .iter()
+                                .map(|t| (Arc::downgrade(&t.id), t.id.default_rid()))
+                        })
                         .collect();
 
-                    for track_in in tracks {
+                    for (track_in, chosen_rid) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
+                            chosen_rid,
                         });
                     }
 

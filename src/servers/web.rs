@@ -222,7 +222,7 @@ async fn sdp_offer(
     })?;
 
     let msg = SfuMessage::RegisterClient {
-        rtc,
+        rtc: Box::from(rtc),
         role,
         room_id: RoomId(room_id),
     };

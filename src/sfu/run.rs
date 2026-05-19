@@ -21,7 +21,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         while let Ok(message) = rx.try_recv() {
             match message {
                 SfuMessage::RegisterClient { rtc, role, room_id } => {
-                    rooms.register_client(rtc, role, room_id)
+                    rooms.register_client(*rtc, role, room_id)
                 }
                 SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
                 SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
@@ -64,9 +64,12 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     .iter_mut()
                     .filter(|c| c.role == ClientRole::Viewer)
                 {
+                    let chosen_rid = track.default_rid();
+
                     client.tracks_out.push(TrackOut {
-                        track_in: Arc::downgrade(&track),
+                        track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
+                        chosen_rid,
                     });
                 }
             }
@@ -89,10 +92,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 .clients
                 .iter_mut()
                 .find(|c| c.role == ClientRole::Streamer)
+                && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
             {
-                if let Err(e) = streamer.handle_keyframe_requests(keyframe_requests) {
-                    error!("handle_keyframe_requests failed: {}", e);
-                };
+                error!("handle_keyframe_requests failed: {}", e);
             };
         }
 

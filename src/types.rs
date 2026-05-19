@@ -33,7 +33,6 @@ pub struct Client {
     pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
-    chosen_rid: Option<Rid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -44,9 +43,9 @@ pub struct RoomId(pub u64);
 
 #[derive(Deserialize, Debug)]
 pub enum RoomState {
-    IDLE,
-    PREVIEW,
-    LIVE,
+    Idle,
+    Preview,
+    Live,
 }
 
 #[derive(Debug)]
@@ -63,6 +62,7 @@ pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
+    pub available_rids: Vec<Rid>,
 }
 
 #[derive(Debug)]
@@ -75,6 +75,7 @@ pub struct TrackInEntry {
 pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
+    pub chosen_rid: Option<Rid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +98,18 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
-            chosen_rid: None,
         }
+    }
+}
+
+impl TrackIn {
+    pub fn default_rid(&self) -> Option<Rid> {
+        let default = Rid::from("l");
+
+        self.available_rids
+            .contains(&default)
+            .then_some(default)
+            .or_else(|| self.available_rids.first().copied())
     }
 }
 
@@ -109,7 +120,7 @@ pub enum PollResult {
 
 pub enum SfuMessage {
     RegisterClient {
-        rtc: Rtc,
+        rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
     },
@@ -130,4 +141,12 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DcPayload {
+    Offer { sdp: String },
+    Answer { sdp: String },
+    SetLayer { mid: Mid, rid: Rid },
 }
