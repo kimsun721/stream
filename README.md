@@ -66,7 +66,7 @@ Relay:    SFU ──► Client A (relay) ──► Client B
 
 ## Roadmap
 
-- [ ] Simulcast — manual quality selection
+- [x] Simulcast — manual quality selection
 - [ ] P2P relay
 - [ ] Simulcast — BWE-driven auto-switching
 - [ ] WHIP support (OBS integration)
