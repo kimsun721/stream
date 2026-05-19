@@ -66,9 +66,10 @@ impl Client {
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(data)?,
 
-                    Event::KeyframeRequest(request) => {
+                    Event::KeyframeRequest(mut request) => {
                         if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
                             if t.state == TrackOutState::Open(request.mid) {
+                                request.rid = t.chosen_rid;
                                 t.track_in.upgrade().map(|ti| ti.mid)
                             } else {
                                 None
