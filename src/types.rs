@@ -142,3 +142,11 @@ pub enum SfuMessage {
         reply: SyncSender<Option<usize>>,
     },
 }
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DcPayload {
+    Offer { sdp: String },
+    Answer { sdp: String },
+    SetLayer { mid: Mid, rid: Rid },
+}

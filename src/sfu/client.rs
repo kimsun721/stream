@@ -14,7 +14,7 @@ use tracing::warn;
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
-    types::{Client, ClientRole, PollResult, TrackIn, TrackInEntry, TrackOutState},
+    types::{Client, ClientRole, DcPayload, PollResult, TrackIn, TrackInEntry, TrackOutState},
 };
 
 impl Client {
@@ -220,15 +220,18 @@ impl Client {
     }
 
     fn handle_channel_data(&mut self, data: ChannelData) -> ClientResult<()> {
-        if let Ok(offer) = serde_json::from_slice::<'_, SdpOffer>(&data.data) {
-            self.handle_offer(offer)?;
-        } else if let Ok(answer) = serde_json::from_slice::<'_, SdpAnswer>(&data.data) {
-            self.handle_answer(answer)?;
+        let payload: DcPayload = serde_json::from_slice(&data.data)?;
+
+        match payload {
+            DcPayload::Offer { sdp } => self.handle_offer(&sdp),
+            DcPayload::Answer { sdp } => self.handle_answer(&sdp),
+            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid),
         }
-        Ok(())
     }
 
-    fn handle_offer(&mut self, offer: SdpOffer) -> ClientResult<()> {
+    fn handle_offer(&mut self, offer: &String) -> ClientResult<()> {
+        let offer = SdpOffer::from_sdp_string(&offer)?;
+
         let answer = self.rtc.sdp_api().accept_offer(offer)?;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
@@ -239,7 +242,9 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: SdpAnswer) -> ClientResult<()> {
+    fn handle_answer(&mut self, answer: &String) -> ClientResult<()> {
+        let answer = SdpAnswer::from_sdp_string(&answer)?;
+
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
 
@@ -249,6 +254,10 @@ impl Client {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn set_layer(&mut self, mid: Mid, rid: Rid) -> ClientResult<()> {
         Ok(())
     }
 }

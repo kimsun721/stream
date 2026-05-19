@@ -11,6 +11,9 @@ pub enum ClientError {
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
 
+    #[error("sdp: {0}")]
+    Sdp(#[from] str0m::error::SdpError),
+
     #[error("sdp_api apply returned None")]
     ApplyFailed,
 
