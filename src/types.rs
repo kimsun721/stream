@@ -41,7 +41,7 @@ pub struct ClientId(u64);
 #[derive(Debug)]
 pub struct RoomId(pub u64);
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 pub enum RoomState {
     Idle,
     Preview,

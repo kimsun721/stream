@@ -145,7 +145,7 @@ mod tests {
 
     use str0m::Rtc;
 
-    use crate::types::{ClientRole, RoomId, RoomState, Rooms};
+    use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms};
 
     fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
         mpsc::sync_channel(1)
@@ -227,5 +227,47 @@ mod tests {
         let (tx, rx) = reply();
         rooms.delete(RoomId(7), tx);
         assert_eq!(rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn add_duplicate_streamer() {
+        let clients: Vec<Client> = Vec::new();
+
+        let mut room = Room {
+            streamer_id: None,
+            clients,
+            state: RoomState::Live,
+        };
+
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
+
+        assert_eq!(room.clients.len(), 1);
+    }
+
+    #[test]
+    fn add_viewer_each_room_state() {
+        let cases = [
+            (RoomState::Live, 1),
+            (RoomState::Idle, 0),
+            (RoomState::Preview, 0),
+        ];
+
+        for (state, clients_len) in cases {
+            let mut room = Room {
+                streamer_id: None,
+                clients: Vec::new(),
+                state: state.clone(),
+            };
+
+            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer);
+
+            assert_eq!(
+                room.clients.len(),
+                clients_len,
+                "add_client unit test for RoomState: {state:?} case"
+            );
+        }
     }
 }
