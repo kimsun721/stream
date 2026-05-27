@@ -317,7 +317,7 @@ mod tests {
 
     use str0m::{
         Rtc,
-        media::{KeyframeRequest, MediaKind, Mid, Rid},
+        media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
     };
 
     use crate::types::{Client, ClientRole, TrackIn, TrackOut, TrackOutState};
@@ -443,5 +443,35 @@ mod tests {
             client.matching_viewer_mid(Mid::from("unknown-video"), Some(Rid::from("l")));
 
         assert_eq!(viewer_mid, None);
+    }
+
+    #[test]
+    fn keyframe_request_remapped_to_streamer_mid_and_chosen_rid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let translated = client
+            .translate_keyframe_request(KeyframeRequest {
+                mid: Mid::from("viewer-video"),
+                rid: None,
+                kind: KeyframeRequestKind::Pli,
+            })
+            .expect("request should map to the streamer track");
+
+        assert_eq!(translated.mid, Mid::from("streamer-video"));
+        assert_eq!(translated.rid, Some(Rid::from("l")));
+        assert_eq!(translated.kind, KeyframeRequestKind::Pli);
+    }
+
+    #[test]
+    fn keyframe_request_dropped_for_unknown_mid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let translated = client.translate_keyframe_request(KeyframeRequest {
+            mid: Mid::from("unknown-video"),
+            rid: None,
+            kind: KeyframeRequestKind::Pli,
+        });
+
+        assert!(translated.is_none());
     }
 }
