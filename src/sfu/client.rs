@@ -68,20 +68,10 @@ impl Client {
                         self.handle_channel_data(data, keyframe_requests)?
                     }
 
-                    Event::KeyframeRequest(mut request) => {
-                        if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
-                            if t.state == TrackOutState::Open(request.mid) {
-                                request.rid = t.chosen_rid;
-                                t.track_in.upgrade().map(|ti| ti.mid)
-                            } else {
-                                None
-                            }
-                        }) {
-                            keyframe_requests.push(KeyframeRequest {
-                                mid: streamer_mid,
-                                ..request
-                            });
-                        };
+                    Event::KeyframeRequest(request) => {
+                        if let Some(translated) = self.translate_keyframe_request(request) {
+                            keyframe_requests.push(translated);
+                        }
                     }
                     _ => {}
                 },
@@ -91,24 +81,44 @@ impl Client {
         Ok(PollResult::Timeout(timeout))
     }
 
+    fn matching_viewer_mid(&self, mid: Mid, rid: Option<Rid>) -> Option<Mid> {
+        self.tracks_out.iter().find_map(|t| {
+            let track_in = t.track_in.upgrade()?;
+            if track_in.mid != mid {
+                return None;
+            };
+
+            if rid != t.chosen_rid {
+                return None;
+            };
+
+            let TrackOutState::Open(viewer_mid) = t.state else {
+                return None;
+            };
+
+            Some(viewer_mid)
+        })
+    }
+
+    fn translate_keyframe_request(&self, request: KeyframeRequest) -> Option<KeyframeRequest> {
+        self.tracks_out.iter().find_map(|t| {
+            if t.state != TrackOutState::Open(request.mid) {
+                return None;
+            };
+
+            let streamer_mid = t.track_in.upgrade()?.mid;
+
+            Some(KeyframeRequest {
+                mid: streamer_mid,
+                rid: t.chosen_rid,
+                kind: request.kind,
+            })
+        })
+    }
+
     pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> ClientResult<()> {
         for data in datas {
-            let Some(mid) = self.tracks_out.iter().find_map(|t| {
-                let track_in = t.track_in.upgrade()?;
-                if track_in.mid != data.mid {
-                    return None;
-                };
-
-                if data.rid != t.chosen_rid {
-                    return None;
-                };
-
-                let TrackOutState::Open(viewer_mid) = t.state else {
-                    return None;
-                };
-
-                Some(viewer_mid)
-            }) else {
+            let Some(mid) = self.matching_viewer_mid(data.mid, data.rid) else {
                 continue;
             };
 
@@ -285,6 +295,10 @@ impl Client {
             return Ok(());
         };
 
+        if track_out.chosen_rid == Some(rid) {
+            return Ok(());
+        };
+
         track_out.chosen_rid = Some(rid);
 
         keyframe_requests.push(KeyframeRequest {
@@ -294,5 +308,170 @@ impl Client {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Instant};
+
+    use str0m::{
+        Rtc,
+        media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
+    };
+
+    use crate::types::{Client, ClientRole, TrackIn, TrackOut, TrackOutState};
+
+    fn viewer_with_track_out() -> (Client, Arc<TrackIn>) {
+        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer);
+
+        let streamer_mid = Mid::from("streamer-video");
+        let viewer_mid = Mid::from("viewer-video");
+        let low_rid = Rid::from("l");
+        let high_rid = Rid::from("h");
+
+        let track_in = Arc::new(TrackIn {
+            origin: client.id,
+            mid: streamer_mid,
+            kind: MediaKind::Video,
+            available_rids: vec![low_rid, high_rid],
+        });
+
+        let track_out = TrackOut {
+            track_in: Arc::downgrade(&track_in),
+            state: TrackOutState::Open(viewer_mid),
+            chosen_rid: Some(low_rid),
+        };
+
+        client.tracks_out.push(track_out);
+        (client, track_in)
+    }
+
+    #[test]
+    fn set_layer_updates_chosen_rid_and_requests_keyframe() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+        let viewer_mid = Mid::from("viewer-video");
+        let streamer_mid = Mid::from("streamer-video");
+        let high_rid = Rid::from("h");
+
+        client
+            .set_layer(viewer_mid, high_rid, &mut keyframe_requests)
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(high_rid));
+        assert_eq!(keyframe_requests.len(), 1);
+        assert_eq!(keyframe_requests[0].mid, streamer_mid);
+        assert_eq!(keyframe_requests[0].rid, Some(high_rid));
+    }
+
+    #[test]
+    fn set_layer_ignores_unknown_mid() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("unknown-video"),
+                Rid::from("h"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_ignores_unknown_rid() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("viewer-video"),
+                Rid::from("x"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_ignores_no_change() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("viewer-video"),
+                Rid::from("l"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn media_routed_only_when_rid_matches_chosen() {
+        let (client, _track_in) = viewer_with_track_out();
+        let streamer_mid = Mid::from("streamer-video");
+        let viewer_mid = Mid::from("viewer-video");
+
+        let cases = [
+            (Some(Rid::from("l")), Some(viewer_mid)),
+            (Some(Rid::from("h")), None),
+            (None, None),
+        ];
+
+        for (incoming_rid, expected) in cases {
+            let viewer_mid = client.matching_viewer_mid(streamer_mid, incoming_rid);
+
+            assert_eq!(viewer_mid, expected, "incoming rid {incoming_rid:?}",);
+        }
+    }
+
+    #[test]
+    fn media_dropped_for_unknown_mid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let viewer_mid =
+            client.matching_viewer_mid(Mid::from("unknown-video"), Some(Rid::from("l")));
+
+        assert_eq!(viewer_mid, None);
+    }
+
+    #[test]
+    fn keyframe_request_remapped_to_streamer_mid_and_chosen_rid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let translated = client
+            .translate_keyframe_request(KeyframeRequest {
+                mid: Mid::from("viewer-video"),
+                rid: None,
+                kind: KeyframeRequestKind::Pli,
+            })
+            .expect("request should map to the streamer track");
+
+        assert_eq!(translated.mid, Mid::from("streamer-video"));
+        assert_eq!(translated.rid, Some(Rid::from("l")));
+        assert_eq!(translated.kind, KeyframeRequestKind::Pli);
+    }
+
+    #[test]
+    fn keyframe_request_dropped_for_unknown_mid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let translated = client.translate_keyframe_request(KeyframeRequest {
+            mid: Mid::from("unknown-video"),
+            rid: None,
+            kind: KeyframeRequestKind::Pli,
+        });
+
+        assert!(translated.is_none());
     }
 }
