@@ -68,20 +68,10 @@ impl Client {
                         self.handle_channel_data(data, keyframe_requests)?
                     }
 
-                    Event::KeyframeRequest(mut request) => {
-                        if let Some(streamer_mid) = self.tracks_out.iter().find_map(|t| {
-                            if t.state == TrackOutState::Open(request.mid) {
-                                request.rid = t.chosen_rid;
-                                t.track_in.upgrade().map(|ti| ti.mid)
-                            } else {
-                                None
-                            }
-                        }) {
-                            keyframe_requests.push(KeyframeRequest {
-                                mid: streamer_mid,
-                                ..request
-                            });
-                        };
+                    Event::KeyframeRequest(request) => {
+                        if let Some(translated) = self.translate_keyframe_request(request) {
+                            keyframe_requests.push(translated);
+                        }
                     }
                     _ => {}
                 },
@@ -107,6 +97,22 @@ impl Client {
             };
 
             Some(viewer_mid)
+        })
+    }
+
+    fn translate_keyframe_request(&self, request: KeyframeRequest) -> Option<KeyframeRequest> {
+        self.tracks_out.iter().find_map(|t| {
+            if t.state != TrackOutState::Open(request.mid) {
+                return None;
+            };
+
+            let streamer_mid = t.track_in.upgrade()?.mid;
+
+            Some(KeyframeRequest {
+                mid: streamer_mid,
+                rid: t.chosen_rid,
+                kind: request.kind,
+            })
         })
     }
 
