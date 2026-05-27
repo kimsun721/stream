@@ -91,24 +91,28 @@ impl Client {
         Ok(PollResult::Timeout(timeout))
     }
 
+    fn matching_viewer_mid(&self, mid: Mid, rid: Option<Rid>) -> Option<Mid> {
+        self.tracks_out.iter().find_map(|t| {
+            let track_in = t.track_in.upgrade()?;
+            if track_in.mid != mid {
+                return None;
+            };
+
+            if rid != t.chosen_rid {
+                return None;
+            };
+
+            let TrackOutState::Open(viewer_mid) = t.state else {
+                return None;
+            };
+
+            Some(viewer_mid)
+        })
+    }
+
     pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> ClientResult<()> {
         for data in datas {
-            let Some(mid) = self.tracks_out.iter().find_map(|t| {
-                let track_in = t.track_in.upgrade()?;
-                if track_in.mid != data.mid {
-                    return None;
-                };
-
-                if data.rid != t.chosen_rid {
-                    return None;
-                };
-
-                let TrackOutState::Open(viewer_mid) = t.state else {
-                    return None;
-                };
-
-                Some(viewer_mid)
-            }) else {
+            let Some(mid) = self.matching_viewer_mid(data.mid, data.rid) else {
                 continue;
             };
 
