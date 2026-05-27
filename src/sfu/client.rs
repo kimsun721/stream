@@ -409,4 +409,33 @@ mod tests {
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
+
+    #[test]
+    fn media_routed_only_when_rid_matches_chosen() {
+        let (client, _track_in) = viewer_with_track_out();
+        let streamer_mid = Mid::from("streamer-video");
+        let viewer_mid = Mid::from("viewer-video");
+
+        let cases = [
+            (Some(Rid::from("l")), Some(viewer_mid)),
+            (Some(Rid::from("h")), None),
+            (None, None),
+        ];
+
+        for (incoming_rid, expected) in cases {
+            let viewer_mid = client.matching_viewer_mid(streamer_mid, incoming_rid);
+
+            assert_eq!(viewer_mid, expected, "incoming rid {incoming_rid:?}",);
+        }
+    }
+
+    #[test]
+    fn media_dropped_for_unknown_mid() {
+        let (client, _track_in) = viewer_with_track_out();
+
+        let viewer_mid =
+            client.matching_viewer_mid(Mid::from("unknown-video"), Some(Rid::from("l")));
+
+        assert_eq!(viewer_mid, None);
+    }
 }
