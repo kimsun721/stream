@@ -285,6 +285,10 @@ impl Client {
             return Ok(());
         };
 
+        if track_out.chosen_rid == Some(rid) {
+            return Ok(());
+        };
+
         track_out.chosen_rid = Some(rid);
 
         keyframe_requests.push(KeyframeRequest {
@@ -294,5 +298,111 @@ impl Client {
         });
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Instant};
+
+    use str0m::{
+        Rtc,
+        media::{KeyframeRequest, MediaKind, Mid, Rid},
+    };
+
+    use crate::types::{Client, ClientRole, TrackIn, TrackOut, TrackOutState};
+
+    fn viewer_with_track_out() -> (Client, Arc<TrackIn>) {
+        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer);
+
+        let streamer_mid = Mid::from("streamer-video");
+        let viewer_mid = Mid::from("viewer-video");
+        let low_rid = Rid::from("l");
+        let high_rid = Rid::from("h");
+
+        let track_in = Arc::new(TrackIn {
+            origin: client.id,
+            mid: streamer_mid,
+            kind: MediaKind::Video,
+            available_rids: vec![low_rid, high_rid],
+        });
+
+        let track_out = TrackOut {
+            track_in: Arc::downgrade(&track_in),
+            state: TrackOutState::Open(viewer_mid),
+            chosen_rid: Some(low_rid),
+        };
+
+        client.tracks_out.push(track_out);
+        (client, track_in)
+    }
+
+    #[test]
+    fn set_layer_updates_chosen_rid_and_requests_keyframe() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+        let viewer_mid = Mid::from("viewer-video");
+        let streamer_mid = Mid::from("streamer-video");
+        let high_rid = Rid::from("h");
+
+        client
+            .set_layer(viewer_mid, high_rid, &mut keyframe_requests)
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(high_rid));
+        assert_eq!(keyframe_requests.len(), 1);
+        assert_eq!(keyframe_requests[0].mid, streamer_mid);
+        assert_eq!(keyframe_requests[0].rid, Some(high_rid));
+    }
+
+    #[test]
+    fn set_layer_ignores_unknown_mid() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("unknown-video"),
+                Rid::from("h"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_ignores_unknown_rid() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("viewer-video"),
+                Rid::from("x"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_ignores_no_change() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+
+        client
+            .set_layer(
+                Mid::from("viewer-video"),
+                Rid::from("l"),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
     }
 }
