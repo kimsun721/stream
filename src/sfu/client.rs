@@ -242,6 +242,11 @@ impl Client {
             DcPayload::Offer { sdp } => self.handle_offer(&sdp),
             DcPayload::Answer { sdp } => self.handle_answer(&sdp),
             DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
+            DcPayload::PerfReport {
+                rtt_ms,
+                loss_pct,
+                avail_out_kbs,
+            } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
         }
     }
 
@@ -307,6 +312,15 @@ impl Client {
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
 
+        Ok(())
+    }
+
+    pub fn perf_report(
+        &mut self,
+        rtt_ms: u32,
+        loss_pct: f32,
+        avail_out_kbps: u32,
+    ) -> ClientResult<()> {
         Ok(())
     }
 }
