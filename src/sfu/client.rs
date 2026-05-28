@@ -10,7 +10,7 @@ use str0m::{
     channel::ChannelData,
     media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid, Rid},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
@@ -321,6 +321,14 @@ impl Client {
         loss_pct: f32,
         avail_out_kbps: u32,
     ) -> ClientResult<()> {
+        debug!(
+            client_id = %self.id,
+            rtt_ms,
+            loss_pct,
+            avail_out_kbps,
+            "perf_report"
+        );
+
         Ok(())
     }
 }
