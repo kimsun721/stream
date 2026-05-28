@@ -146,7 +146,19 @@ pub enum SfuMessage {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DcPayload {
-    Offer { sdp: String },
-    Answer { sdp: String },
-    SetLayer { mid: Mid, rid: Rid },
+    Offer {
+        sdp: String,
+    },
+    Answer {
+        sdp: String,
+    },
+    SetLayer {
+        mid: Mid,
+        rid: Rid,
+    },
+    PerfReport {
+        rtt_ms: u32,
+        loss_pct: f32,
+        avail_out_kbs: u32,
+    },
 }
