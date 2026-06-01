@@ -167,6 +167,17 @@ pub enum DcPayload {
 
 #[derive(Debug)]
 pub enum RelayStatus {
-    Relay { leaf: ClientId },
-    Leaf { relay: ClientId },
+    Relay {
+        leaf: ClientId,
+    },
+    Leaf {
+        relay: ClientId,
+        link_state: LinkState,
+    },
+}
+
+#[derive(Debug)]
+pub enum LinkState {
+    Connecting,
+    Connected,
 }
