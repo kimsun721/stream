@@ -33,6 +33,7 @@ pub struct Client {
     pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
+    pub relay_status: Option<RelayStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -98,6 +99,7 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
+            relay_status: None,
         }
     }
 }
@@ -161,4 +163,10 @@ pub enum DcPayload {
         loss_pct: f32,
         avail_out_kbs: u32,
     },
+}
+
+#[derive(Debug)]
+pub enum RelayStatus {
+    Relay { leaf: ClientId },
+    Leaf { relay: ClientId },
 }
