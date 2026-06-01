@@ -65,6 +65,8 @@ impl Rooms {
             None => reply.send(None).ok(),
         };
     }
+
+    pub fn promote(&mut self, room_id: RoomId) {}
 }
 
 impl Room {

@@ -57,6 +57,7 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
+        .route("/promote/{room_id}", routing::post(promote))
         .with_state(ApiState { tx });
 
     let https_server = tokio::spawn(async move {
@@ -238,4 +239,22 @@ async fn sdp_offer(
     })?;
 
     Ok(Json(value))
+}
+
+async fn promote(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<StatusCode, StatusCode> {
+    let tx = state.tx;
+
+    let msg = SfuMessage::Promote {
+        room_id: RoomId(room_id),
+    };
+
+    tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
