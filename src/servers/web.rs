@@ -245,16 +245,24 @@ async fn promote(
     Path(room_id): Path<u64>,
     State(state): State<ApiState>,
 ) -> Result<StatusCode, StatusCode> {
-    let tx = state.tx;
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
 
     let msg = SfuMessage::Promote {
         room_id: RoomId(room_id),
+        reply: tx,
     };
 
-    tx.send(msg).map_err(|e| {
+    state.tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

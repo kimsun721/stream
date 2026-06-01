@@ -5,9 +5,11 @@ use std::{
 };
 
 use str0m::Rtc;
-use tracing::warn;
+use tracing::{info, warn};
 
-use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState};
+use crate::types::{
+    Client, ClientRole, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState,
+};
 
 impl Rooms {
     pub fn new() -> Self {
@@ -66,7 +68,37 @@ impl Rooms {
         };
     }
 
-    pub fn promote(&mut self, room_id: RoomId) {}
+    pub fn promote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
+        match self.get_mut(&room_id.0) {
+            Some(room) => {
+                let mut viewers = room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer);
+
+                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
+                    reply.send(None).ok();
+                    return;
+                };
+                let relay_id = relay.id;
+                let leaf_id = leaf.id;
+
+                relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
+
+                leaf.relay_status = Some(RelayStatus::Leaf {
+                    relay: relay_id,
+                    link_state: crate::types::LinkState::Connecting,
+                });
+
+                reply.send(Some(())).ok();
+
+                info!("promote relay={relay_id} leaf={leaf_id}");
+            }
+            None => {
+                reply.send(None).ok();
+            }
+        }
+    }
 }
 
 impl Room {

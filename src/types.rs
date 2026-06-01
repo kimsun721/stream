@@ -145,6 +145,7 @@ pub enum SfuMessage {
     },
     Promote {
         room_id: RoomId,
+        reply: SyncSender<Option<()>>,
     },
 }
 
