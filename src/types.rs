@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use str0m::{
     Rtc,
     change::SdpPendingOffer,
@@ -151,7 +151,7 @@ pub enum SfuMessage {
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum DcPayload {
+pub enum C2sDcPayload {
     Offer {
         sdp: String,
     },
@@ -167,6 +167,12 @@ pub enum DcPayload {
         loss_pct: f32,
         avail_out_kbs: u32,
     },
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum S2cDcPayload {
+    RequestOffer,
 }
 
 #[derive(Debug)]

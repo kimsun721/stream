@@ -14,7 +14,10 @@ use tracing::{debug, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
-    types::{Client, ClientRole, DcPayload, PollResult, TrackIn, TrackInEntry, TrackOutState},
+    types::{
+        C2sDcPayload, Client, ClientRole, PollResult, S2cDcPayload, TrackIn, TrackInEntry,
+        TrackOutState,
+    },
 };
 
 impl Client {
@@ -209,6 +212,20 @@ impl Client {
         Ok(result)
     }
 
+    pub fn request_sdp_offer(&mut self) -> ClientResult<()> {
+        let mut channel = self
+            .cid
+            .and_then(|id| self.rtc.channel(id))
+            .ok_or(ClientError::ChannelNotFound)?;
+
+        let payload = S2cDcPayload::RequestOffer {};
+        let json = serde_json::to_string(&payload)?;
+
+        channel.write(false, json.as_bytes())?;
+
+        Ok(())
+    }
+
     fn handle_media_added(
         &mut self,
         mid: Mid,
@@ -236,13 +253,13 @@ impl Client {
         data: ChannelData,
         keyframe_requests: &mut Vec<KeyframeRequest>,
     ) -> ClientResult<()> {
-        let payload: DcPayload = serde_json::from_slice(&data.data)?;
+        let payload: C2sDcPayload = serde_json::from_slice(&data.data)?;
 
         match payload {
-            DcPayload::Offer { sdp } => self.handle_offer(&sdp),
-            DcPayload::Answer { sdp } => self.handle_answer(&sdp),
-            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
-            DcPayload::PerfReport {
+            C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
+            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp),
+            C2sDcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
+            C2sDcPayload::PerfReport {
                 rtt_ms,
                 loss_pct,
                 avail_out_kbs,

@@ -5,10 +5,11 @@ use std::{
 };
 
 use str0m::Rtc;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientRole, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState,
+    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
+    TrackOutState,
 };
 
 impl Rooms {
@@ -87,12 +88,16 @@ impl Rooms {
 
                 leaf.relay_status = Some(RelayStatus::Leaf {
                     relay: relay_id,
-                    link_state: crate::types::LinkState::Connecting,
+                    link_state: LinkState::Connecting,
                 });
 
                 reply.send(Some(())).ok();
 
                 info!("promote relay={relay_id} leaf={leaf_id}");
+
+                if let Err(e) = relay.request_sdp_offer() {
+                    error!("request_sdp_offer failed: {e}");
+                };
             }
             None => {
                 reply.send(None).ok();
