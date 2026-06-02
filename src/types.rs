@@ -167,6 +167,9 @@ pub enum C2sDcPayload {
         loss_pct: f32,
         avail_out_kbs: u32,
     },
+    P2pOffer {
+        sdp: String,
+    },
 }
 
 #[derive(Serialize)]

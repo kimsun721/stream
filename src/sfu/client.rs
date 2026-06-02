@@ -264,6 +264,7 @@ impl Client {
                 loss_pct,
                 avail_out_kbs,
             } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
+            C2sDcPayload::P2pOffer { sdp } => self.handle_p2p_offer(&sdp),
         }
     }
 
@@ -292,6 +293,10 @@ impl Client {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn handle_p2p_offer(&mut self, offer: &str) -> ClientResult<()> {
         Ok(())
     }
 
