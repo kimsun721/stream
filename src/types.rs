@@ -176,6 +176,7 @@ pub enum C2sDcPayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum S2cDcPayload {
     RequestOffer,
+    P2pOffer { sdp: String },
 }
 
 #[derive(Debug)]

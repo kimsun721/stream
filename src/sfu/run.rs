@@ -42,6 +42,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
+            let mut p2p_offers = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -49,6 +50,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut new_tracks,
                     &mut media_datas,
                     &mut keyframe_requests,
+                    &mut p2p_offers,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => to_remove.push(idx),
@@ -97,6 +99,23 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             {
                 error!("handle_keyframe_requests failed: {}", e);
             };
+
+            for offer in p2p_offers {
+                let (leaf_id, payload) = offer;
+
+                if let Some(leaf) = room.clients.iter_mut().find(|c| c.id == leaf_id)
+                    && let Some(mut channel) = leaf.cid.and_then(|id| leaf.rtc.channel(id))
+                {
+                    let Ok(json) = serde_json::to_string(&payload) else {
+                        error!("serde_json to_string failed: relay_id={leaf_id}");
+                        continue;
+                    };
+
+                    if let Err(e) = channel.write(false, json.as_bytes()) {
+                        error!("send p2p_offer via dc failed: {e}");
+                    };
+                }
+            }
         }
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
