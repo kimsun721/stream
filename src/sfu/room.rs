@@ -11,8 +11,8 @@ use str0m::{
 use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
-    TrackOutState,
+    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, S2cDcPayload,
+    TrackOut, TrackOutState,
 };
 
 impl Rooms {
@@ -137,16 +137,28 @@ impl Rooms {
                     })
                     .collect();
 
+                if let Some(mut channel) = leaf.cid.and_then(|id| leaf.rtc.channel(id))
+                    && let Ok(json) = serde_json::to_string(&S2cDcPayload::Demote)
+                    && let Err(e) = channel.write(false, json.as_bytes())
+                {
+                    error!("write Demote via dc failed: {e}");
+                };
+
+                if let Some(mut channel) = relay.cid.and_then(|id| relay.rtc.channel(id))
+                    && let Ok(json) = serde_json::to_string(&S2cDcPayload::Demote)
+                    && let Err(e) = channel.write(false, json.as_bytes())
+                {
+                    error!("write Demote via dc failed: {e}");
+                };
+
                 if let Some(streamer) = room
                     .clients
                     .iter_mut()
                     .find(|c| c.role == ClientRole::Streamer)
                     && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
                 {
-                    {
-                        error!("demote keyframe requests failed: {e}");
-                    };
-                }
+                    error!("demote keyframe requests failed: {e}");
+                };
 
                 reply.send(Some(())).ok();
             }

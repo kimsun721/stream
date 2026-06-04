@@ -186,6 +186,7 @@ pub enum S2cDcPayload {
     RequestOffer,
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },
+    Demote,
 }
 
 #[derive(Debug)]
