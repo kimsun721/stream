@@ -274,6 +274,7 @@ impl Client {
             C2sDcPayload::P2pAnswer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
             }
+            C2sDcPayload::P2pConnected => self.handle_p2p_connected(),
         }
     }
 
@@ -322,6 +323,14 @@ impl Client {
             }
             _ => (),
         };
+        Ok(())
+    }
+
+    fn handle_p2p_connected(&mut self) -> ClientResult<()> {
+        if let Some(RelayStatus::Leaf { link_state, .. }) = &mut self.relay_status {
+            *link_state = LinkState::Connected;
+        }
+
         Ok(())
     }
 
