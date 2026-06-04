@@ -104,6 +104,8 @@ impl Rooms {
             }
         }
     }
+
+    pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {}
 }
 
 impl Room {

@@ -35,6 +35,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
                 SfuMessage::Promote { room_id, reply } => rooms.promote(room_id, reply),
+                SfuMessage::Demote { room_id, reply } => rooms.demote(room_id, reply),
             };
         }
 

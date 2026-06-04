@@ -58,6 +58,7 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
         .route("/promote/{room_id}", routing::post(promote))
+        .route("/demote/{room_id}", routing::post(demote))
         .with_state(ApiState { tx });
 
     let https_server = tokio::spawn(async move {
@@ -248,6 +249,32 @@ async fn promote(
     let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
 
     let msg = SfuMessage::Promote {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn demote(
+    Path(room_id): Path<u64>,
+    State(state): State<ApiState>,
+) -> Result<StatusCode, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::Demote {
         room_id: RoomId(room_id),
         reply: tx,
     };

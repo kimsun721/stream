@@ -147,6 +147,10 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<()>>,
     },
+    Demote {
+        room_id: RoomId,
+        reply: SyncSender<Option<()>>,
+    },
 }
 
 #[derive(Deserialize)]
