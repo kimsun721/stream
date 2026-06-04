@@ -15,8 +15,8 @@ use tracing::{debug, warn};
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        C2sDcPayload, Client, ClientId, ClientRole, PollResult, RelayStatus, S2cDcPayload, TrackIn,
-        TrackInEntry, TrackOutState,
+        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PollResult, RelayStatus,
+        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState,
     },
 };
 
@@ -37,7 +37,7 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_offers: &mut Vec<(ClientId, S2cDcPayload)>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -69,7 +69,7 @@ impl Client {
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => {
-                        self.handle_channel_data(data, keyframe_requests, p2p_offers)?
+                        self.handle_channel_data(data, keyframe_requests, p2p_sdps)?
                     }
 
                     Event::KeyframeRequest(request) => {
@@ -206,16 +206,11 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_offers: &mut Vec<(ClientId, S2cDcPayload)>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<PollResult> {
         self.renegotiate()?;
-        let result = self.poll_output(
-            socket,
-            new_tracks,
-            media_datas,
-            keyframe_requests,
-            p2p_offers,
-        )?;
+        let result =
+            self.poll_output(socket, new_tracks, media_datas, keyframe_requests, p2p_sdps)?;
 
         Ok(result)
     }
@@ -260,7 +255,7 @@ impl Client {
         &mut self,
         data: ChannelData,
         keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_offers: &mut Vec<(ClientId, S2cDcPayload)>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<()> {
         let payload: C2sDcPayload = serde_json::from_slice(&data.data)?;
 
@@ -273,7 +268,12 @@ impl Client {
                 loss_pct,
                 avail_out_kbs,
             } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
-            C2sDcPayload::P2pOffer { sdp } => self.handle_p2p_offer(&sdp, p2p_offers),
+            C2sDcPayload::P2pOffer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
+            }
+            C2sDcPayload::P2pAnswer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
+            }
         }
     }
 
@@ -305,17 +305,22 @@ impl Client {
         Ok(())
     }
 
-    fn handle_p2p_offer(
+    fn handle_p2p_sdp(
         &self,
-        offer: &str,
-        p2p_offers: &mut Vec<(ClientId, S2cDcPayload)>,
+        sdp: S2cDcPayload,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<()> {
-        if let Some(RelayStatus::Relay { leaf }) = self.relay_status {
-            let sdp = S2cDcPayload::P2pOffer {
-                sdp: offer.to_string(),
-            };
-
-            p2p_offers.push((leaf, sdp));
+        match self.relay_status {
+            Some(RelayStatus::Relay { leaf }) => {
+                p2p_sdps.push((leaf, sdp));
+            }
+            Some(RelayStatus::Leaf {
+                relay,
+                link_state: LinkState::Connecting,
+            }) => {
+                p2p_sdps.push((relay, sdp));
+            }
+            _ => (),
         };
         Ok(())
     }

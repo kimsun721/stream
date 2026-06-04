@@ -170,6 +170,9 @@ pub enum C2sDcPayload {
     P2pOffer {
         sdp: String,
     },
+    P2pAnswer {
+        sdp: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -177,6 +180,7 @@ pub enum C2sDcPayload {
 pub enum S2cDcPayload {
     RequestOffer,
     P2pOffer { sdp: String },
+    P2pAnswer { sdp: String },
 }
 
 #[derive(Debug)]
