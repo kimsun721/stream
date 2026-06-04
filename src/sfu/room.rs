@@ -4,7 +4,10 @@ use std::{
     sync::{Arc, mpsc::SyncSender},
 };
 
-use str0m::Rtc;
+use str0m::{
+    Rtc,
+    media::{KeyframeRequest, KeyframeRequestKind},
+};
 use tracing::{error, info, warn};
 
 use crate::types::{
@@ -105,7 +108,53 @@ impl Rooms {
         }
     }
 
-    pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {}
+    pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
+        match self.get_mut(&room_id.0) {
+            Some(room) => {
+                let mut viewers = room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer);
+                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
+                    reply.send(None).ok();
+                    return;
+                };
+
+                relay.relay_status = None;
+                leaf.relay_status = None;
+
+                let keyframe_requests = leaf
+                    .tracks_out
+                    .iter()
+                    .filter_map(|to| {
+                        let track_in = to.track_in.upgrade()?;
+
+                        Some(KeyframeRequest {
+                            mid: track_in.mid,
+                            rid: to.chosen_rid,
+                            kind: KeyframeRequestKind::Fir,
+                        })
+                    })
+                    .collect();
+
+                if let Some(streamer) = room
+                    .clients
+                    .iter_mut()
+                    .find(|c| c.role == ClientRole::Streamer)
+                    && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
+                {
+                    {
+                        error!("demote keyframe requests failed: {e}");
+                    };
+                }
+
+                reply.send(Some(())).ok();
+            }
+            None => {
+                reply.send(None).ok();
+            }
+        }
+    }
 }
 
 impl Room {
