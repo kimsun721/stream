@@ -6,7 +6,7 @@ use std::{
 
 use str0m::{
     Rtc,
-    media::{KeyframeRequest, KeyframeRequestKind},
+    media::{KeyframeRequest, KeyframeRequestKind, MediaKind},
 };
 use tracing::{error, info, warn};
 
@@ -128,6 +128,10 @@ impl Rooms {
                     .iter()
                     .filter_map(|to| {
                         let track_in = to.track_in.upgrade()?;
+
+                        if track_in.kind == MediaKind::Audio {
+                            return None;
+                        }
 
                         Some(KeyframeRequest {
                             mid: track_in.mid,
