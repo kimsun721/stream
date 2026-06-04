@@ -9,7 +9,10 @@ use tracing::{debug, error};
 
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
-    types::{ClientRole, PollResult, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
+    types::{
+        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
+        TrackOutState,
+    },
 };
 
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
@@ -81,11 +84,16 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 room.clients.remove(*idx);
             }
 
-            for c in room
-                .clients
-                .iter_mut()
-                .filter(|c| c.role == ClientRole::Viewer)
-            {
+            for c in room.clients.iter_mut().filter(|c| {
+                c.role == ClientRole::Viewer
+                    && !matches!(
+                        c.relay_status,
+                        Some(RelayStatus::Leaf {
+                            link_state: LinkState::Connected,
+                            ..
+                        })
+                    )
+            }) {
                 if let Err(e) = c.handle_media_datas(&media_datas) {
                     error!("handle_media_datas failed: {}", e);
                 };
