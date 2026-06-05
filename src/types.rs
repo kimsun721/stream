@@ -178,6 +178,7 @@ pub enum C2sDcPayload {
         sdp: String,
     },
     P2pConnected,
+    P2pDisconnected,
 }
 
 #[derive(Serialize)]

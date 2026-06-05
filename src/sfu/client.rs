@@ -8,7 +8,7 @@ use str0m::{
     Event, IceConnectionState, Input, Output,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
-    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid, Rid},
+    media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
 use tracing::{debug, warn};
 
@@ -275,6 +275,7 @@ impl Client {
                 self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
             }
             C2sDcPayload::P2pConnected => self.handle_p2p_connected(),
+            C2sDcPayload::P2pDisconnected => self.handle_p2p_disconnected(keyframe_requests),
         }
     }
 
@@ -332,6 +333,45 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    fn handle_p2p_disconnected(
+        &mut self,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_status
+            && matches!(link_state, LinkState::Connected)
+        {
+            for kf in self.demote_leaf()? {
+                keyframe_requests.push(kf);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
+        self.relay_status = None;
+
+        let keyframe_requests: Vec<_> = self
+            .tracks_out
+            .iter()
+            .filter_map(|to| {
+                let track_in = to.track_in.upgrade()?;
+
+                if track_in.kind == MediaKind::Audio {
+                    return None;
+                }
+
+                Some(KeyframeRequest {
+                    mid: track_in.mid,
+                    rid: to.chosen_rid,
+                    kind: KeyframeRequestKind::Fir,
+                })
+            })
+            .collect();
+
+        Ok(keyframe_requests)
     }
 
     fn set_layer(

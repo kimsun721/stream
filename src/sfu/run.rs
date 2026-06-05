@@ -57,7 +57,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut p2p_sdps,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
-                    Ok(PollResult::Disconnected) => to_remove.push(idx),
+                    Ok(PollResult::Disconnected) => {
+                        to_remove.push(idx);
+                    }
                     Err(e) => {
                         to_remove.push(idx);
                         error!("client tick failed: {}", e);
