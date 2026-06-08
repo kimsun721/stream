@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
-        TrackOutState,
+        ClientRole, LinkState, PollResult, RelayStatus, Rooms, S2cDcPayload, SfuMessage, TrackIn,
+        TrackOut, TrackOutState,
     },
 };
 
@@ -47,6 +47,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
+            let mut disconnected_relays = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -55,6 +56,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut media_datas,
                     &mut keyframe_requests,
                     &mut p2p_sdps,
+                    &mut disconnected_relays,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
@@ -126,6 +128,25 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         error!("send p2p_offer via dc failed: {e}");
                     };
                 }
+            }
+
+            for relay_id in disconnected_relays {
+                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id) {
+                    relay.relay_status = None;
+
+                    if let Some(mut channel) = relay.cid.and_then(|id| relay.rtc.channel(id)) {
+                        let payload = S2cDcPayload::Demote;
+
+                        let Ok(json) = serde_json::to_string(&payload) else {
+                            error!("serde_json to_string failed: relay_id={relay_id}");
+                            continue;
+                        };
+
+                        if let Err(e) = channel.write(false, json.as_bytes()) {
+                            error!("send p2p_offer via dc failed: {e}");
+                        };
+                    };
+                };
             }
         }
 

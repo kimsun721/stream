@@ -38,6 +38,7 @@ impl Client {
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -68,9 +69,12 @@ impl Client {
                     }
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
-                    Event::ChannelData(data) => {
-                        self.handle_channel_data(data, keyframe_requests, p2p_sdps)?
-                    }
+                    Event::ChannelData(data) => self.handle_channel_data(
+                        data,
+                        keyframe_requests,
+                        p2p_sdps,
+                        disconnected_relays,
+                    )?,
 
                     Event::KeyframeRequest(request) => {
                         if let Some(translated) = self.translate_keyframe_request(request) {
@@ -207,10 +211,17 @@ impl Client {
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<PollResult> {
         self.renegotiate()?;
-        let result =
-            self.poll_output(socket, new_tracks, media_datas, keyframe_requests, p2p_sdps)?;
+        let result = self.poll_output(
+            socket,
+            new_tracks,
+            media_datas,
+            keyframe_requests,
+            p2p_sdps,
+            disconnected_relays,
+        )?;
 
         Ok(result)
     }
@@ -256,6 +267,7 @@ impl Client {
         data: ChannelData,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
         let payload: C2sDcPayload = serde_json::from_slice(&data.data)?;
 
@@ -275,7 +287,9 @@ impl Client {
                 self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
             }
             C2sDcPayload::P2pConnected => self.handle_p2p_connected(),
-            C2sDcPayload::P2pDisconnected => self.handle_p2p_disconnected(keyframe_requests),
+            C2sDcPayload::P2pDisconnected => {
+                self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
+            }
         }
     }
 
@@ -338,10 +352,12 @@ impl Client {
     fn handle_p2p_disconnected(
         &mut self,
         keyframe_requests: &mut Vec<KeyframeRequest>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
         if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_status
             && matches!(link_state, LinkState::Connected)
         {
+            disconnected_relays.push(*relay);
             for kf in self.demote_leaf()? {
                 keyframe_requests.push(kf);
             }
