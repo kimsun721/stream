@@ -49,6 +49,8 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut p2p_sdps = Vec::new();
             let mut disconnected_relays = Vec::new();
 
+            let mut fallback_leafs = Vec::new();
+
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
                     &socket,
@@ -60,6 +62,15 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
+                        match &client.relay_status {
+                            Some(RelayStatus::Relay { leaf }) => {
+                                fallback_leafs.push(*leaf);
+                            }
+                            Some(RelayStatus::Leaf { relay, .. }) => {
+                                disconnected_relays.push(*relay);
+                            }
+                            _ => (),
+                        }
                         to_remove.push(idx);
                     }
                     Err(e) => {
@@ -87,6 +98,16 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
             for idx in to_remove.iter().rev() {
                 room.clients.remove(*idx);
+            }
+
+            for leaf_id in fallback_leafs {
+                if let Some(leaf) = room.clients.iter_mut().find(|c| c.id == leaf_id)
+                    && let Ok(leaf_keyframe_requests) = leaf.demote_leaf()
+                {
+                    for request in leaf_keyframe_requests {
+                        keyframe_requests.push(request);
+                    }
+                };
             }
 
             for c in room.clients.iter_mut().filter(|c| {
