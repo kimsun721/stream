@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use str0m::{
     Rtc,
     change::SdpPendingOffer,
@@ -33,6 +33,7 @@ pub struct Client {
     pub cid: Option<ChannelId>,
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
+    pub relay_status: Option<RelayStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -98,6 +99,7 @@ impl Client {
             cid: None,
             tracks_in: vec![],
             tracks_out: vec![],
+            relay_status: None,
         }
     }
 }
@@ -141,11 +143,19 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
+    Promote {
+        room_id: RoomId,
+        reply: SyncSender<Option<()>>,
+    },
+    Demote {
+        room_id: RoomId,
+        reply: SyncSender<Option<()>>,
+    },
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum DcPayload {
+pub enum C2sDcPayload {
     Offer {
         sdp: String,
     },
@@ -161,4 +171,38 @@ pub enum DcPayload {
         loss_pct: f32,
         avail_out_kbs: u32,
     },
+    P2pOffer {
+        sdp: String,
+    },
+    P2pAnswer {
+        sdp: String,
+    },
+    P2pConnected,
+    P2pDisconnected,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum S2cDcPayload {
+    RequestOffer,
+    P2pOffer { sdp: String },
+    P2pAnswer { sdp: String },
+    Demote,
+}
+
+#[derive(Debug)]
+pub enum RelayStatus {
+    Relay {
+        leaf: ClientId,
+    },
+    Leaf {
+        relay: ClientId,
+        link_state: LinkState,
+    },
+}
+
+#[derive(Debug)]
+pub enum LinkState {
+    Connecting,
+    Connected,
 }

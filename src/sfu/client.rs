@@ -8,13 +8,16 @@ use str0m::{
     Event, IceConnectionState, Input, Output,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
-    media::{Direction, KeyframeRequest, MediaData, MediaKind, Mid, Rid},
+    media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
 use tracing::{debug, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
-    types::{Client, ClientRole, DcPayload, PollResult, TrackIn, TrackInEntry, TrackOutState},
+    types::{
+        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PollResult, RelayStatus,
+        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState,
+    },
 };
 
 impl Client {
@@ -34,6 +37,8 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -64,9 +69,12 @@ impl Client {
                     }
                     Event::MediaData(data) => media_datas.push(data),
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
-                    Event::ChannelData(data) => {
-                        self.handle_channel_data(data, keyframe_requests)?
-                    }
+                    Event::ChannelData(data) => self.handle_channel_data(
+                        data,
+                        keyframe_requests,
+                        p2p_sdps,
+                        disconnected_relays,
+                    )?,
 
                     Event::KeyframeRequest(request) => {
                         if let Some(translated) = self.translate_keyframe_request(request) {
@@ -202,11 +210,34 @@ impl Client {
         new_tracks: &mut Vec<Arc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<PollResult> {
         self.renegotiate()?;
-        let result = self.poll_output(socket, new_tracks, media_datas, keyframe_requests)?;
+        let result = self.poll_output(
+            socket,
+            new_tracks,
+            media_datas,
+            keyframe_requests,
+            p2p_sdps,
+            disconnected_relays,
+        )?;
 
         Ok(result)
+    }
+
+    pub fn request_sdp_offer(&mut self) -> ClientResult<()> {
+        let mut channel = self
+            .cid
+            .and_then(|id| self.rtc.channel(id))
+            .ok_or(ClientError::ChannelNotFound)?;
+
+        let payload = S2cDcPayload::RequestOffer {};
+        let json = serde_json::to_string(&payload)?;
+
+        channel.write(false, json.as_bytes())?;
+
+        Ok(())
     }
 
     fn handle_media_added(
@@ -235,18 +266,30 @@ impl Client {
         &mut self,
         data: ChannelData,
         keyframe_requests: &mut Vec<KeyframeRequest>,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
-        let payload: DcPayload = serde_json::from_slice(&data.data)?;
+        let payload: C2sDcPayload = serde_json::from_slice(&data.data)?;
 
         match payload {
-            DcPayload::Offer { sdp } => self.handle_offer(&sdp),
-            DcPayload::Answer { sdp } => self.handle_answer(&sdp),
-            DcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
-            DcPayload::PerfReport {
+            C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
+            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp),
+            C2sDcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
+            C2sDcPayload::PerfReport {
                 rtt_ms,
                 loss_pct,
                 avail_out_kbs,
             } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
+            C2sDcPayload::P2pOffer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
+            }
+            C2sDcPayload::P2pAnswer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
+            }
+            C2sDcPayload::P2pConnected => self.handle_p2p_connected(),
+            C2sDcPayload::P2pDisconnected => {
+                self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
+            }
         }
     }
 
@@ -275,6 +318,91 @@ impl Client {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn handle_p2p_sdp(
+        &self,
+        sdp: S2cDcPayload,
+        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+    ) -> ClientResult<()> {
+        match self.relay_status {
+            Some(RelayStatus::Relay { leaf }) => {
+                p2p_sdps.push((leaf, sdp));
+            }
+            Some(RelayStatus::Leaf {
+                relay,
+                link_state: LinkState::Connecting,
+            }) => {
+                p2p_sdps.push((relay, sdp));
+            }
+            _ => (),
+        };
+        Ok(())
+    }
+
+    fn handle_p2p_connected(&mut self) -> ClientResult<()> {
+        if let Some(RelayStatus::Leaf { link_state, .. }) = &mut self.relay_status {
+            *link_state = LinkState::Connected;
+        }
+
+        Ok(())
+    }
+
+    fn handle_p2p_disconnected(
+        &mut self,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+        disconnected_relays: &mut Vec<ClientId>,
+    ) -> ClientResult<()> {
+        if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_status
+            && matches!(link_state, LinkState::Connected)
+        {
+            disconnected_relays.push(*relay);
+            for kf in self.demote_leaf()? {
+                keyframe_requests.push(kf);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
+        self.relay_status = None;
+
+        let keyframe_requests: Vec<_> = self
+            .tracks_out
+            .iter()
+            .filter_map(|to| {
+                let track_in = to.track_in.upgrade()?;
+
+                if track_in.kind == MediaKind::Audio {
+                    return None;
+                }
+
+                Some(KeyframeRequest {
+                    mid: track_in.mid,
+                    rid: to.chosen_rid,
+                    kind: KeyframeRequestKind::Fir,
+                })
+            })
+            .collect();
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
+        Ok(keyframe_requests)
+    }
+
+    pub fn demote_relay(&mut self) -> ClientResult<()> {
+        self.relay_status = None;
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
         Ok(())
     }
 

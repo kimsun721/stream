@@ -9,7 +9,10 @@ use tracing::{debug, error};
 
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
-    types::{ClientRole, PollResult, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState},
+    types::{
+        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
+        TrackOutState,
+    },
 };
 
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
@@ -31,6 +34,8 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
+                SfuMessage::Promote { room_id, reply } => rooms.promote(room_id, reply),
+                SfuMessage::Demote { room_id, reply } => rooms.demote(room_id, reply),
             };
         }
 
@@ -41,6 +46,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
+            let mut p2p_sdps = Vec::new();
+            let mut disconnected_relays = Vec::new();
+
+            let mut fallback_leafs = Vec::new();
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -48,9 +57,22 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut new_tracks,
                     &mut media_datas,
                     &mut keyframe_requests,
+                    &mut p2p_sdps,
+                    &mut disconnected_relays,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
-                    Ok(PollResult::Disconnected) => to_remove.push(idx),
+                    Ok(PollResult::Disconnected) => {
+                        match &client.relay_status {
+                            Some(RelayStatus::Relay { leaf }) => {
+                                fallback_leafs.push(*leaf);
+                            }
+                            Some(RelayStatus::Leaf { relay, .. }) => {
+                                disconnected_relays.push(*relay);
+                            }
+                            _ => (),
+                        }
+                        to_remove.push(idx);
+                    }
                     Err(e) => {
                         to_remove.push(idx);
                         error!("client tick failed: {}", e);
@@ -78,11 +100,26 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 room.clients.remove(*idx);
             }
 
-            for c in room
-                .clients
-                .iter_mut()
-                .filter(|c| c.role == ClientRole::Viewer)
-            {
+            for leaf_id in fallback_leafs {
+                if let Some(leaf) = room.clients.iter_mut().find(|c| c.id == leaf_id)
+                    && let Ok(leaf_keyframe_requests) = leaf.demote_leaf()
+                {
+                    for request in leaf_keyframe_requests {
+                        keyframe_requests.push(request);
+                    }
+                };
+            }
+
+            for c in room.clients.iter_mut().filter(|c| {
+                c.role == ClientRole::Viewer
+                    && !matches!(
+                        c.relay_status,
+                        Some(RelayStatus::Leaf {
+                            link_state: LinkState::Connected,
+                            ..
+                        })
+                    )
+            }) {
                 if let Err(e) = c.handle_media_datas(&media_datas) {
                     error!("handle_media_datas failed: {}", e);
                 };
@@ -96,6 +133,31 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             {
                 error!("handle_keyframe_requests failed: {}", e);
             };
+
+            for offer in p2p_sdps {
+                let (target_id, payload) = offer;
+
+                if let Some(target) = room.clients.iter_mut().find(|c| c.id == target_id)
+                    && let Some(mut channel) = target.cid.and_then(|id| target.rtc.channel(id))
+                {
+                    let Ok(json) = serde_json::to_string(&payload) else {
+                        error!("serde_json to_string failed: relay_id={target_id}");
+                        continue;
+                    };
+
+                    if let Err(e) = channel.write(false, json.as_bytes()) {
+                        error!("send p2p_offer via dc failed: {e}");
+                    };
+                }
+            }
+
+            for relay_id in disconnected_relays {
+                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+                    && let Err(e) = relay.demote_relay()
+                {
+                    error!("demote relay failed error={e}")
+                };
+            }
         }
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));

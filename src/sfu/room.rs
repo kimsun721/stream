@@ -4,10 +4,13 @@ use std::{
     sync::{Arc, mpsc::SyncSender},
 };
 
-use str0m::Rtc;
-use tracing::warn;
+use str0m::{ Rtc};
+use tracing::{error, info, warn};
 
-use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, TrackOut, TrackOutState};
+use crate::types::{
+    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
+    TrackOutState,
+};
 
 impl Rooms {
     pub fn new() -> Self {
@@ -64,6 +67,76 @@ impl Rooms {
             Some(_) => reply.send(Some(())).ok(),
             None => reply.send(None).ok(),
         };
+    }
+
+    pub fn promote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
+        match self.get_mut(&room_id.0) {
+            Some(room) => {
+                let mut viewers = room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer);
+
+                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
+                    reply.send(None).ok();
+                    return;
+                };
+                let relay_id = relay.id;
+                let leaf_id = leaf.id;
+
+                relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
+
+                leaf.relay_status = Some(RelayStatus::Leaf {
+                    relay: relay_id,
+                    link_state: LinkState::Connecting,
+                });
+
+                reply.send(Some(())).ok();
+
+                info!("promote relay={relay_id} leaf={leaf_id}");
+
+                if let Err(e) = relay.request_sdp_offer() {
+                    error!("request_sdp_offer failed: {e}");
+                };
+            }
+            None => {
+                reply.send(None).ok();
+            }
+        }
+    }
+
+    pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
+        match self.get_mut(&room_id.0) {
+            Some(room) => {
+                let mut viewers = room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| c.role == ClientRole::Viewer);
+                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
+                    reply.send(None).ok();
+                    return;
+                };
+
+                if let Err(e) = relay.demote_relay() {
+                    error!("demote relay failed error={e}")
+                };
+
+                if let Ok(keyframe_requests) = leaf.demote_leaf()
+                    && let Some(streamer) = room
+                        .clients
+                        .iter_mut()
+                        .find(|c| c.role == ClientRole::Streamer)
+                    && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
+                {
+                    error!("demote keyframe requests failed: {e}");
+                };
+
+                reply.send(Some(())).ok();
+            }
+            None => {
+                reply.send(None).ok();
+            }
+        }
     }
 }
 
