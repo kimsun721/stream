@@ -366,7 +366,7 @@ impl Client {
         Ok(())
     }
 
-    fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
+    pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
         self.relay_status = None;
 
         let keyframe_requests: Vec<_> = self
@@ -387,7 +387,23 @@ impl Client {
             })
             .collect();
 
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
         Ok(keyframe_requests)
+    }
+
+    pub fn demote_relay(&mut self) -> ClientResult<()> {
+        self.relay_status = None;
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
+        Ok(())
     }
 
     fn set_layer(

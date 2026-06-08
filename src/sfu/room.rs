@@ -4,15 +4,12 @@ use std::{
     sync::{Arc, mpsc::SyncSender},
 };
 
-use str0m::{
-    Rtc,
-    media::{KeyframeRequest, KeyframeRequestKind, MediaKind},
-};
+use str0m::{ Rtc};
 use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, S2cDcPayload,
-    TrackOut, TrackOutState,
+    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
+    TrackOutState,
 };
 
 impl Rooms {
@@ -120,45 +117,15 @@ impl Rooms {
                     return;
                 };
 
-                relay.relay_status = None;
-                leaf.relay_status = None;
-
-                let keyframe_requests = leaf
-                    .tracks_out
-                    .iter()
-                    .filter_map(|to| {
-                        let track_in = to.track_in.upgrade()?;
-
-                        if track_in.kind == MediaKind::Audio {
-                            return None;
-                        }
-
-                        Some(KeyframeRequest {
-                            mid: track_in.mid,
-                            rid: to.chosen_rid,
-                            kind: KeyframeRequestKind::Fir,
-                        })
-                    })
-                    .collect();
-
-                if let Some(mut channel) = leaf.cid.and_then(|id| leaf.rtc.channel(id))
-                    && let Ok(json) = serde_json::to_string(&S2cDcPayload::Demote)
-                    && let Err(e) = channel.write(false, json.as_bytes())
-                {
-                    error!("write Demote via dc failed: {e}");
+                if let Err(e) = relay.demote_relay() {
+                    error!("demote relay failed error={e}")
                 };
 
-                if let Some(mut channel) = relay.cid.and_then(|id| relay.rtc.channel(id))
-                    && let Ok(json) = serde_json::to_string(&S2cDcPayload::Demote)
-                    && let Err(e) = channel.write(false, json.as_bytes())
-                {
-                    error!("write Demote via dc failed: {e}");
-                };
-
-                if let Some(streamer) = room
-                    .clients
-                    .iter_mut()
-                    .find(|c| c.role == ClientRole::Streamer)
+                if let Ok(keyframe_requests) = leaf.demote_leaf()
+                    && let Some(streamer) = room
+                        .clients
+                        .iter_mut()
+                        .find(|c| c.role == ClientRole::Streamer)
                     && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
                 {
                     error!("demote keyframe requests failed: {e}");
