@@ -4,7 +4,8 @@ use std::{
     sync::{Arc, mpsc::SyncSender},
 };
 
-use str0m::{ Rtc};
+use axum::http::StatusCode;
+use str0m::Rtc;
 use tracing::{error, info, warn};
 
 use crate::types::{
@@ -17,11 +18,18 @@ impl Rooms {
         Rooms(HashMap::new())
     }
 
-    pub fn register_client(&mut self, rtc: Rtc, role: ClientRole, room_id: RoomId) {
+    pub fn register_client(
+        &mut self,
+        rtc: Rtc,
+        role: ClientRole,
+        room_id: RoomId,
+        reply: SyncSender<Option<StatusCode>>,
+    ) {
         if let Some(room) = self.get_mut(&room_id.0) {
-            room.add_client(rtc, role);
+            room.add_client(rtc, role, reply);
         } else {
             warn!("Room does not exist : {:?}", room_id);
+            reply.send(Some(StatusCode::NOT_FOUND)).ok();
         };
     }
 
@@ -152,7 +160,7 @@ impl Room {
         self.state = state;
     }
 
-    fn add_client(&mut self, rtc: Rtc, role: ClientRole) {
+    fn add_client(&mut self, rtc: Rtc, role: ClientRole, reply: SyncSender<Option<StatusCode>>) {
         let mut client = Client::new(rtc, role);
 
         match role {
@@ -163,14 +171,18 @@ impl Room {
                     .any(|c| matches!(c.role, ClientRole::Streamer))
                 {
                     warn!("Streamer already connected in room {:?}", &self);
+                    reply.send(Some(StatusCode::CONFLICT)).ok();
                 } else {
                     self.streamer_id = Some(client.id);
                     self.clients.push(client);
+
+                    reply.send(None).ok();
                 }
             }
             ClientRole::Viewer => match self.state {
                 RoomState::Idle | RoomState::Preview => {
                     warn!("Client connected to an {:?} room", self.state);
+                    reply.send(Some(StatusCode::NOT_FOUND)).ok();
                 }
                 RoomState::Live => {
                     let tracks: Vec<_> = self
@@ -193,6 +205,7 @@ impl Room {
                     }
 
                     self.clients.push(client);
+                    reply.send(None).ok();
                 }
             },
         };
@@ -216,6 +229,7 @@ impl DerefMut for Rooms {
 mod tests {
     use std::{sync::mpsc, time::Instant};
 
+    use axum::http::StatusCode;
     use str0m::Rtc;
 
     use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms};
@@ -272,8 +286,10 @@ mod tests {
         rooms.update_state(RoomId(7), RoomState::Live, tx);
         assert_eq!(rx.recv().unwrap(), Some(()));
 
-        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7));
-        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7));
+        let (tx, _rx) = reply::<StatusCode>();
+        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), tx);
+        let (tx, _rx) = reply::<StatusCode>();
+        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), tx);
 
         let (tx, rx) = reply();
         rooms.get_views(RoomId(7), tx);
@@ -312,9 +328,12 @@ mod tests {
             state: RoomState::Live,
         };
 
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer);
+        let (tx, _rx) = reply::<StatusCode>();
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        let (tx, _rx) = reply::<StatusCode>();
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        let (tx, _rx) = reply::<StatusCode>();
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
 
         assert_eq!(room.clients.len(), 1);
     }
@@ -334,7 +353,8 @@ mod tests {
                 state: state.clone(),
             };
 
-            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer);
+            let (tx, _rx) = reply::<StatusCode>();
+            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer, tx);
 
             assert_eq!(
                 room.clients.len(),

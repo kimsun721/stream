@@ -202,16 +202,16 @@ async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let SdpState { addr, tx } = state;
     let OfferRequest {
         _sdp_type,
         sdp,
         role,
         room_id,
     } = payload;
+    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
 
     let mut rtc = Rtc::builder().build(Instant::now());
-    rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
+    rtc.add_local_candidate(Candidate::host(state.addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?);
@@ -227,12 +227,22 @@ async fn sdp_offer(
         rtc: Box::from(rtc),
         role,
         room_id: RoomId(room_id),
+        reply: tx,
     };
 
-    tx.send(msg).map_err(|e| {
+    state.tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    let result = rx.recv().map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if let Some(status_code) = result {
+        return Err(status_code);
+    };
 
     let value = serde_json::to_value(&answer).map_err(|e| {
         error!("json to value failed: {}", e);
