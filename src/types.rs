@@ -8,6 +8,7 @@ use std::{
     time::Instant,
 };
 
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use str0m::{
     Rtc,
@@ -125,6 +126,7 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
+        reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {
         room_id: RoomId,
@@ -163,8 +165,8 @@ pub enum C2sDcPayload {
         sdp: String,
     },
     SetLayer {
-        mid: Mid,
-        rid: Rid,
+        mid: String,
+        rid: String,
     },
     PerfReport {
         rtt_ms: u32,
