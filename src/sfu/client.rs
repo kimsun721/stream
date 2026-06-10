@@ -58,7 +58,7 @@ impl Client {
                         if self.role == ClientRole::Streamer {
                             let mut rids: Vec<Rid> = Vec::new();
                             if let Some(simulcast) = m.simulcast {
-                                for layer in simulcast.send {
+                                for layer in simulcast.recv {
                                     rids.push(layer.rid);
                                 }
                             };
