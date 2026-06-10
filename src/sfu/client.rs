@@ -269,7 +269,17 @@ impl Client {
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
         disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
-        let payload: C2sDcPayload = serde_json::from_slice(&data.data)?;
+        let payload: C2sDcPayload = match serde_json::from_slice(&data.data) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    channel_data = ?&String::from_utf8_lossy(&data.data),
+                    "failed to deserialize channel data"
+                );
+                return Ok(());
+            }
+        };
 
         match payload {
             C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
