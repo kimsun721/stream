@@ -274,7 +274,11 @@ impl Client {
         match payload {
             C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
             C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp),
-            C2sDcPayload::SetLayer { mid, rid } => self.set_layer(mid, rid, keyframe_requests),
+            C2sDcPayload::SetLayer { mid, rid } => self.set_layer(
+                Mid::from(mid.as_str()),
+                Rid::from(rid.as_str()),
+                keyframe_requests,
+            ),
             C2sDcPayload::PerfReport {
                 rtt_ms,
                 loss_pct,

@@ -163,8 +163,8 @@ pub enum C2sDcPayload {
         sdp: String,
     },
     SetLayer {
-        mid: Mid,
-        rid: Rid,
+        mid: String,
+        rid: String,
     },
     PerfReport {
         rtt_ms: u32,
