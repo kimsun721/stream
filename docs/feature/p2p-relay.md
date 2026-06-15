@@ -6,7 +6,7 @@ Cut server outbound bandwidth by promoting some viewers to relay traffic to peer
 
 - **P-1. Perf reporting.** Viewer sends `perf_report` over DC; server logs. No promotion.
 - **P-2. Manual promotion.** Single relay, single leaf — validate the path.
-- **P-3. Automatic promotion.** Server promotes by perf thresholds. Fallback under failure.
+- **P-3. Automatic promotion.** Server promotes by perf thresholds. Fallback under failure. Policy: [ADR 0009](../decisions/0009-auto-promote-demote-policy.md).
 - **P-4. Multi-leaf per relay.**
 
 ## Flow
