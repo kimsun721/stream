@@ -16,7 +16,7 @@ use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
         C2sDcPayload, Client, ClientId, ClientRole, LinkState, PerfSample, PollResult, RelayStatus,
-        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState,
+        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -300,6 +300,9 @@ impl Client {
             C2sDcPayload::P2pDisconnected => {
                 self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
             }
+            C2sDcPayload::AvailableUpload {
+                available_upload_kbps,
+            } => self.handle_available_upload(available_upload_kbps),
         }
     }
 
@@ -371,6 +374,16 @@ impl Client {
             for kf in self.demote_leaf()? {
                 keyframe_requests.push(kf);
             }
+        }
+
+        Ok(())
+    }
+
+    fn handle_available_upload(&mut self, available_upload_kbps: u32) -> ClientResult<()> {
+        if let Some(UploadProbeResult::Probing { .. }) = self.available_upload {
+            self.available_upload = Some(UploadProbeResult::Probed {
+                available_upload_kbps,
+            });
         }
 
         Ok(())

@@ -36,6 +36,7 @@ pub struct Client {
     pub tracks_out: Vec<TrackOut>,
     pub relay_status: Option<RelayStatus>,
     pub perf: PerfWindow,
+    pub available_upload: Option<UploadProbeResult>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -51,6 +52,13 @@ pub struct PerfSample {
     pub rtt_ms: u32,
     pub loss_pct: f32,
     pub timestamp: Instant,
+}
+
+#[derive(Debug)]
+pub enum UploadProbeResult {
+    Probing { probed_at: Instant },
+    Probed { available_upload_kbps: u32 },
+    Failed,
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
@@ -112,6 +120,7 @@ impl Client {
             tracks_out: vec![],
             relay_status: None,
             perf: VecDeque::new(),
+            available_upload: None,
         }
     }
 }
@@ -177,6 +186,7 @@ pub enum C2sDcPayload {
     P2pAnswer { sdp: String },
     P2pConnected,
     P2pDisconnected,
+    AvailableUpload { available_upload_kbps: u32 },
 }
 
 #[derive(Serialize)]
@@ -186,6 +196,7 @@ pub enum S2cDcPayload {
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },
     Demote,
+    ProbeAvailableUpload,
 }
 
 #[derive(Debug)]
