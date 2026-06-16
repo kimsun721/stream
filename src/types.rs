@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
@@ -35,6 +35,7 @@ pub struct Client {
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     pub relay_status: Option<RelayStatus>,
+    pub perf: PerfWindow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -42,6 +43,15 @@ pub struct ClientId(u64);
 
 #[derive(Debug)]
 pub struct RoomId(pub u64);
+
+pub type PerfWindow = VecDeque<PerfSample>;
+
+#[derive(Debug)]
+pub struct PerfSample {
+    pub rtt_ms: u32,
+    pub loss_pct: f32,
+    pub timestamp: Instant,
+}
 
 #[derive(Deserialize, Debug, Clone, Copy)]
 pub enum RoomState {
@@ -101,6 +111,7 @@ impl Client {
             tracks_in: vec![],
             tracks_out: vec![],
             relay_status: None,
+            perf: VecDeque::new(),
         }
     }
 }
@@ -158,27 +169,12 @@ pub enum SfuMessage {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum C2sDcPayload {
-    Offer {
-        sdp: String,
-    },
-    Answer {
-        sdp: String,
-    },
-    SetLayer {
-        mid: String,
-        rid: String,
-    },
-    PerfReport {
-        rtt_ms: u32,
-        loss_pct: f32,
-        avail_out_kbs: u32,
-    },
-    P2pOffer {
-        sdp: String,
-    },
-    P2pAnswer {
-        sdp: String,
-    },
+    Offer { sdp: String },
+    Answer { sdp: String },
+    SetLayer { mid: String, rid: String },
+    PerfReport { rtt_ms: u32, loss_pct: f32 },
+    P2pOffer { sdp: String },
+    P2pAnswer { sdp: String },
     P2pConnected,
     P2pDisconnected,
 }

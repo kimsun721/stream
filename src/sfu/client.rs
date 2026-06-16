@@ -10,12 +10,12 @@ use str0m::{
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PollResult, RelayStatus,
+        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PerfSample, PollResult, RelayStatus,
         S2cDcPayload, TrackIn, TrackInEntry, TrackOutState,
     },
 };
@@ -289,11 +289,7 @@ impl Client {
                 Rid::from(rid.as_str()),
                 keyframe_requests,
             ),
-            C2sDcPayload::PerfReport {
-                rtt_ms,
-                loss_pct,
-                avail_out_kbs,
-            } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
+            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
             }
@@ -457,19 +453,25 @@ impl Client {
         Ok(())
     }
 
-    pub fn perf_report(
-        &mut self,
-        rtt_ms: u32,
-        loss_pct: f32,
-        avail_out_kbps: u32,
-    ) -> ClientResult<()> {
-        debug!(
-            client_id = %self.id,
+    pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
+        const MAX_AGE: Duration = Duration::from_secs(60 * 5);
+        const MAX_LEN: usize = 1000;
+
+        let now = Instant::now();
+
+        self.perf.push_back(PerfSample {
             rtt_ms,
             loss_pct,
-            avail_out_kbps,
-            "perf_report"
-        );
+            timestamp: now,
+        });
+
+        while self
+            .perf
+            .front()
+            .is_some_and(|p| now.duration_since(p.timestamp) > MAX_AGE || self.perf.len() > MAX_LEN)
+        {
+            self.perf.pop_front();
+        }
 
         Ok(())
     }
