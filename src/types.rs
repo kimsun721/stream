@@ -37,6 +37,7 @@ pub struct Client {
     pub relay_status: Option<RelayStatus>,
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
+    connected_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -121,6 +122,7 @@ impl Client {
             relay_status: None,
             perf: VecDeque::new(),
             available_upload: None,
+            connected_at: Instant::now(),
         }
     }
 }
