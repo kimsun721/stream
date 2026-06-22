@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
-        TrackOutState,
+        ClientRole, LinkState, PollResult, RelayStatus, Rooms, S2cDcPayload, SfuMessage, TrackIn,
+        TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -160,6 +160,49 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 {
                     error!("demote relay failed error={e}")
                 };
+            }
+
+            const RTT_MS_CUTOFF: u32 = 30;
+            const LOSS_PCT_CUTOFF: f32 = 10.0;
+            const MIN_SAMPLES_LEN: u32 = 250;
+
+            for c in room.clients.iter_mut().filter(|c| {
+                matches!(c.role, ClientRole::Viewer)
+                    && matches!(c.available_upload, Some(UploadProbeResult::Failed) | None)
+                    && !c.perf.is_empty()
+            }) {
+                let mut rtt_ms_avg = 0;
+                let mut loss_pct_avg = 0.0;
+                let len = c.perf.len() as u32;
+
+                for p in c.perf.iter() {
+                    rtt_ms_avg += p.rtt_ms;
+                    loss_pct_avg += p.loss_pct;
+                }
+
+                rtt_ms_avg /= len;
+                loss_pct_avg /= len as f32;
+
+                if rtt_ms_avg < RTT_MS_CUTOFF
+                    && loss_pct_avg < LOSS_PCT_CUTOFF
+                    && len > MIN_SAMPLES_LEN
+                    && let Some(mut channel) = c.cid.and_then(|id| c.rtc.channel(id))
+                {
+                    let payload = S2cDcPayload::ProbeAvailableUpload;
+                    let Ok(json) = serde_json::to_string(&payload) else {
+                        error!("serde_json to_string failed: client_id={}", c.id);
+                        continue;
+                    };
+
+                    if let Err(e) = channel.write(false, json.as_bytes()) {
+                        error!("send probe_upload via dc failed: {e}");
+                        continue;
+                    };
+
+                    c.available_upload = Some(UploadProbeResult::Probing {
+                        probed_at: (Instant::now()),
+                    });
+                }
             }
         }
 

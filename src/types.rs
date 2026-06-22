@@ -206,6 +206,7 @@ pub enum RelayStatus {
     Relay {
         leaf: ClientId,
     },
+
     Leaf {
         relay: ClientId,
         link_state: LinkState,
