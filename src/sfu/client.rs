@@ -10,7 +10,7 @@ use str0m::{
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
@@ -487,6 +487,45 @@ impl Client {
         }
 
         Ok(())
+    }
+
+    pub fn probe_available_upload(&mut self) {
+        const RTT_MS_CUTOFF: u32 = 30;
+        const LOSS_PCT_CUTOFF: f32 = 10.0;
+        const MIN_SAMPLES_LEN: u32 = 200;
+
+        let mut rtt_ms_avg = 0;
+        let mut loss_pct_avg = 0.0;
+        let len = self.perf.len() as u32;
+
+        for p in self.perf.iter() {
+            rtt_ms_avg += p.rtt_ms;
+            loss_pct_avg += p.loss_pct;
+        }
+
+        rtt_ms_avg /= len;
+        loss_pct_avg /= len as f32;
+
+        if rtt_ms_avg < RTT_MS_CUTOFF
+            && loss_pct_avg < LOSS_PCT_CUTOFF
+            && len > MIN_SAMPLES_LEN
+            && let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id))
+        {
+            let payload = S2cDcPayload::ProbeAvailableUpload;
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("serde_json to_string failed: client_id={}", self.id);
+                return;
+            };
+
+            if let Err(e) = channel.write(false, json.as_bytes()) {
+                error!("send probe_upload via dc failed: {e}");
+                return;
+            };
+
+            self.available_upload = Some(UploadProbeResult::Probing {
+                probed_at: (Instant::now()),
+            });
+        }
     }
 }
 
