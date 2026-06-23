@@ -9,7 +9,7 @@ use str0m::Rtc;
 use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
+    Client, ClientId, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
     TrackOutState,
 };
 
@@ -77,42 +77,6 @@ impl Rooms {
         };
     }
 
-    pub fn promote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.get_mut(&room_id.0) {
-            Some(room) => {
-                let mut viewers = room
-                    .clients
-                    .iter_mut()
-                    .filter(|c| c.role == ClientRole::Viewer);
-
-                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
-                    reply.send(None).ok();
-                    return;
-                };
-                let relay_id = relay.id;
-                let leaf_id = leaf.id;
-
-                relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
-
-                leaf.relay_status = Some(RelayStatus::Leaf {
-                    relay: relay_id,
-                    link_state: LinkState::Connecting,
-                });
-
-                reply.send(Some(())).ok();
-
-                info!("promote relay={relay_id} leaf={leaf_id}");
-
-                if let Err(e) = relay.request_sdp_offer() {
-                    error!("request_sdp_offer failed: {e}");
-                };
-            }
-            None => {
-                reply.send(None).ok();
-            }
-        }
-    }
-
     pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
         match self.get_mut(&room_id.0) {
             Some(room) => {
@@ -149,6 +113,44 @@ impl Rooms {
 }
 
 impl Room {
+    pub fn promote(&mut self, relay_id: ClientId) {
+        let Some(leaf_id) = self
+            .clients
+            .iter()
+            .find(|c| {
+                matches!(c.role, ClientRole::Viewer) && c.relay_status.is_none() && c.id != relay_id
+            })
+            .map(|c| c.id)
+        else {
+            return;
+        };
+
+        let Some(relay) = self
+            .clients
+            .iter_mut()
+            .find(|c| c.id == relay_id && c.relay_status.is_none())
+        else {
+            return;
+        };
+
+        relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
+
+        if let Err(e) = relay.request_sdp_offer() {
+            error!("request_sdp_offer failed: {e}");
+        };
+
+        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+            return;
+        };
+
+        leaf.relay_status = Some(RelayStatus::Leaf {
+            relay: relay_id,
+            link_state: LinkState::Connecting,
+        });
+
+        info!("promote relay={relay_id} leaf={}", leaf_id);
+    }
+
     fn view_count(&self) -> usize {
         self.clients
             .iter()

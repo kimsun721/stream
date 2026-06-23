@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
-        TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn,
+        TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -37,7 +37,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
-                SfuMessage::Promote { room_id, reply } => rooms.promote(room_id, reply),
                 SfuMessage::Demote { room_id, reply } => rooms.demote(room_id, reply),
             };
         }
@@ -162,11 +161,11 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 };
             }
 
-            for c in room
-                .clients
-                .iter_mut()
-                .filter(|c| matches!(c.role, ClientRole::Viewer) && !c.perf.is_empty())
-            {
+            for c in room.clients.iter_mut().filter(|c| {
+                matches!(c.role, ClientRole::Viewer)
+                    && !c.perf.is_empty()
+                    && c.relay_status.is_none()
+            }) {
                 match c.available_upload {
                     Some(UploadProbeResult::Failed) => c.probe_available_upload(),
                     None => c.probe_available_upload(),
@@ -178,6 +177,31 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     }
                     _ => (),
                 }
+            }
+
+            const AVAILABLE_UPLOAD_CUTOFF: u32 = 13000;
+
+            let relay_ids: Vec<ClientId> = room
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    let Some(UploadProbeResult::Probed {
+                        available_upload_kbps,
+                    }) = c.available_upload
+                    else {
+                        return None;
+                    };
+
+                    if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF && c.relay_status.is_none() {
+                        return Some(c.id);
+                    };
+
+                    None
+                })
+                .collect();
+
+            for relay_id in relay_ids {
+                room.promote(relay_id);
             }
         }
 

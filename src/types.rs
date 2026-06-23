@@ -167,10 +167,6 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
-    Promote {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
-    },
     Demote {
         room_id: RoomId,
         reply: SyncSender<Option<()>>,
