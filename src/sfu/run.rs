@@ -160,6 +160,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 };
             }
 
+            const MAX_PROBE_PENDING: Duration = Duration::from_secs(60);
+            const MIN_PROBE_INTERVAL: Duration = Duration::from_secs(120);
+
             for c in room.clients.iter_mut().filter(|c| {
                 matches!(c.role, ClientRole::Viewer)
                     && !c.perf.is_empty()
@@ -167,14 +170,14 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }) {
                 match c.available_upload {
                     Some(UploadProbeResult::Failed { at }) => {
-                        if at + Duration::from_secs(120) < Instant::now() {
+                        if at.elapsed() > MIN_PROBE_INTERVAL {
                             c.probe_available_upload()
                         }
                     }
                     None => c.probe_available_upload(),
 
                     Some(UploadProbeResult::Probing { probed_at }) => {
-                        if probed_at + Duration::from_secs(60) < Instant::now() {
+                        if probed_at.elapsed() > MAX_PROBE_PENDING {
                             c.available_upload =
                                 Some(UploadProbeResult::Failed { at: Instant::now() });
                         }
