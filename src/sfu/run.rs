@@ -37,7 +37,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
-                SfuMessage::Demote { room_id, reply } => rooms.demote(room_id, reply),
             };
         }
 
@@ -167,12 +166,17 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     && c.relay_status.is_none()
             }) {
                 match c.available_upload {
-                    Some(UploadProbeResult::Failed) => c.probe_available_upload(),
+                    Some(UploadProbeResult::Failed { at }) => {
+                        if at + Duration::from_secs(120) < Instant::now() {
+                            c.probe_available_upload()
+                        }
+                    }
                     None => c.probe_available_upload(),
 
                     Some(UploadProbeResult::Probing { probed_at }) => {
                         if probed_at + Duration::from_secs(60) < Instant::now() {
-                            c.available_upload = Some(UploadProbeResult::Failed);
+                            c.available_upload =
+                                Some(UploadProbeResult::Failed { at: Instant::now() });
                         }
                     }
                     _ => (),
@@ -202,6 +206,30 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
             for relay_id in relay_ids {
                 room.promote(relay_id);
+            }
+
+            const RELAY_OUTGOING_KBPS_CUTOFF: u32 = 7000;
+
+            let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    let Some(RelayStatus::Relay { leaf }) = c.relay_status else {
+                        return None;
+                    };
+
+                    let relay_outgoing_kbps = c.relay_outgoing_kbps?;
+
+                    if relay_outgoing_kbps < RELAY_OUTGOING_KBPS_CUTOFF {
+                        return Some((c.id, leaf));
+                    };
+
+                    None
+                })
+                .collect();
+
+            for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
+                room.demote(relay_id, leaf_id);
             }
         }
 

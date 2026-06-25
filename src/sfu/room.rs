@@ -76,40 +76,6 @@ impl Rooms {
             None => reply.send(None).ok(),
         };
     }
-
-    pub fn demote(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.get_mut(&room_id.0) {
-            Some(room) => {
-                let mut viewers = room
-                    .clients
-                    .iter_mut()
-                    .filter(|c| c.role == ClientRole::Viewer);
-                let (Some(relay), Some(leaf)) = (viewers.next(), viewers.next()) else {
-                    reply.send(None).ok();
-                    return;
-                };
-
-                if let Err(e) = relay.demote_relay() {
-                    error!("demote relay failed error={e}")
-                };
-
-                if let Ok(keyframe_requests) = leaf.demote_leaf()
-                    && let Some(streamer) = room
-                        .clients
-                        .iter_mut()
-                        .find(|c| c.role == ClientRole::Streamer)
-                    && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
-                {
-                    error!("demote keyframe requests failed: {e}");
-                };
-
-                reply.send(Some(())).ok();
-            }
-            None => {
-                reply.send(None).ok();
-            }
-        }
-    }
 }
 
 impl Room {
@@ -139,6 +105,8 @@ impl Room {
             error!("request_sdp_offer failed: {e}");
         };
 
+        relay.relay_outgoing_kbps = None;
+
         let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
             return;
         };
@@ -149,6 +117,30 @@ impl Room {
         });
 
         info!("promote relay={relay_id} leaf={}", leaf_id);
+    }
+
+    pub fn demote(&mut self, relay_id: ClientId, leaf_id: ClientId) {
+        let Some(relay) = self.clients.iter_mut().find(|c| c.id == relay_id) else {
+            return;
+        };
+
+        if let Err(e) = relay.demote_relay() {
+            error!("demote relay failed error={e}");
+        };
+
+        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+            return;
+        };
+
+        if let Ok(keyframe_requests) = leaf.demote_leaf()
+            && let Some(streamer) = self
+                .clients
+                .iter_mut()
+                .find(|c| c.role == ClientRole::Streamer)
+            && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
+        {
+            error!("demote keyframe requests failed: {e}");
+        };
     }
 
     fn view_count(&self) -> usize {

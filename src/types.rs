@@ -37,6 +37,7 @@ pub struct Client {
     pub relay_status: Option<RelayStatus>,
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
+    pub relay_outgoing_kbps: Option<u32>,
     connected_at: Instant,
 }
 
@@ -59,7 +60,7 @@ pub struct PerfSample {
 pub enum UploadProbeResult {
     Probing { probed_at: Instant },
     Probed { available_upload_kbps: u32 },
-    Failed,
+    Failed { at: Instant },
 }
 
 #[derive(Deserialize, Debug, Clone, Copy)]
@@ -123,6 +124,7 @@ impl Client {
             perf: VecDeque::new(),
             available_upload: None,
             connected_at: Instant::now(),
+            relay_outgoing_kbps: None,
         }
     }
 }
@@ -167,10 +169,6 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
-    Demote {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
-    },
 }
 
 #[derive(Deserialize)]
@@ -185,6 +183,7 @@ pub enum C2sDcPayload {
     P2pConnected,
     P2pDisconnected,
     AvailableUpload { available_upload_kbps: u32 },
+    RelayOutgoing { kbps: u32 },
 }
 
 #[derive(Serialize)]

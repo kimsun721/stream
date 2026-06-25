@@ -303,6 +303,7 @@ impl Client {
             C2sDcPayload::AvailableUpload {
                 available_upload_kbps,
             } => self.handle_available_upload(available_upload_kbps),
+            C2sDcPayload::RelayOutgoing { kbps } => self.handle_relay_outgoing(kbps),
         }
     }
 
@@ -389,6 +390,14 @@ impl Client {
         Ok(())
     }
 
+    fn handle_relay_outgoing(&mut self, kbps: u32) -> ClientResult<()> {
+        if let Some(RelayStatus::Relay { .. }) = self.relay_status {
+            self.relay_outgoing_kbps = Some(kbps);
+        }
+
+        Ok(())
+    }
+
     pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
         self.relay_status = None;
 
@@ -420,6 +429,10 @@ impl Client {
 
     pub fn demote_relay(&mut self) -> ClientResult<()> {
         self.relay_status = None;
+
+        self.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
+
+        self.relay_outgoing_kbps = None;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
             let json = serde_json::to_string(&S2cDcPayload::Demote)?;
