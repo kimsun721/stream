@@ -38,7 +38,7 @@ pub struct Client {
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
     pub relay_outgoing_kbps: Option<u32>,
-    connected_at: Instant,
+    pub connected_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]

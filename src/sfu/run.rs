@@ -184,6 +184,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
 
             const AVAILABLE_UPLOAD_CUTOFF: u32 = 13000;
+            const MIN_CONNECTION_AGE: Duration = Duration::from_secs(300);
 
             let relay_ids: Vec<ClientId> = room
                 .clients
@@ -196,7 +197,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         return None;
                     };
 
-                    if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF && c.relay_status.is_none() {
+                    if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF
+                        && c.relay_status.is_none()
+                        && c.connected_at.elapsed() >= MIN_CONNECTION_AGE
+                    {
                         return Some(c.id);
                     };
 
