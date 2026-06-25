@@ -170,12 +170,15 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }) {
                 match c.available_upload {
                     Some(UploadProbeResult::Failed { at }) => {
-                        if at.elapsed() > MIN_PROBE_INTERVAL {
+                        if at.elapsed() > MIN_PROBE_INTERVAL && c.is_perf_healthy() {
                             c.probe_available_upload()
                         }
                     }
-                    None => c.probe_available_upload(),
-
+                    None => {
+                        if c.is_perf_healthy() {
+                            c.probe_available_upload();
+                        }
+                    }
                     Some(UploadProbeResult::Probing { probed_at }) => {
                         if probed_at.elapsed() > MAX_PROBE_PENDING {
                             c.available_upload =
@@ -203,6 +206,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF
                         && c.relay_status.is_none()
                         && c.connected_at.elapsed() >= MIN_CONNECTION_AGE
+                        && c.is_perf_healthy()
                     {
                         return Some(c.id);
                     };
@@ -227,7 +231,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
                     let relay_outgoing_kbps = c.relay_outgoing_kbps?;
 
-                    if relay_outgoing_kbps < RELAY_OUTGOING_KBPS_CUTOFF {
+                    if relay_outgoing_kbps < RELAY_OUTGOING_KBPS_CUTOFF || !c.is_perf_healthy() {
                         return Some((c.id, leaf));
                     };
 
