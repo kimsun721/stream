@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Weak,
         atomic::{AtomicU64, Ordering},
@@ -35,6 +35,10 @@ pub struct Client {
     pub tracks_in: Vec<TrackInEntry>,
     pub tracks_out: Vec<TrackOut>,
     pub relay_status: Option<RelayStatus>,
+    pub perf: PerfWindow,
+    pub available_upload: Option<UploadProbeResult>,
+    pub relay_outgoing_kbps: Option<u32>,
+    pub connected_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -42,6 +46,22 @@ pub struct ClientId(u64);
 
 #[derive(Debug)]
 pub struct RoomId(pub u64);
+
+pub type PerfWindow = VecDeque<PerfSample>;
+
+#[derive(Debug)]
+pub struct PerfSample {
+    pub rtt_ms: u32,
+    pub loss_pct: f32,
+    pub timestamp: Instant,
+}
+
+#[derive(Debug)]
+pub enum UploadProbeResult {
+    Probing { probed_at: Instant },
+    Probed { available_upload_kbps: u32 },
+    Failed { at: Instant },
+}
 
 #[derive(Deserialize, Debug, Clone, Copy)]
 pub enum RoomState {
@@ -101,6 +121,10 @@ impl Client {
             tracks_in: vec![],
             tracks_out: vec![],
             relay_status: None,
+            perf: VecDeque::new(),
+            available_upload: None,
+            connected_at: Instant::now(),
+            relay_outgoing_kbps: None,
         }
     }
 }
@@ -145,42 +169,21 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
-    Promote {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
-    },
-    Demote {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
-    },
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum C2sDcPayload {
-    Offer {
-        sdp: String,
-    },
-    Answer {
-        sdp: String,
-    },
-    SetLayer {
-        mid: String,
-        rid: String,
-    },
-    PerfReport {
-        rtt_ms: u32,
-        loss_pct: f32,
-        avail_out_kbs: u32,
-    },
-    P2pOffer {
-        sdp: String,
-    },
-    P2pAnswer {
-        sdp: String,
-    },
+    Offer { sdp: String },
+    Answer { sdp: String },
+    SetLayer { mid: String, rid: String },
+    PerfReport { rtt_ms: u32, loss_pct: f32 },
+    P2pOffer { sdp: String },
+    P2pAnswer { sdp: String },
     P2pConnected,
     P2pDisconnected,
+    AvailableUpload { available_upload_kbps: u32 },
+    RelayOutgoing { kbps: u32 },
 }
 
 #[derive(Serialize)]
@@ -190,6 +193,7 @@ pub enum S2cDcPayload {
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },
     Demote,
+    ProbeAvailableUpload,
 }
 
 #[derive(Debug)]
@@ -197,6 +201,7 @@ pub enum RelayStatus {
     Relay {
         leaf: ClientId,
     },
+
     Leaf {
         relay: ClientId,
         link_state: LinkState,

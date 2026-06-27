@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn, TrackOut,
-        TrackOutState,
+        ClientId, ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn,
+        TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -37,8 +37,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
-                SfuMessage::Promote { room_id, reply } => rooms.promote(room_id, reply),
-                SfuMessage::Demote { room_id, reply } => rooms.demote(room_id, reply),
             };
         }
 
@@ -160,6 +158,89 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 {
                     error!("demote relay failed error={e}")
                 };
+            }
+
+            const MAX_PROBE_PENDING: Duration = Duration::from_secs(60);
+            const MIN_PROBE_INTERVAL: Duration = Duration::from_secs(120);
+
+            for c in room.clients.iter_mut().filter(|c| {
+                matches!(c.role, ClientRole::Viewer)
+                    && !c.perf.is_empty()
+                    && c.relay_status.is_none()
+            }) {
+                match c.available_upload {
+                    Some(UploadProbeResult::Failed { at }) => {
+                        if at.elapsed() > MIN_PROBE_INTERVAL && c.is_perf_healthy() {
+                            c.probe_available_upload()
+                        }
+                    }
+                    None => {
+                        if c.is_perf_healthy() {
+                            c.probe_available_upload();
+                        }
+                    }
+                    Some(UploadProbeResult::Probing { probed_at }) => {
+                        if probed_at.elapsed() > MAX_PROBE_PENDING {
+                            c.available_upload =
+                                Some(UploadProbeResult::Failed { at: Instant::now() });
+                        }
+                    }
+                    _ => (),
+                }
+            }
+
+            const AVAILABLE_UPLOAD_CUTOFF: u32 = 13000;
+            const MIN_CONNECTION_AGE: Duration = Duration::from_secs(300);
+
+            let relay_ids: Vec<ClientId> = room
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    let Some(UploadProbeResult::Probed {
+                        available_upload_kbps,
+                    }) = c.available_upload
+                    else {
+                        return None;
+                    };
+
+                    if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF
+                        && c.relay_status.is_none()
+                        && c.connected_at.elapsed() >= MIN_CONNECTION_AGE
+                        && c.is_perf_healthy()
+                    {
+                        return Some(c.id);
+                    };
+
+                    None
+                })
+                .collect();
+
+            for relay_id in relay_ids {
+                room.promote(relay_id);
+            }
+
+            const RELAY_OUTGOING_KBPS_CUTOFF: u32 = 7000;
+
+            let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    let Some(RelayStatus::Relay { leaf }) = c.relay_status else {
+                        return None;
+                    };
+
+                    let relay_outgoing_kbps = c.relay_outgoing_kbps?;
+
+                    if relay_outgoing_kbps < RELAY_OUTGOING_KBPS_CUTOFF || !c.is_perf_healthy() {
+                        return Some((c.id, leaf));
+                    };
+
+                    None
+                })
+                .collect();
+
+            for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
+                room.demote(relay_id, leaf_id);
             }
         }
 

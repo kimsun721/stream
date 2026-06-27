@@ -10,13 +10,13 @@ use str0m::{
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
-use tracing::{debug, warn};
+use tracing::{error, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PollResult, RelayStatus,
-        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState,
+        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PerfSample, PollResult, RelayStatus,
+        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -289,11 +289,7 @@ impl Client {
                 Rid::from(rid.as_str()),
                 keyframe_requests,
             ),
-            C2sDcPayload::PerfReport {
-                rtt_ms,
-                loss_pct,
-                avail_out_kbs,
-            } => self.perf_report(rtt_ms, loss_pct, avail_out_kbs),
+            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
             }
@@ -304,6 +300,10 @@ impl Client {
             C2sDcPayload::P2pDisconnected => {
                 self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
             }
+            C2sDcPayload::AvailableUpload {
+                available_upload_kbps,
+            } => self.handle_available_upload(available_upload_kbps),
+            C2sDcPayload::RelayOutgoing { kbps } => self.handle_relay_outgoing(kbps),
         }
     }
 
@@ -380,6 +380,24 @@ impl Client {
         Ok(())
     }
 
+    fn handle_available_upload(&mut self, available_upload_kbps: u32) -> ClientResult<()> {
+        if let Some(UploadProbeResult::Probing { .. }) = self.available_upload {
+            self.available_upload = Some(UploadProbeResult::Probed {
+                available_upload_kbps,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn handle_relay_outgoing(&mut self, kbps: u32) -> ClientResult<()> {
+        if let Some(RelayStatus::Relay { .. }) = self.relay_status {
+            self.relay_outgoing_kbps = Some(kbps);
+        }
+
+        Ok(())
+    }
+
     pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
         self.relay_status = None;
 
@@ -411,6 +429,10 @@ impl Client {
 
     pub fn demote_relay(&mut self) -> ClientResult<()> {
         self.relay_status = None;
+
+        self.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
+
+        self.relay_outgoing_kbps = None;
 
         if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
             let json = serde_json::to_string(&S2cDcPayload::Demote)?;
@@ -457,21 +479,70 @@ impl Client {
         Ok(())
     }
 
-    pub fn perf_report(
-        &mut self,
-        rtt_ms: u32,
-        loss_pct: f32,
-        avail_out_kbps: u32,
-    ) -> ClientResult<()> {
-        debug!(
-            client_id = %self.id,
+    pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
+        const MAX_AGE: Duration = Duration::from_secs(60 * 5);
+        const MAX_LEN: usize = 1000;
+
+        let now = Instant::now();
+
+        self.perf.push_back(PerfSample {
             rtt_ms,
             loss_pct,
-            avail_out_kbps,
-            "perf_report"
-        );
+            timestamp: now,
+        });
+
+        while self
+            .perf
+            .front()
+            .is_some_and(|p| now.duration_since(p.timestamp) > MAX_AGE || self.perf.len() > MAX_LEN)
+        {
+            self.perf.pop_front();
+        }
 
         Ok(())
+    }
+
+    pub fn probe_available_upload(&mut self) {
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let payload = S2cDcPayload::ProbeAvailableUpload;
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("serde_json to_string failed: client_id={}", self.id);
+                return;
+            };
+
+            if let Err(e) = channel.write(false, json.as_bytes()) {
+                error!("send probe_upload via dc failed: {e}");
+                return;
+            };
+
+            self.available_upload = Some(UploadProbeResult::Probing {
+                probed_at: (Instant::now()),
+            });
+        }
+    }
+
+    pub fn is_perf_healthy(&self) -> bool {
+        const RTT_MS_CUTOFF: u32 = 30;
+        const LOSS_PCT_CUTOFF: f32 = 10.0;
+        const MIN_SAMPLES_LEN: u32 = 200;
+
+        if self.perf.is_empty() {
+            return false;
+        }
+
+        let mut rtt_ms_avg = 0;
+        let mut loss_pct_avg = 0.0;
+        let len = self.perf.len() as u32;
+
+        for p in self.perf.iter() {
+            rtt_ms_avg += p.rtt_ms;
+            loss_pct_avg += p.loss_pct;
+        }
+
+        rtt_ms_avg /= len;
+        loss_pct_avg /= len as f32;
+
+        rtt_ms_avg < RTT_MS_CUTOFF && loss_pct_avg < LOSS_PCT_CUTOFF && len > MIN_SAMPLES_LEN
     }
 }
 
