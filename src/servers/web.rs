@@ -14,7 +14,7 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use str0m::{Candidate, Rtc, change::SdpOffer};
+use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
@@ -200,6 +200,9 @@ async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
 ) -> Result<Json<Value>, StatusCode> {
+    const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
+    const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
+
     let OfferRequest {
         _sdp_type,
         sdp,
@@ -208,7 +211,13 @@ async fn sdp_offer(
     } = payload;
     let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
 
-    let mut rtc = Rtc::builder().build(Instant::now());
+    let mut rtc = Rtc::builder()
+        .enable_bwe(Some(Bitrate::mbps(BWE_INITIAL_BITRATE_MBPS)))
+        .build(Instant::now());
+
+    rtc.bwe()
+        .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
+
     rtc.add_local_candidate(Candidate::host(state.addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
