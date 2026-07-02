@@ -6,6 +6,7 @@ use std::{
 
 use str0m::{
     Event, IceConnectionState, Input, Output,
+    bwe::BweKind,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
@@ -80,6 +81,9 @@ impl Client {
                         if let Some(translated) = self.translate_keyframe_request(request) {
                             keyframe_requests.push(translated);
                         }
+                    }
+                    Event::EgressBitrateEstimate(kind) => {
+                        self.handle_egress_bitrate_estimate(kind)?
                     }
                     _ => {}
                 },
@@ -394,6 +398,16 @@ impl Client {
         if let Some(RelayStatus::Relay { .. }) = self.relay_status {
             self.relay_outgoing_kbps = Some(kbps);
         }
+
+        Ok(())
+    }
+
+    fn handle_egress_bitrate_estimate(&mut self, kind: BweKind) -> ClientResult<()> {
+        match kind {
+            BweKind::Twcc(..) => {}
+            BweKind::Remb(..) => {}
+            _ => (),
+        };
 
         Ok(())
     }
