@@ -61,20 +61,20 @@ impl Client {
                             let simulcast_tracks = self.pending_simulcast_tracks.clone();
                             let mut layers: Vec<SimulcastLayerProfile> = Vec::new();
                             for track in simulcast_tracks {
-                                if m.mid == track.mid {
-                                    if let Some(simulcast) = &m.simulcast {
-                                        for layer in &simulcast.recv {
-                                            for l in track.layers.iter() {
-                                                if l.rid == layer.rid {
-                                                    layers.push(SimulcastLayerProfile {
-                                                        rid: l.rid,
-                                                        max_br: l.max_br,
-                                                    });
-                                                }
+                                if m.mid == track.mid
+                                    && let Some(simulcast) = &m.simulcast
+                                {
+                                    for layer in &simulcast.recv {
+                                        for l in track.layers.iter() {
+                                            if l.rid == layer.rid {
+                                                layers.push(SimulcastLayerProfile {
+                                                    rid: l.rid,
+                                                    max_br: l.max_br,
+                                                });
                                             }
                                         }
-                                    };
-                                }
+                                    }
+                                };
                             }
                             let track_in = self.handle_media_added(m.mid, m.kind, layers);
                             new_tracks.push(track_in);
@@ -95,7 +95,7 @@ impl Client {
                         }
                     }
                     Event::EgressBitrateEstimate(kind) => {
-                        self.handle_egress_bitrate_estimate(kind)?
+                        self.handle_egress_bitrate_estimate(kind, keyframe_requests)?
                     }
                     _ => {}
                 },
@@ -414,10 +414,45 @@ impl Client {
         Ok(())
     }
 
-    fn handle_egress_bitrate_estimate(&mut self, kind: BweKind) -> ClientResult<()> {
+    fn handle_egress_bitrate_estimate(
+        &mut self,
+        kind: BweKind,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
         match kind {
-            BweKind::Twcc(..) => {}
-            BweKind::Remb(..) => {}
+            BweKind::Twcc(bitrate) => {
+                let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
+
+                for track_out in &self.tracks_out {
+                    let TrackOutState::Open(mid) = track_out.state else {
+                        continue;
+                    };
+
+                    if let Some(track_in) = track_out.track_in.upgrade() {
+                        let rid = track_in
+                            .available_simulcast_layers
+                            .iter()
+                            .filter(|l| bitrate.as_u64() >= l.max_br as u64)
+                            .max_by_key(|l| l.max_br)
+                            .or_else(|| {
+                                track_in
+                                    .available_simulcast_layers
+                                    .iter()
+                                    .min_by_key(|l| l.max_br)
+                            })
+                            .map(|l| l.rid);
+
+                        if let Some(rid) = rid {
+                            target_layers.push((mid, rid));
+                        }
+                    };
+                }
+
+                for (mid, rid) in target_layers {
+                    self.set_layer(mid, rid, keyframe_requests)?;
+                }
+            }
+            BweKind::Remb(..) => (),
             _ => (),
         };
 
