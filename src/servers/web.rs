@@ -14,12 +14,12 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer};
+use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer, media::Rid};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
+use crate::types::{ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile};
 
 #[derive(Clone)]
 struct SdpState {
@@ -224,6 +224,33 @@ async fn sdp_offer(
     })?);
 
     let offer = SdpOffer::from_sdp_string(&sdp).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let mut simulcast_layer_profiles = Vec::new();
+
+    for o in offer.media_lines.iter() {
+        if let Some(m) = o.simulcast() {
+            for layer in m.send.iter() {
+                let Some(pairs) = &layer.attributes else {
+                    return Err(StatusCode::BAD_REQUEST);
+                };
+
+                if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
+                    if name == "max-br" {
+                        value.parse::<u32>().ok()
+                    } else {
+                        None
+                    }
+                }) {
+                    let rid = Rid::from(layer.restriction_id.0.as_str());
+                    let mid = o.mid();
+
+                    simulcast_layer_profiles.push(SimulcastLayerProfile { mid, rid, max_br });
+                } else {
+                    return Err(StatusCode::BAD_REQUEST);
+                };
+            }
+        }
+    }
 
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
         error!("accept offer failed: {}", e);

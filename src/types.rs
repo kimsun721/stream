@@ -100,6 +100,12 @@ pub struct TrackOut {
     pub chosen_rid: Option<Rid>,
 }
 
+pub struct SimulcastLayerProfile {
+    pub mid: Mid,
+    pub rid: Rid,
+    pub max_br: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackOutState {
     ToOpen,
