@@ -19,7 +19,9 @@ use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile};
+use crate::types::{
+    ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile, SimulcastTrack,
+};
 
 #[derive(Clone)]
 struct SdpState {
@@ -225,29 +227,42 @@ async fn sdp_offer(
 
     let offer = SdpOffer::from_sdp_string(&sdp).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut simulcast_layer_profiles = Vec::new();
+    let mut simulcast_tracks = Vec::new();
 
-    for o in offer.media_lines.iter() {
-        if let Some(m) = o.simulcast() {
-            for layer in m.send.iter() {
-                let Some(pairs) = &layer.attributes else {
-                    return Err(StatusCode::BAD_REQUEST);
+    if role == ClientRole::Streamer {
+        for o in offer.media_lines.iter() {
+            if let Some(m) = o.simulcast() {
+                let mid = o.mid();
+
+                let mut track = SimulcastTrack {
+                    mid,
+                    layers: Vec::new(),
                 };
 
-                if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
-                    if name == "max-br" {
-                        value.parse::<u32>().ok()
+                for layer in m.send.iter() {
+                    let Some(pairs) = &layer.attributes else {
+                        return Err(StatusCode::BAD_REQUEST);
+                    };
+
+                    if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
+                        if name == "max-br" {
+                            value.parse::<u32>().ok()
+                        } else {
+                            None
+                        }
+                    }) {
+                        let rid = Rid::from(layer.restriction_id.0.as_str());
+
+                        track.layers.push(SimulcastLayerProfile { rid, max_br });
                     } else {
-                        None
-                    }
-                }) {
-                    let rid = Rid::from(layer.restriction_id.0.as_str());
-                    let mid = o.mid();
-
-                    simulcast_layer_profiles.push(SimulcastLayerProfile { mid, rid, max_br });
-                } else {
+                        return Err(StatusCode::BAD_REQUEST);
+                    };
+                }
+                if track.layers.is_empty() {
                     return Err(StatusCode::BAD_REQUEST);
-                };
+                }
+
+                simulcast_tracks.push(track);
             }
         }
     }
@@ -261,6 +276,7 @@ async fn sdp_offer(
         rtc: Box::from(rtc),
         role,
         room_id: RoomId(room_id),
+        simulcast_tracks,
         reply: tx,
     };
 

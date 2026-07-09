@@ -38,6 +38,7 @@ pub struct Client {
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
     pub relay_outgoing_kbps: Option<u32>,
+    pub pending_simulcast_tracks: Vec<SimulcastTrack>,
     pub connected_at: Instant,
 }
 
@@ -84,7 +85,7 @@ pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
-    pub available_rids: Vec<Rid>,
+    pub available_simulcast_layers: Vec<SimulcastLayerProfile>,
 }
 
 #[derive(Debug)]
@@ -100,10 +101,16 @@ pub struct TrackOut {
     pub chosen_rid: Option<Rid>,
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct SimulcastLayerProfile {
-    pub mid: Mid,
     pub rid: Rid,
     pub max_br: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct SimulcastTrack {
+    pub mid: Mid,
+    pub layers: Vec<SimulcastLayerProfile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +121,11 @@ pub enum TrackOutState {
 }
 
 impl Client {
-    pub fn new(rtc: Rtc, role: ClientRole) -> Client {
+    pub fn new(
+        rtc: Rtc,
+        role: ClientRole,
+        pending_simulcast_tracks: Vec<SimulcastTrack>,
+    ) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -131,6 +142,7 @@ impl Client {
             available_upload: None,
             connected_at: Instant::now(),
             relay_outgoing_kbps: None,
+            pending_simulcast_tracks,
         }
     }
 }
@@ -139,10 +151,11 @@ impl TrackIn {
     pub fn default_rid(&self) -> Option<Rid> {
         let default = Rid::from("l");
 
-        self.available_rids
-            .contains(&default)
+        self.available_simulcast_layers
+            .iter()
+            .any(|l| l.rid == default)
             .then_some(default)
-            .or_else(|| self.available_rids.first().copied())
+            .or_else(|| self.available_simulcast_layers.first().map(|l| l.rid))
     }
 }
 
@@ -156,6 +169,7 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
+        simulcast_tracks: Vec<SimulcastTrack>,
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {

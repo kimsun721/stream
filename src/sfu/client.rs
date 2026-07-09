@@ -17,7 +17,8 @@ use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
         C2sDcPayload, Client, ClientId, ClientRole, LinkState, PerfSample, PollResult, RelayStatus,
-        S2cDcPayload, TrackIn, TrackInEntry, TrackOutState, UploadProbeResult,
+        S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOutState,
+        UploadProbeResult,
     },
 };
 
@@ -57,14 +58,25 @@ impl Client {
                     }
                     Event::MediaAdded(m) => {
                         if self.role == ClientRole::Streamer {
-                            let mut rids: Vec<Rid> = Vec::new();
-                            if let Some(simulcast) = m.simulcast {
-                                for layer in simulcast.recv {
-                                    rids.push(layer.rid);
+                            let simulcast_tracks = self.pending_simulcast_tracks.clone();
+                            let mut layers: Vec<SimulcastLayerProfile> = Vec::new();
+                            for track in simulcast_tracks {
+                                if m.mid == track.mid {
+                                    if let Some(simulcast) = &m.simulcast {
+                                        for layer in &simulcast.recv {
+                                            for l in track.layers.iter() {
+                                                if l.rid == layer.rid {
+                                                    layers.push(SimulcastLayerProfile {
+                                                        rid: l.rid,
+                                                        max_br: l.max_br,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    };
                                 }
-                            };
-
-                            let track_in = self.handle_media_added(m.mid, m.kind, rids);
+                            }
+                            let track_in = self.handle_media_added(m.mid, m.kind, layers);
                             new_tracks.push(track_in);
                         }
                     }
@@ -248,13 +260,13 @@ impl Client {
         &mut self,
         mid: Mid,
         kind: MediaKind,
-        available_rids: Vec<Rid>,
+        simulcast_layers: Vec<SimulcastLayerProfile>,
     ) -> Arc<TrackIn> {
         let track_in = Arc::new(TrackIn {
             origin: self.id,
             mid,
             kind,
-            available_rids,
+            available_simulcast_layers: simulcast_layers,
         });
 
         let track_in_entry = TrackInEntry {
@@ -474,7 +486,11 @@ impl Client {
             return Ok(());
         };
 
-        if !track_in.available_rids.contains(&rid) {
+        if !track_in
+            .available_simulcast_layers
+            .iter()
+            .any(|l| l.rid == rid)
+        {
             return Ok(());
         };
 
@@ -569,10 +585,12 @@ mod tests {
         media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
     };
 
-    use crate::types::{Client, ClientRole, TrackIn, TrackOut, TrackOutState};
+    use crate::types::{
+        Client, ClientRole, SimulcastLayerProfile, TrackIn, TrackOut, TrackOutState,
+    };
 
     fn viewer_with_track_out() -> (Client, Arc<TrackIn>) {
-        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer);
+        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer, vec![]);
 
         let streamer_mid = Mid::from("streamer-video");
         let viewer_mid = Mid::from("viewer-video");
@@ -583,7 +601,16 @@ mod tests {
             origin: client.id,
             mid: streamer_mid,
             kind: MediaKind::Video,
-            available_rids: vec![low_rid, high_rid],
+            available_simulcast_layers: vec![
+                SimulcastLayerProfile {
+                    rid: low_rid,
+                    max_br: 300_000,
+                },
+                SimulcastLayerProfile {
+                    rid: high_rid,
+                    max_br: 2_000_000,
+                },
+            ],
         });
 
         let track_out = TrackOut {
