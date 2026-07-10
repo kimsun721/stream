@@ -16,8 +16,8 @@ use tracing::{error, warn};
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        C2sDcPayload, Client, ClientId, ClientRole, LinkState, PerfSample, PollResult, RelayStatus,
-        S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOutState,
+        C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState, PerfSample, PollResult,
+        RelayStatus, S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOutState,
         UploadProbeResult,
     },
 };
@@ -300,11 +300,19 @@ impl Client {
         match payload {
             C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
             C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp),
-            C2sDcPayload::SetLayer { mid, rid } => self.set_layer(
-                Mid::from(mid.as_str()),
-                Rid::from(rid.as_str()),
-                keyframe_requests,
-            ),
+            C2sDcPayload::SetLayer { mid, rid } => {
+                let mid = Mid::from(mid.as_str());
+                let rid = Rid::from(rid.as_str());
+
+                if self.tracks_out.iter().any(|t| {
+                    t.state == TrackOutState::Open(mid) && matches!(t.layer_mode, LayerMode::Manual)
+                }) {
+                    self.set_layer(mid, rid, keyframe_requests)
+                } else {
+                    Ok(())
+                }
+            }
+            C2sDcPayload::SetLayerMode { mid, layer_mode } => self.set_layer_mode(mid, layer_mode),
             C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
@@ -423,7 +431,11 @@ impl Client {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
 
-                for track_out in &self.tracks_out {
+                for track_out in self
+                    .tracks_out
+                    .iter()
+                    .filter(|t| matches!(t.layer_mode, LayerMode::Auto))
+                {
                     let TrackOutState::Open(mid) = track_out.state else {
                         continue;
                     };
@@ -544,6 +556,18 @@ impl Client {
         Ok(())
     }
 
+    fn set_layer_mode(&mut self, mid: Mid, layer_mode: LayerMode) -> ClientResult<()> {
+        for track in self
+            .tracks_out
+            .iter_mut()
+            .filter(|t| t.state == TrackOutState::Open(mid))
+        {
+            track.layer_mode = layer_mode
+        }
+
+        Ok(())
+    }
+
     pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
         const MAX_AGE: Duration = Duration::from_secs(60 * 5);
         const MAX_LEN: usize = 1000;
@@ -617,11 +641,12 @@ mod tests {
 
     use str0m::{
         Rtc,
+        bwe::{Bitrate, BweKind},
         media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
     };
 
     use crate::types::{
-        Client, ClientRole, SimulcastLayerProfile, TrackIn, TrackOut, TrackOutState,
+        Client, ClientRole, LayerMode, SimulcastLayerProfile, TrackIn, TrackOut, TrackOutState,
     };
 
     fn viewer_with_track_out() -> (Client, Arc<TrackIn>) {
@@ -652,6 +677,7 @@ mod tests {
             track_in: Arc::downgrade(&track_in),
             state: TrackOutState::Open(viewer_mid),
             chosen_rid: Some(low_rid),
+            layer_mode: LayerMode::Auto,
         };
 
         client.tracks_out.push(track_out);
@@ -725,6 +751,72 @@ mod tests {
 
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_mode_updates_matching_track() {
+        let (mut client, _track_in) = viewer_with_track_out();
+
+        client
+            .set_layer_mode(Mid::from("viewer-video"), LayerMode::Manual)
+            .unwrap();
+
+        assert!(matches!(client.tracks_out[0].layer_mode, LayerMode::Manual));
+    }
+
+    #[test]
+    fn bwe_switches_layer_in_auto_mode() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests = Vec::new();
+
+        client
+            .handle_egress_bitrate_estimate(
+                BweKind::Twcc(Bitrate::bps(2_000_000)),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(keyframe_requests.len(), 1);
+        assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
+        assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
+    }
+
+    #[test]
+    fn bwe_does_not_switch_layer_in_manual_mode() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests = Vec::new();
+
+        client
+            .set_layer_mode(Mid::from("viewer-video"), LayerMode::Manual)
+            .unwrap();
+        client
+            .handle_egress_bitrate_estimate(
+                BweKind::Twcc(Bitrate::bps(2_000_000)),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn bwe_falls_back_to_lowest_layer_when_estimate_is_too_low() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests = Vec::new();
+        client.tracks_out[0].chosen_rid = Some(Rid::from("h"));
+
+        client
+            .handle_egress_bitrate_estimate(
+                BweKind::Twcc(Bitrate::bps(100_000)),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(keyframe_requests.len(), 1);
+        assert_eq!(keyframe_requests[0].rid, Some(Rid::from("l")));
     }
 
     #[test]

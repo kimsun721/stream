@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn,
-        TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, Rooms, SfuMessage,
+        TrackIn, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -93,6 +93,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     client.tracks_out.push(TrackOut {
                         track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
+                        layer_mode: LayerMode::Auto,
                         chosen_rid,
                     });
                 }

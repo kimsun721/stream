@@ -99,6 +99,7 @@ pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
     pub chosen_rid: Option<Rid>,
+    pub layer_mode: LayerMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +119,13 @@ pub enum TrackOutState {
     ToOpen,
     Negotiating(Mid),
     Open(Mid),
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case")]
+pub enum LayerMode {
+    Manual,
+    Auto,
 }
 
 impl Client {
@@ -197,6 +205,7 @@ pub enum C2sDcPayload {
     Offer { sdp: String },
     Answer { sdp: String },
     SetLayer { mid: String, rid: String },
+    SetLayerMode { mid: Mid, layer_mode: LayerMode },
     PerfReport { rtt_ms: u32, loss_pct: f32 },
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },

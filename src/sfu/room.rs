@@ -9,8 +9,8 @@ use str0m::Rtc;
 use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientId, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms,
-    SimulcastTrack, TrackOut, TrackOutState,
+    Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
+    Rooms, SimulcastTrack, TrackOut, TrackOutState,
 };
 
 impl Rooms {
@@ -201,6 +201,7 @@ impl Room {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
+                            layer_mode: LayerMode::Auto,
                             chosen_rid,
                         });
                     }
