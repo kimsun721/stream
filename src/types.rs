@@ -105,7 +105,7 @@ pub struct TrackOut {
 #[derive(Debug, Clone, Copy)]
 pub struct SimulcastLayerProfile {
     pub rid: Rid,
-    pub max_br: u32,
+    pub max_br: u64,
 }
 
 #[derive(Debug, Clone)]

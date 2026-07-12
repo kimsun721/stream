@@ -246,7 +246,7 @@ async fn sdp_offer(
 
                     if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
                         if name == "max-br" {
-                            value.parse::<u32>().ok()
+                            value.parse::<u64>().ok()
                         } else {
                             None
                         }

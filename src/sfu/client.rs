@@ -444,7 +444,7 @@ impl Client {
                         let rid = track_in
                             .available_simulcast_layers
                             .iter()
-                            .filter(|l| bitrate.as_u64() >= l.max_br as u64)
+                            .filter(|l| bitrate.as_u64() >= l.max_br)
                             .max_by_key(|l| l.max_br)
                             .or_else(|| {
                                 track_in
