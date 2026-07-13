@@ -427,6 +427,9 @@ impl Client {
         kind: BweKind,
         keyframe_requests: &mut Vec<KeyframeRequest>,
     ) -> ClientResult<()> {
+        const HEADROOM_MARGIN_PERCENT: u64 = 10;
+        const UPSWITCH_MARGIN_PERCENT: u64 = 10;
+
         match kind {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
@@ -441,10 +444,14 @@ impl Client {
                     };
 
                     if let Some(track_in) = track_out.track_in.upgrade() {
+                        let bitrate = bitrate.as_u64();
+
                         let rid = track_in
                             .available_simulcast_layers
                             .iter()
-                            .filter(|l| bitrate.as_u64() >= l.max_br)
+                            .filter(|l| {
+                                bitrate >= l.max_br + l.max_br * HEADROOM_MARGIN_PERCENT / 100
+                            })
                             .max_by_key(|l| l.max_br)
                             .or_else(|| {
                                 track_in
@@ -452,7 +459,25 @@ impl Client {
                                     .iter()
                                     .min_by_key(|l| l.max_br)
                             })
-                            .map(|l| l.rid);
+                            .and_then(|l| {
+                                let headroom_margin = l.max_br * HEADROOM_MARGIN_PERCENT / 100;
+
+                                let upswitch_margin = l.max_br * UPSWITCH_MARGIN_PERCENT / 100;
+
+                                let Some(current_layer) = track_out.chosen_layer else {
+                                    return None;
+                                };
+
+                                if current_layer.max_br > l.max_br {
+                                    return Some(l.rid);
+                                }
+
+                                if bitrate >= l.max_br + headroom_margin + upswitch_margin {
+                                    Some(l.rid)
+                                } else {
+                                    None
+                                }
+                            });
 
                         if let Some(rid) = rid {
                             target_layers.push((mid, rid));
