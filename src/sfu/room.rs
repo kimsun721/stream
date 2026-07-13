@@ -193,16 +193,16 @@ impl Room {
                         .flat_map(|c| {
                             c.tracks_in
                                 .iter()
-                                .map(|t| (Arc::downgrade(&t.id), t.id.default_rid()))
+                                .map(|t| (Arc::downgrade(&t.id), t.id.default_layer()))
                         })
                         .collect();
 
-                    for (track_in, chosen_rid) in tracks {
+                    for (track_in, chosen_layer) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
                             layer_mode: LayerMode::Auto,
-                            chosen_rid,
+                            chosen_layer,
                         });
                     }
 

@@ -98,7 +98,7 @@ pub struct TrackInEntry {
 pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
-    pub chosen_rid: Option<Rid>,
+    pub chosen_layer: Option<SimulcastLayerProfile>,
     pub layer_mode: LayerMode,
 }
 
@@ -156,14 +156,20 @@ impl Client {
 }
 
 impl TrackIn {
-    pub fn default_rid(&self) -> Option<Rid> {
+    pub fn default_layer(&self) -> Option<SimulcastLayerProfile> {
         let default = Rid::from("l");
 
         self.available_simulcast_layers
             .iter()
-            .any(|l| l.rid == default)
-            .then_some(default)
-            .or_else(|| self.available_simulcast_layers.first().map(|l| l.rid))
+            .find(|l| l.rid == default)
+            .or_else(|| self.available_simulcast_layers.first())
+            .copied()
+    }
+}
+
+impl TrackOut {
+    pub fn chosen_rid(&self) -> Option<Rid> {
+        self.chosen_layer.map(|layer| layer.rid)
     }
 }
 

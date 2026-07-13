@@ -112,7 +112,7 @@ impl Client {
                 return None;
             };
 
-            if rid != t.chosen_rid {
+            if rid != t.chosen_rid() {
                 return None;
             };
 
@@ -134,7 +134,7 @@ impl Client {
 
             Some(KeyframeRequest {
                 mid: streamer_mid,
-                rid: t.chosen_rid,
+                rid: t.chosen_rid(),
                 kind: request.kind,
             })
         })
@@ -486,7 +486,7 @@ impl Client {
 
                 Some(KeyframeRequest {
                     mid: track_in.mid,
-                    rid: to.chosen_rid,
+                    rid: to.chosen_rid(),
                     kind: KeyframeRequestKind::Fir,
                 })
             })
@@ -541,11 +541,20 @@ impl Client {
             return Ok(());
         };
 
-        if track_out.chosen_rid == Some(rid) {
+        let Some(available_layer) = track_in
+            .available_simulcast_layers
+            .iter()
+            .find(|l| l.rid == rid)
+            .copied()
+        else {
             return Ok(());
         };
 
-        track_out.chosen_rid = Some(rid);
+        if track_out.chosen_rid() == Some(rid) {
+            return Ok(());
+        };
+
+        track_out.chosen_layer = Some(available_layer);
 
         keyframe_requests.push(KeyframeRequest {
             mid: track_in.mid,
@@ -676,7 +685,7 @@ mod tests {
         let track_out = TrackOut {
             track_in: Arc::downgrade(&track_in),
             state: TrackOutState::Open(viewer_mid),
-            chosen_rid: Some(low_rid),
+            chosen_layer: track_in.default_layer(),
             layer_mode: LayerMode::Auto,
         };
 
@@ -696,7 +705,7 @@ mod tests {
             .set_layer(viewer_mid, high_rid, &mut keyframe_requests)
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(high_rid));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(high_rid));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, streamer_mid);
         assert_eq!(keyframe_requests[0].rid, Some(high_rid));
@@ -715,7 +724,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -732,7 +741,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -749,7 +758,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -776,7 +785,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("h")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
@@ -797,15 +806,21 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
     #[test]
     fn bwe_falls_back_to_lowest_layer_when_estimate_is_too_low() {
-        let (mut client, _track_in) = viewer_with_track_out();
+        let (mut client, track_in) = viewer_with_track_out();
         let mut keyframe_requests = Vec::new();
-        client.tracks_out[0].chosen_rid = Some(Rid::from("h"));
+        let high_layer = track_in
+            .available_simulcast_layers
+            .iter()
+            .find(|layer| layer.rid == Rid::from("h"))
+            .copied()
+            .expect("high simulcast layer should exist");
+        client.tracks_out[0].chosen_layer = Some(high_layer);
 
         client
             .handle_egress_bitrate_estimate(
@@ -814,7 +829,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("l")));
     }
