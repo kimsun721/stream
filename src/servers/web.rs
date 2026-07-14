@@ -23,6 +23,13 @@ use crate::types::{
     ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile, SimulcastTrack,
 };
 
+const MAX_SIMULCAST_LAYER_BITRATE_BPS: u64 = 100_000_000;
+const MIN_SIMULCAST_LAYER_BITRATE_BPS: u64 = 500_000;
+
+fn is_valid_simulcast_layer_bitrate(max_br: u64) -> bool {
+    (MIN_SIMULCAST_LAYER_BITRATE_BPS..=MAX_SIMULCAST_LAYER_BITRATE_BPS).contains(&max_br)
+}
+
 #[derive(Clone)]
 struct SdpState {
     addr: SocketAddr,
@@ -251,6 +258,10 @@ async fn sdp_offer(
                             None
                         }
                     }) {
+                        if !is_valid_simulcast_layer_bitrate(max_br) {
+                            return Err(StatusCode::BAD_REQUEST);
+                        }
+
                         let rid = Rid::from(layer.restriction_id.0.as_str());
 
                         track.layers.push(SimulcastLayerProfile { rid, max_br });
@@ -300,4 +311,29 @@ async fn sdp_offer(
     })?;
 
     Ok(Json(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulcast_layer_bitrate_accepts_inclusive_bounds() {
+        assert!(is_valid_simulcast_layer_bitrate(
+            MIN_SIMULCAST_LAYER_BITRATE_BPS
+        ));
+        assert!(is_valid_simulcast_layer_bitrate(
+            MAX_SIMULCAST_LAYER_BITRATE_BPS
+        ));
+    }
+
+    #[test]
+    fn simulcast_layer_bitrate_rejects_values_outside_bounds() {
+        assert!(!is_valid_simulcast_layer_bitrate(
+            MIN_SIMULCAST_LAYER_BITRATE_BPS - 1
+        ));
+        assert!(!is_valid_simulcast_layer_bitrate(
+            MAX_SIMULCAST_LAYER_BITRATE_BPS + 1
+        ));
+    }
 }
