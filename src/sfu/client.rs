@@ -427,12 +427,21 @@ impl Client {
         kind: BweKind,
         keyframe_requests: &mut Vec<KeyframeRequest>,
     ) -> ClientResult<()> {
-        const HEADROOM_MARGIN_PERCENT: u64 = 10;
-        const UPSWITCH_MARGIN_PERCENT: u64 = 10;
+        const HEADROOM_MARGIN_PERCENT: u128 = 10;
+        const UPSWITCH_MARGIN_PERCENT: u128 = 10;
 
         match kind {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
+                let bitrate = u128::from(bitrate.as_u64());
+
+                let is_layer_threshold_met =
+                    |layer: &SimulcastLayerProfile, margin_percent: u128| {
+                        let max_br = u128::from(layer.max_br);
+                        let margin = max_br * margin_percent / 100;
+
+                        bitrate >= max_br + margin
+                    };
 
                 for track_out in self
                     .tracks_out
@@ -444,14 +453,10 @@ impl Client {
                     };
 
                     if let Some(track_in) = track_out.track_in.upgrade() {
-                        let bitrate = bitrate.as_u64();
-
                         let rid = track_in
                             .available_simulcast_layers
                             .iter()
-                            .filter(|l| {
-                                bitrate >= l.max_br + l.max_br * HEADROOM_MARGIN_PERCENT / 100
-                            })
+                            .filter(|l| is_layer_threshold_met(l, HEADROOM_MARGIN_PERCENT))
                             .max_by_key(|l| l.max_br)
                             .or_else(|| {
                                 track_in
@@ -460,19 +465,16 @@ impl Client {
                                     .min_by_key(|l| l.max_br)
                             })
                             .and_then(|l| {
-                                let headroom_margin = l.max_br * HEADROOM_MARGIN_PERCENT / 100;
-
-                                let upswitch_margin = l.max_br * UPSWITCH_MARGIN_PERCENT / 100;
-
-                                let Some(current_layer) = track_out.chosen_layer else {
-                                    return None;
-                                };
+                                let current_layer = track_out.chosen_layer?;
 
                                 if current_layer.max_br > l.max_br {
                                     return Some(l.rid);
                                 }
 
-                                if bitrate >= l.max_br + headroom_margin + upswitch_margin {
+                                if is_layer_threshold_met(
+                                    l,
+                                    HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT,
+                                ) {
                                     Some(l.rid)
                                 } else {
                                     None
@@ -805,7 +807,7 @@ mod tests {
 
         client
             .handle_egress_bitrate_estimate(
-                BweKind::Twcc(Bitrate::bps(2_000_000)),
+                BweKind::Twcc(Bitrate::bps(2_400_000)),
                 &mut keyframe_requests,
             )
             .unwrap();
