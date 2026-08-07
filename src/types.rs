@@ -157,12 +157,9 @@ impl Client {
 
 impl TrackIn {
     pub fn default_layer(&self) -> Option<SimulcastLayerProfile> {
-        let default = Rid::from("l");
-
         self.available_simulcast_layers
             .iter()
-            .find(|l| l.rid == default)
-            .or_else(|| self.available_simulcast_layers.first())
+            .min_by_key(|l| l.max_br)
             .copied()
     }
 }
@@ -247,4 +244,49 @@ pub enum RelayStatus {
 pub enum LinkState {
     Connecting,
     Connected,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_layer_selects_lowest_max_br_regardless_of_rid_and_order() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![
+                SimulcastLayerProfile {
+                    rid: Rid::from("first-high"),
+                    max_br: 2_000_000,
+                },
+                SimulcastLayerProfile {
+                    rid: Rid::from("middle-low"),
+                    max_br: 300_000,
+                },
+                SimulcastLayerProfile {
+                    rid: Rid::from("last-medium"),
+                    max_br: 1_000_000,
+                },
+            ],
+        };
+
+        let layer = track.default_layer().expect("default layer should exist");
+
+        assert_eq!(layer.rid, Rid::from("middle-low"));
+        assert_eq!(layer.max_br, 300_000);
+    }
+
+    #[test]
+    fn default_layer_returns_none_without_simulcast_layers() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![],
+        };
+
+        assert!(track.default_layer().is_none());
+    }
 }

@@ -88,13 +88,11 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     .iter_mut()
                     .filter(|c| c.role == ClientRole::Viewer)
                 {
-                    let chosen_layer = track.default_layer();
-
                     client.tracks_out.push(TrackOut {
                         track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
-                        chosen_layer,
+                        chosen_layer: track.default_layer(),
                     });
                 }
             }
