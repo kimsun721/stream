@@ -220,12 +220,20 @@ async fn sdp_offer(
     } = payload;
     let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
 
-    let mut rtc = Rtc::builder()
-        .enable_bwe(Some(Bitrate::mbps(BWE_INITIAL_BITRATE_MBPS)))
-        .build(Instant::now());
+    let mut rtc = {
+        let mut builder = Rtc::builder();
 
-    rtc.bwe()
-        .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
+        if role == ClientRole::Viewer {
+            builder = builder.enable_bwe(Some(Bitrate::mbps(BWE_INITIAL_BITRATE_MBPS)));
+        }
+
+        builder.build(Instant::now())
+    };
+
+    if role == ClientRole::Viewer {
+        rtc.bwe()
+            .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
+    }
 
     rtc.add_local_candidate(Candidate::host(state.addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
