@@ -162,6 +162,13 @@ impl TrackIn {
             .min_by_key(|l| l.max_br)
             .copied()
     }
+
+    pub fn highest_layer(&self) -> Option<SimulcastLayerProfile> {
+        self.available_simulcast_layers
+            .iter()
+            .max_by_key(|l| l.max_br)
+            .copied()
+    }
 }
 
 impl TrackOut {
