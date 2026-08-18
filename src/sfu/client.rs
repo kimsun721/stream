@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::UdpSocket,
     sync::Arc,
     time::{Duration, Instant},
@@ -169,12 +170,15 @@ impl Client {
         for req in keyframe_requests {
             if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
                 let should_request = track_entry
-                    .last_keyframe_request
-                    .is_none_or(|r| r.elapsed() >= Duration::from_millis(1000));
+                    .last_keyframe_requested_at
+                    .get(&req.rid)
+                    .is_none_or(|at| at.elapsed() >= Duration::from_millis(1000));
 
                 if should_request && let Some(mut writer) = self.rtc.writer(req.mid) {
                     writer.request_keyframe(req.rid, req.kind)?;
-                    track_entry.last_keyframe_request = Some(Instant::now());
+                    track_entry
+                        .last_keyframe_requested_at
+                        .insert(req.rid, Instant::now());
                 };
             };
         }
@@ -301,7 +305,7 @@ impl Client {
 
         let track_in_entry = TrackInEntry {
             id: track_in.clone(),
-            last_keyframe_request: None,
+            last_keyframe_requested_at: HashMap::new(),
         };
 
         self.tracks_in.push(track_in_entry);

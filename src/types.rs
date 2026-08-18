@@ -91,7 +91,7 @@ pub struct TrackIn {
 #[derive(Debug)]
 pub struct TrackInEntry {
     pub id: Arc<TrackIn>,
-    pub last_keyframe_request: Option<Instant>,
+    pub last_keyframe_requested_at: HashMap<Option<Rid>, Instant>,
 }
 
 #[derive(Debug)]
