@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::http::StatusCode;
-use str0m::{Rtc, bwe::Bitrate};
+use str0m::Rtc;
 use tracing::{error, info, warn};
 
 use crate::types::{
@@ -162,9 +162,6 @@ impl Room {
         simulcast_tracks: Vec<SimulcastTrack>,
         reply: SyncSender<Option<StatusCode>>,
     ) {
-        const HEADROOM_MARGIN_PERCENT: u128 = 10;
-        const UPSWITCH_MARGIN_PERCENT: u128 = 10;
-
         let mut client = Client::new(rtc, role, simulcast_tracks);
 
         match role {
@@ -194,23 +191,13 @@ impl Room {
                         .iter()
                         .filter(|c| c.role == ClientRole::Streamer)
                         .flat_map(|c| {
-                            c.tracks_in.iter().map(|t| {
-                                (
-                                    Arc::downgrade(&t.id),
-                                    (t.id.default_layer(), t.id.highest_layer()),
-                                )
-                            })
+                            c.tracks_in
+                                .iter()
+                                .map(|t| (Arc::downgrade(&t.id), t.id.default_layer()))
                         })
                         .collect();
 
-                    let mut total_bitrate: Option<u128> = None;
-
-                    for (track_in, (default_layer, highest_layer)) in tracks {
-                        if let Some(highest_layer) = highest_layer {
-                            *total_bitrate.get_or_insert_default() +=
-                                u128::from(highest_layer.max_br);
-                        };
-
+                    for (track_in, default_layer) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
@@ -219,21 +206,8 @@ impl Room {
                         });
                     }
 
-                    if let Some(mut total_bitrate) = total_bitrate {
-                        let bitrate_margin = total_bitrate
-                            * (HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT)
-                            / 100;
-
-                        total_bitrate += bitrate_margin;
-
-                        if let Ok(desired_bitrate) = u64::try_from(total_bitrate) {
-                            client
-                                .rtc
-                                .bwe()
-                                .set_desired_bitrate(Bitrate::bps(desired_bitrate));
-                        } else {
-                            warn!("bitrate calc overflow {total_bitrate}");
-                        }
+                    if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
                     }
 
                     self.clients.push(client);
@@ -241,6 +215,12 @@ impl Room {
                 }
             },
         };
+    }
+
+    pub fn viewers_mut(&mut self) -> impl Iterator<Item = &mut Client> {
+        self.clients
+            .iter_mut()
+            .filter(|c| c.role == ClientRole::Viewer)
     }
 }
 

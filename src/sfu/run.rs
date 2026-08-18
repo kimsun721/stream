@@ -83,17 +83,21 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
 
             for track in &new_tracks {
-                for client in room
-                    .clients
-                    .iter_mut()
-                    .filter(|c| c.role == ClientRole::Viewer)
-                {
+                for client in room.viewers_mut() {
                     client.tracks_out.push(TrackOut {
                         track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
                         chosen_layer: track.default_layer(),
                     });
+                }
+            }
+
+            if !new_tracks.is_empty() {
+                for client in room.viewers_mut() {
+                    if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                    }
                 }
             }
 

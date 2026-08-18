@@ -6,7 +6,7 @@ use std::{
 
 use str0m::{
     Event, IceConnectionState, Input, Output,
-    bwe::BweKind,
+    bwe::{Bitrate, BweKind},
     change::{SdpAnswer, SdpOffer},
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
@@ -21,6 +21,9 @@ use crate::{
         UploadProbeResult,
     },
 };
+
+const HEADROOM_MARGIN_PERCENT: u128 = 10;
+const UPSWITCH_MARGIN_PERCENT: u128 = 10;
 
 impl Client {
     pub fn handle_input(&mut self, input: Input) {
@@ -256,6 +259,33 @@ impl Client {
         Ok(())
     }
 
+    pub fn calc_desired_bitrate(&self) -> Option<Bitrate> {
+        let mut total_bitrate: Option<u128> = None;
+
+        self.tracks_out.iter().for_each(|to| {
+            if let Some(ti) = to.track_in.upgrade()
+                && let Some(highest_layer) = ti.highest_layer()
+            {
+                *total_bitrate.get_or_insert_default() += u128::from(highest_layer.max_br);
+            };
+        });
+
+        if let Some(mut total_bitrate) = total_bitrate {
+            let bitrate_margin =
+                total_bitrate * (HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT) / 100;
+
+            total_bitrate += bitrate_margin;
+
+            if let Ok(desired_bitrate) = u64::try_from(total_bitrate) {
+                return Some(Bitrate::bps(desired_bitrate));
+            } else {
+                warn!("bitrate calc overflow {total_bitrate}");
+            }
+        }
+
+        None
+    }
+
     fn handle_media_added(
         &mut self,
         mid: Mid,
@@ -427,9 +457,6 @@ impl Client {
         kind: BweKind,
         keyframe_requests: &mut Vec<KeyframeRequest>,
     ) -> ClientResult<()> {
-        const HEADROOM_MARGIN_PERCENT: u128 = 10;
-        const UPSWITCH_MARGIN_PERCENT: u128 = 10;
-
         match kind {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
