@@ -519,7 +519,7 @@ impl Client {
                 }
 
                 for (mid, rid) in target_layers {
-                    self.set_layer(mid, rid, keyframe_requests)?;
+                    self.set_layer(mid, rid, keyframe_requests)?
                 }
             }
             BweKind::Remb(..) => (),
@@ -591,14 +591,6 @@ impl Client {
             return Ok(());
         };
 
-        if !track_in
-            .available_simulcast_layers
-            .iter()
-            .any(|l| l.rid == rid)
-        {
-            return Ok(());
-        };
-
         let Some(available_layer) = track_in
             .available_simulcast_layers
             .iter()
@@ -619,6 +611,18 @@ impl Client {
             rid: Some(rid),
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
+
+        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
+            let payload = S2cDcPayload::LayerChanged { rid, mid };
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("serde_json to_string failed: client_id={}", self.id);
+                return Ok(());
+            };
+
+            if let Err(e) = channel.write(false, json.as_bytes()) {
+                error!("send layer_changed via dc failed: {e}");
+            };
+        }
 
         Ok(())
     }

@@ -43,7 +43,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
-        for (_, room) in rooms.iter_mut() {
+        for room in rooms.values_mut() {
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
@@ -268,7 +268,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         };
 
         let now = Instant::now();
-        for (_, room) in rooms.iter_mut() {
+        for room in rooms.values_mut() {
             for client in room.clients.iter_mut() {
                 client.handle_input(Input::Timeout(now));
             }

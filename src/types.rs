@@ -233,6 +233,7 @@ pub enum S2cDcPayload {
     P2pAnswer { sdp: String },
     Demote,
     ProbeAvailableUpload,
+    LayerChanged { rid: Rid, mid: Mid },
 }
 
 #[derive(Debug)]
