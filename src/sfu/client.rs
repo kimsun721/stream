@@ -12,7 +12,7 @@ use str0m::{
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
-use tracing::{error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     sfu::error::{ClientError, ClientResult},
@@ -71,6 +71,13 @@ impl Client {
                                     for layer in &simulcast.recv {
                                         for l in track.layers.iter() {
                                             if l.rid == layer.rid {
+                                                info!(
+                                                    client_id = %self.id,
+                                                    mid = ?m.mid,
+                                                    rid = ?l.rid,
+                                                    max_br_bps = l.max_br,
+                                                    "negotiated simulcast layer"
+                                                );
                                                 layers.push(SimulcastLayerProfile {
                                                     rid: l.rid,
                                                     max_br: l.max_br,
@@ -467,6 +474,12 @@ impl Client {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
 
+                debug!(
+                    client_id = %self.id,
+                    bitrate_bps = bitrate.as_u64(),
+                    "egress TWCC bitrate estimate"
+                );
+
                 self.last_twcc_bitrate = Some(bitrate);
 
                 let bitrate = u128::from(bitrate.as_u64());
@@ -567,11 +580,22 @@ impl Client {
             return Ok(());
         };
 
-        if track_out.chosen_rid() == Some(rid) {
+        let previous_rid = track_out.chosen_rid();
+
+        if previous_rid == Some(rid) {
             return Ok(());
         };
 
         track_out.chosen_layer = Some(available_layer);
+
+        info!(
+            client_id = %self.id,
+            mid = ?mid,
+            previous_rid = ?previous_rid,
+            new_rid = ?rid,
+            layer_mode = ?track_out.layer_mode,
+            "simulcast layer changed"
+        );
 
         keyframe_requests.push(KeyframeRequest {
             mid: track_in.mid,
