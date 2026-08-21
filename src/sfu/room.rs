@@ -9,8 +9,8 @@ use str0m::Rtc;
 use tracing::{error, info, warn};
 
 use crate::types::{
-    Client, ClientId, ClientRole, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, TrackOut,
-    TrackOutState,
+    Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
+    Rooms, SimulcastTrack, TrackOut, TrackOutState,
 };
 
 impl Rooms {
@@ -23,10 +23,11 @@ impl Rooms {
         rtc: Rtc,
         role: ClientRole,
         room_id: RoomId,
+        simulcast_tracks: Vec<SimulcastTrack>,
         reply: SyncSender<Option<StatusCode>>,
     ) {
         if let Some(room) = self.get_mut(&room_id.0) {
-            room.add_client(rtc, role, reply);
+            room.add_client(rtc, role, simulcast_tracks, reply);
         } else {
             warn!("Room does not exist : {:?}", room_id);
             reply.send(Some(StatusCode::NOT_FOUND)).ok();
@@ -154,8 +155,14 @@ impl Room {
         self.state = state;
     }
 
-    fn add_client(&mut self, rtc: Rtc, role: ClientRole, reply: SyncSender<Option<StatusCode>>) {
-        let mut client = Client::new(rtc, role);
+    fn add_client(
+        &mut self,
+        rtc: Rtc,
+        role: ClientRole,
+        simulcast_tracks: Vec<SimulcastTrack>,
+        reply: SyncSender<Option<StatusCode>>,
+    ) {
+        let mut client = Client::new(rtc, role, simulcast_tracks);
 
         match role {
             ClientRole::Streamer => {
@@ -186,16 +193,21 @@ impl Room {
                         .flat_map(|c| {
                             c.tracks_in
                                 .iter()
-                                .map(|t| (Arc::downgrade(&t.id), t.id.default_rid()))
+                                .map(|t| (Arc::downgrade(&t.id), t.id.default_layer()))
                         })
                         .collect();
 
-                    for (track_in, chosen_rid) in tracks {
+                    for (track_in, default_layer) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
-                            chosen_rid,
+                            layer_mode: LayerMode::Auto,
+                            chosen_layer: default_layer,
                         });
+                    }
+
+                    if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
                     }
 
                     self.clients.push(client);
@@ -203,6 +215,12 @@ impl Room {
                 }
             },
         };
+    }
+
+    pub fn viewers_mut(&mut self) -> impl Iterator<Item = &mut Client> {
+        self.clients
+            .iter_mut()
+            .filter(|c| c.role == ClientRole::Viewer)
     }
 }
 
@@ -281,9 +299,9 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), Some(()));
 
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), tx);
+        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), vec![], tx);
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), tx);
+        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), vec![], tx);
 
         let (tx, rx) = reply();
         rooms.get_views(RoomId(7), tx);
@@ -323,11 +341,11 @@ mod tests {
         };
 
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
 
         assert_eq!(room.clients.len(), 1);
     }
@@ -348,7 +366,7 @@ mod tests {
             };
 
             let (tx, _rx) = reply::<StatusCode>();
-            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer, tx);
+            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer, vec![], tx);
 
             assert_eq!(
                 room.clients.len(),

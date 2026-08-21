@@ -10,8 +10,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LinkState, PollResult, RelayStatus, Rooms, SfuMessage, TrackIn,
-        TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, Rooms, SfuMessage,
+        TrackIn, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -27,8 +27,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     rtc,
                     role,
                     room_id,
+                    simulcast_tracks,
                     reply,
-                } => rooms.register_client(*rtc, role, room_id, reply),
+                } => rooms.register_client(*rtc, role, room_id, simulcast_tracks, reply),
                 SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
                 SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
                 SfuMessage::UpdateRoomState {
@@ -42,7 +43,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
-        for (_, room) in rooms.iter_mut() {
+        for room in rooms.values_mut() {
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
@@ -82,18 +83,21 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
 
             for track in &new_tracks {
-                for client in room
-                    .clients
-                    .iter_mut()
-                    .filter(|c| c.role == ClientRole::Viewer)
-                {
-                    let chosen_rid = track.default_rid();
-
+                for client in room.viewers_mut() {
                     client.tracks_out.push(TrackOut {
                         track_in: Arc::downgrade(track),
                         state: TrackOutState::ToOpen,
-                        chosen_rid,
+                        layer_mode: LayerMode::Auto,
+                        chosen_layer: track.default_layer(),
                     });
+                }
+            }
+
+            if !new_tracks.is_empty() {
+                for client in room.viewers_mut() {
+                    if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                    }
                 }
             }
 
@@ -264,7 +268,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         };
 
         let now = Instant::now();
-        for (_, room) in rooms.iter_mut() {
+        for room in rooms.values_mut() {
             for client in room.clients.iter_mut() {
                 client.handle_input(Input::Timeout(now));
             }
