@@ -12,6 +12,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use str0m::{
     Rtc,
+    bwe::Bitrate,
     change::SdpPendingOffer,
     channel::ChannelId,
     media::{MediaKind, Mid, Rid},
@@ -40,6 +41,7 @@ pub struct Client {
     pub relay_outgoing_kbps: Option<u32>,
     pub pending_simulcast_tracks: Vec<SimulcastTrack>,
     pub connected_at: Instant,
+    pub last_twcc_bitrate: Option<Bitrate>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -151,6 +153,7 @@ impl Client {
             connected_at: Instant::now(),
             relay_outgoing_kbps: None,
             pending_simulcast_tracks,
+            last_twcc_bitrate: None,
         }
     }
 }

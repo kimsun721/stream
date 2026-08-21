@@ -18,8 +18,8 @@ use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
         C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState, PerfSample, PollResult,
-        RelayStatus, S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOutState,
-        UploadProbeResult,
+        RelayStatus, S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOut,
+        TrackOutState, UploadProbeResult,
     },
 };
 
@@ -346,7 +346,9 @@ impl Client {
                     Ok(())
                 }
             }
-            C2sDcPayload::SetLayerMode { mid, layer_mode } => self.set_layer_mode(mid, layer_mode),
+            C2sDcPayload::SetLayerMode { mid, layer_mode } => {
+                self.set_layer_mode(mid, layer_mode, keyframe_requests)
+            }
             C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
@@ -464,15 +466,10 @@ impl Client {
         match kind {
             BweKind::Twcc(bitrate) => {
                 let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
+
+                self.last_twcc_bitrate = Some(bitrate);
+
                 let bitrate = u128::from(bitrate.as_u64());
-
-                let is_layer_threshold_met =
-                    |layer: &SimulcastLayerProfile, margin_percent: u128| {
-                        let max_br = u128::from(layer.max_br);
-                        let margin = max_br * margin_percent / 100;
-
-                        bitrate >= max_br + margin
-                    };
 
                 for track_out in self
                     .tracks_out
@@ -483,39 +480,9 @@ impl Client {
                         continue;
                     };
 
-                    if let Some(track_in) = track_out.track_in.upgrade() {
-                        let rid = track_in
-                            .available_simulcast_layers
-                            .iter()
-                            .filter(|l| is_layer_threshold_met(l, HEADROOM_MARGIN_PERCENT))
-                            .max_by_key(|l| l.max_br)
-                            .or_else(|| {
-                                track_in
-                                    .available_simulcast_layers
-                                    .iter()
-                                    .min_by_key(|l| l.max_br)
-                            })
-                            .and_then(|l| {
-                                let current_layer = track_out.chosen_layer?;
-
-                                if current_layer.max_br > l.max_br {
-                                    return Some(l.rid);
-                                }
-
-                                if is_layer_threshold_met(
-                                    l,
-                                    HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT,
-                                ) {
-                                    Some(l.rid)
-                                } else {
-                                    None
-                                }
-                            });
-
-                        if let Some(rid) = rid {
-                            target_layers.push((mid, rid));
-                        }
-                    };
+                    if let Some(rid) = target_rid_for_bitrate(track_out, bitrate) {
+                        target_layers.push((mid, rid));
+                    }
                 }
 
                 for (mid, rid) in target_layers {
@@ -627,13 +594,33 @@ impl Client {
         Ok(())
     }
 
-    fn set_layer_mode(&mut self, mid: Mid, layer_mode: LayerMode) -> ClientResult<()> {
-        for track in self
+    fn set_layer_mode(
+        &mut self,
+        mid: Mid,
+        layer_mode: LayerMode,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        let mut bwe_target_rid: Option<Rid> = None;
+
+        for track_out in self
             .tracks_out
             .iter_mut()
             .filter(|t| t.state == TrackOutState::Open(mid))
         {
-            track.layer_mode = layer_mode
+            track_out.layer_mode = layer_mode;
+
+            if matches!(layer_mode, LayerMode::Auto)
+                && let Some(bitrate) = self.last_twcc_bitrate
+            {
+                let bitrate = u128::from(bitrate.as_u64());
+                let rid = target_rid_for_bitrate(track_out, bitrate);
+
+                bwe_target_rid = rid;
+            };
+        }
+
+        if let Some(rid) = bwe_target_rid {
+            self.set_layer(mid, rid, keyframe_requests)?
         }
 
         Ok(())
@@ -704,6 +691,52 @@ impl Client {
 
         rtt_ms_avg < RTT_MS_CUTOFF && loss_pct_avg < LOSS_PCT_CUTOFF && len > MIN_SAMPLES_LEN
     }
+}
+
+fn is_layer_threshold_met(
+    bitrate: u128,
+    layer: &SimulcastLayerProfile,
+    margin_percent: u128,
+) -> bool {
+    let max_br = u128::from(layer.max_br);
+    let margin = max_br * margin_percent / 100;
+
+    bitrate >= max_br + margin
+}
+
+fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
+    if let Some(track_in) = track_out.track_in.upgrade() {
+        let rid = track_in
+            .available_simulcast_layers
+            .iter()
+            .filter(|l| is_layer_threshold_met(bitrate, l, HEADROOM_MARGIN_PERCENT))
+            .max_by_key(|l| l.max_br)
+            .or_else(|| {
+                track_in
+                    .available_simulcast_layers
+                    .iter()
+                    .min_by_key(|l| l.max_br)
+            })
+            .and_then(|l| {
+                let current_layer = track_out.chosen_layer?;
+
+                if current_layer.max_br > l.max_br {
+                    return Some(l.rid);
+                }
+
+                if is_layer_threshold_met(
+                    bitrate,
+                    l,
+                    HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT,
+                ) {
+                    Some(l.rid)
+                } else {
+                    None
+                }
+            });
+        return rid;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -827,12 +860,18 @@ mod tests {
     #[test]
     fn set_layer_mode_updates_matching_track() {
         let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests = Vec::new();
 
         client
-            .set_layer_mode(Mid::from("viewer-video"), LayerMode::Manual)
+            .set_layer_mode(
+                Mid::from("viewer-video"),
+                LayerMode::Manual,
+                &mut keyframe_requests,
+            )
             .unwrap();
 
         assert!(matches!(client.tracks_out[0].layer_mode, LayerMode::Manual));
+        assert!(keyframe_requests.is_empty());
     }
 
     #[test]
@@ -859,7 +898,11 @@ mod tests {
         let mut keyframe_requests = Vec::new();
 
         client
-            .set_layer_mode(Mid::from("viewer-video"), LayerMode::Manual)
+            .set_layer_mode(
+                Mid::from("viewer-video"),
+                LayerMode::Manual,
+                &mut keyframe_requests,
+            )
             .unwrap();
         client
             .handle_egress_bitrate_estimate(
@@ -867,9 +910,52 @@ mod tests {
                 &mut keyframe_requests,
             )
             .unwrap();
+        client
+            .set_layer_mode(
+                Mid::from("viewer-video"),
+                LayerMode::Manual,
+                &mut keyframe_requests,
+            )
+            .unwrap();
 
         assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn switching_to_auto_reevaluates_last_twcc_bitrate() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests = Vec::new();
+
+        client
+            .set_layer_mode(
+                Mid::from("viewer-video"),
+                LayerMode::Manual,
+                &mut keyframe_requests,
+            )
+            .unwrap();
+        client
+            .handle_egress_bitrate_estimate(
+                BweKind::Twcc(Bitrate::bps(2_400_000)),
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert!(keyframe_requests.is_empty());
+
+        client
+            .set_layer_mode(
+                Mid::from("viewer-video"),
+                LayerMode::Auto,
+                &mut keyframe_requests,
+            )
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("h")));
+        assert_eq!(keyframe_requests.len(), 1);
+        assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
+        assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
     }
 
     #[test]
