@@ -340,7 +340,7 @@ impl Client {
 
         match payload {
             C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
-            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp),
+            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp, keyframe_requests),
             C2sDcPayload::SetLayer { mid, rid } => {
                 let mid = Mid::from(mid.as_str());
                 let rid = Rid::from(rid.as_str());
@@ -387,18 +387,41 @@ impl Client {
         Ok(())
     }
 
-    fn handle_answer(&mut self, answer: &str) -> ClientResult<()> {
+    fn handle_answer(
+        &mut self,
+        answer: &str,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
         let answer = SdpAnswer::from_sdp_string(answer)?;
+        let bitrate = self.last_twcc_bitrate;
+
+        let mut bwe_target_layer: Option<(Mid, Rid)> = None;
 
         if let Some(pending) = self.pending.take() {
             self.rtc.sdp_api().accept_answer(pending, answer)?;
 
-            for track in &mut self.tracks_out {
-                if let TrackOutState::Negotiating(m) = track.state {
-                    track.state = TrackOutState::Open(m);
-                }
+            for track_out in &mut self.tracks_out {
+                let TrackOutState::Negotiating(mid) = track_out.state else {
+                    continue;
+                };
+                track_out.state = TrackOutState::Open(mid);
+
+                if let Some(bitrate) = bitrate {
+                    let bitrate = u128::from(bitrate.as_u64());
+
+                    let rid = target_rid_for_bitrate(track_out, bitrate);
+
+                    if let Some(rid) = rid {
+                        bwe_target_layer = Some((mid, rid));
+                    }
+                };
             }
         }
+
+        if let Some((mid, rid)) = bwe_target_layer {
+            self.set_layer(mid, rid, keyframe_requests)?;
+        }
+
         Ok(())
     }
 
