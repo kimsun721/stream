@@ -17,9 +17,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState, PerfSample, PollResult,
-        RelayStatus, S2cDcPayload, SimulcastLayerProfile, TrackIn, TrackInEntry, TrackOut,
-        TrackOutState, UploadProbeResult,
+        BitrateEstimator, BitrateEstimators, C2sDcPayload, Client, ClientId, ClientRole, LayerMode,
+        LinkState, PerfSample, PollResult, RelayStatus, S2cDcPayload, SimulcastLayerProfile,
+        TrackIn, TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -91,7 +91,22 @@ impl Client {
                             new_tracks.push(track_in);
                         }
                     }
-                    Event::MediaData(data) => media_datas.push(data),
+                    Event::MediaData(data) => {
+                        if self.role == ClientRole::Streamer
+                            && let Some(rid) = data.rid
+                        {
+                            if let Some(track_in) =
+                                self.tracks_in.iter_mut().find(|t| t.id.mid == data.mid)
+                            {
+                                if let Some(bitrate_estimator) =
+                                    track_in.bitrate_estimators.get_mut(&rid)
+                                {
+                                    bitrate_estimator.push(data.data.len(), Instant::now());
+                                };
+                            }
+                        }
+                        media_datas.push(data);
+                    }
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
                     Event::ChannelData(data) => self.handle_channel_data(
                         data,
@@ -303,6 +318,11 @@ impl Client {
         kind: MediaKind,
         simulcast_layers: Vec<SimulcastLayerProfile>,
     ) -> Arc<TrackIn> {
+        let mut bitrate_estimators: BitrateEstimators = HashMap::new();
+        for layer in &simulcast_layers {
+            bitrate_estimators.insert(layer.rid, BitrateEstimator::new());
+        }
+
         let track_in = Arc::new(TrackIn {
             origin: self.id,
             mid,
@@ -313,6 +333,7 @@ impl Client {
         let track_in_entry = TrackInEntry {
             id: track_in.clone(),
             last_keyframe_requested_at: HashMap::new(),
+            bitrate_estimators,
         };
 
         self.tracks_in.push(track_in_entry);

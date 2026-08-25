@@ -5,7 +5,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::SyncSender,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::http::StatusCode;
@@ -19,6 +19,8 @@ use str0m::{
 };
 
 use derive_more::Display;
+
+const BITRATE_ESTIMATION_SECOND: u64 = 3;
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
@@ -60,6 +62,61 @@ pub struct PerfSample {
 }
 
 #[derive(Debug)]
+pub struct BitrateEstimator {
+    pub history: VecDeque<(usize, Instant)>,
+    pub accumulated_bytes: Option<u64>,
+    pub bitrate_estimate: Option<u64>,
+    pub started_at: Option<Instant>,
+}
+
+pub type BitrateEstimators = HashMap<Rid, BitrateEstimator>;
+
+impl BitrateEstimator {
+    pub fn new() -> BitrateEstimator {
+        BitrateEstimator {
+            history: VecDeque::new(),
+            accumulated_bytes: None,
+            bitrate_estimate: None,
+            started_at: None,
+        }
+    }
+
+    pub fn push(&mut self, bytes: usize, now: Instant) {
+        let mut total_bytes = self.accumulated_bytes.unwrap_or_else(|| 0);
+        while let Some((bytes, timestamp)) = self.history.front() {
+            if timestamp.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND) {
+                total_bytes -= *bytes as u64;
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.history.is_empty() {
+            self.started_at = None;
+            self.accumulated_bytes = None;
+            self.bitrate_estimate = None;
+        }
+
+        if self.started_at.is_none() {
+            self.started_at = Some(now);
+        }
+
+        total_bytes += bytes as u64;
+        self.history.push_back((bytes, now));
+
+        self.accumulated_bytes = Some(total_bytes);
+
+        if self
+            .started_at
+            .is_some_and(|at| at.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+        {
+            self.bitrate_estimate = Some(total_bytes * 8 / BITRATE_ESTIMATION_SECOND);
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum UploadProbeResult {
     Probing { probed_at: Instant },
     Probed { available_upload_kbps: u32 },
@@ -94,6 +151,7 @@ pub struct TrackIn {
 pub struct TrackInEntry {
     pub id: Arc<TrackIn>,
     pub last_keyframe_requested_at: HashMap<Option<Rid>, Instant>,
+    pub bitrate_estimators: HashMap<Rid, BitrateEstimator>,
 }
 
 #[derive(Debug)]
