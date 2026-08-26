@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
+    rc::{Rc, Weak},
     sync::{
-        Arc, Weak,
         atomic::{AtomicU64, Ordering},
         mpsc::SyncSender,
     },
@@ -155,7 +155,7 @@ pub struct TrackIn {
 
 #[derive(Debug)]
 pub struct TrackInEntry {
-    pub id: Arc<TrackIn>,
+    pub id: Rc<TrackIn>,
     pub last_keyframe_requested_at: HashMap<Option<Rid>, Instant>,
     pub bitrate_estimators: HashMap<Rid, BitrateEstimator>,
 }

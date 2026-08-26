@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     net::UdpSocket,
-    sync::Arc,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -40,7 +40,7 @@ impl Client {
     pub fn poll_output(
         self: &mut Client,
         socket: &UdpSocket,
-        new_tracks: &mut Vec<Arc<TrackIn>>,
+        new_tracks: &mut Vec<Rc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
@@ -252,7 +252,7 @@ impl Client {
     pub fn tick(
         &mut self,
         socket: &UdpSocket,
-        new_tracks: &mut Vec<Arc<TrackIn>>,
+        new_tracks: &mut Vec<Rc<TrackIn>>,
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
@@ -317,13 +317,13 @@ impl Client {
         mid: Mid,
         kind: MediaKind,
         simulcast_layers: Vec<SimulcastLayerProfile>,
-    ) -> Arc<TrackIn> {
+    ) -> Rc<TrackIn> {
         let mut bitrate_estimators: BitrateEstimators = HashMap::new();
         for layer in &simulcast_layers {
             bitrate_estimators.insert(layer.rid, BitrateEstimator::new());
         }
 
-        let track_in = Arc::new(TrackIn {
+        let track_in = Rc::new(TrackIn {
             origin: self.id,
             mid,
             kind,
@@ -809,7 +809,7 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Instant};
+    use std::{rc::Rc, time::Instant};
 
     use str0m::{
         Rtc,
@@ -821,7 +821,7 @@ mod tests {
         Client, ClientRole, LayerMode, SimulcastLayerProfile, TrackIn, TrackOut, TrackOutState,
     };
 
-    fn viewer_with_track_out() -> (Client, Arc<TrackIn>) {
+    fn viewer_with_track_out() -> (Client, Rc<TrackIn>) {
         let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer, vec![]);
 
         let streamer_mid = Mid::from("streamer-video");
@@ -829,7 +829,7 @@ mod tests {
         let low_rid = Rid::from("l");
         let high_rid = Rid::from("h");
 
-        let track_in = Arc::new(TrackIn {
+        let track_in = Rc::new(TrackIn {
             origin: client.id,
             mid: streamer_mid,
             kind: MediaKind::Video,
@@ -846,7 +846,7 @@ mod tests {
         });
 
         let track_out = TrackOut {
-            track_in: Arc::downgrade(&track_in),
+            track_in: Rc::downgrade(&track_in),
             state: TrackOutState::Open(viewer_mid),
             chosen_layer: track_in.default_layer(),
             layer_mode: LayerMode::Auto,

@@ -1,7 +1,8 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     ops::{Deref, DerefMut},
-    sync::{Arc, mpsc::SyncSender},
+    rc::Rc,
+    sync::mpsc::SyncSender,
 };
 
 use axum::http::StatusCode;
@@ -193,7 +194,7 @@ impl Room {
                         .flat_map(|c| {
                             c.tracks_in
                                 .iter()
-                                .map(|t| (Arc::downgrade(&t.id), t.id.default_layer()))
+                                .map(|t| (Rc::downgrade(&t.id), t.id.default_layer()))
                         })
                         .collect();
 

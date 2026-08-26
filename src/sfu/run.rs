@@ -1,6 +1,7 @@
 use std::{
     net::UdpSocket,
-    sync::{Arc, mpsc::Receiver},
+    rc::Rc,
+    sync::mpsc::Receiver,
     time::{Duration, Instant},
 };
 
@@ -45,7 +46,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
         for room in rooms.values_mut() {
             let mut to_remove = Vec::new();
-            let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
+            let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
@@ -85,7 +86,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             for track in &new_tracks {
                 for client in room.viewers_mut() {
                     client.tracks_out.push(TrackOut {
-                        track_in: Arc::downgrade(track),
+                        track_in: Rc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
                         chosen_layer: track.default_layer(),
