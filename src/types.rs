@@ -63,10 +63,9 @@ pub struct PerfSample {
 
 #[derive(Debug)]
 pub struct BitrateEstimator {
-    pub history: VecDeque<(usize, Instant)>,
-    pub accumulated_bytes: Option<u64>,
-    pub bitrate_estimate: Option<u64>,
-    pub started_at: Option<Instant>,
+    history: VecDeque<(usize, Instant)>,
+    accumulated_bytes: u64,
+    started_at: Option<Instant>,
 }
 
 pub type BitrateEstimators = HashMap<Rid, BitrateEstimator>;
@@ -75,17 +74,41 @@ impl BitrateEstimator {
     pub fn new() -> BitrateEstimator {
         BitrateEstimator {
             history: VecDeque::new(),
-            accumulated_bytes: None,
-            bitrate_estimate: None,
+            accumulated_bytes: 0,
             started_at: None,
         }
     }
 
     pub fn push(&mut self, bytes: usize, now: Instant) {
-        let mut total_bytes = self.accumulated_bytes.unwrap_or_else(|| 0);
+        self.remove_expired();
+
+        if self.history.is_empty() {
+            self.started_at = Some(now);
+        }
+
+        self.history.push_back((bytes, now));
+
+        self.accumulated_bytes += bytes as u64;
+    }
+
+    pub fn bitrate_estimate(&mut self) -> Option<u64> {
+        self.remove_expired();
+
+        if self.history.is_empty()
+            || self
+                .started_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+        {
+            None
+        } else {
+            Some(self.accumulated_bytes * 8 / BITRATE_ESTIMATION_SECOND)
+        }
+    }
+
+    fn remove_expired(&mut self) {
         while let Some((bytes, timestamp)) = self.history.front() {
             if timestamp.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND) {
-                total_bytes -= *bytes as u64;
+                self.accumulated_bytes -= *bytes as u64;
                 self.history.pop_front();
             } else {
                 break;
@@ -94,24 +117,7 @@ impl BitrateEstimator {
 
         if self.history.is_empty() {
             self.started_at = None;
-            self.accumulated_bytes = None;
-            self.bitrate_estimate = None;
-        }
-
-        if self.started_at.is_none() {
-            self.started_at = Some(now);
-        }
-
-        total_bytes += bytes as u64;
-        self.history.push_back((bytes, now));
-
-        self.accumulated_bytes = Some(total_bytes);
-
-        if self
-            .started_at
-            .is_some_and(|at| at.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND))
-        {
-            self.bitrate_estimate = Some(total_bytes * 8 / BITRATE_ESTIMATION_SECOND);
+            self.accumulated_bytes = 0;
         }
     }
 }
