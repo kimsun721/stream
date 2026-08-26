@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     net::UdpSocket,
     rc::Rc,
@@ -17,9 +18,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        BitrateEstimator, BitrateEstimators, C2sDcPayload, Client, ClientId, ClientRole, LayerMode,
-        LinkState, PerfSample, PollResult, RelayStatus, S2cDcPayload, SimulcastLayerProfile,
-        TrackIn, TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
+        BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState,
+        PerfSample, PollResult, RelayStatus, S2cDcPayload, SimulcastLayer, TrackIn, TrackInEntry,
+        TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -62,31 +63,20 @@ impl Client {
                     }
                     Event::MediaAdded(m) => {
                         if self.role == ClientRole::Streamer {
-                            let simulcast_tracks = self.pending_simulcast_tracks.clone();
-                            let mut layers: Vec<SimulcastLayerProfile> = Vec::new();
-                            for track in simulcast_tracks {
-                                if m.mid == track.mid
-                                    && let Some(simulcast) = &m.simulcast
-                                {
-                                    for layer in &simulcast.recv {
-                                        for l in track.layers.iter() {
-                                            if l.rid == layer.rid {
-                                                info!(
-                                                    client_id = %self.id,
-                                                    mid = ?m.mid,
-                                                    rid = ?l.rid,
-                                                    max_br_bps = l.max_br,
-                                                    "negotiated simulcast layer"
-                                                );
-                                                layers.push(SimulcastLayerProfile {
-                                                    rid: l.rid,
-                                                    max_br: l.max_br,
-                                                });
-                                            }
-                                        }
-                                    }
-                                };
+                            let mut layers: Vec<SimulcastLayer> = Vec::new();
+
+                            let rids: Vec<Rid> = m
+                                .simulcast
+                                .map(|simulcast| simulcast.recv.iter().map(|l| l.rid).collect())
+                                .unwrap_or_default();
+
+                            for rid in rids {
+                                layers.push(SimulcastLayer {
+                                    rid,
+                                    bitrate_estimator: RefCell::new(BitrateEstimator::new()),
+                                });
                             }
+
                             let track_in = self.handle_media_added(m.mid, m.kind, layers);
                             new_tracks.push(track_in);
                         }
@@ -94,17 +84,20 @@ impl Client {
                     Event::MediaData(data) => {
                         if self.role == ClientRole::Streamer
                             && let Some(rid) = data.rid
-                        {
-                            if let Some(track_in) =
+                            && let Some(track_in) =
                                 self.tracks_in.iter_mut().find(|t| t.id.mid == data.mid)
-                            {
-                                if let Some(bitrate_estimator) =
-                                    track_in.bitrate_estimators.get_mut(&rid)
-                                {
-                                    bitrate_estimator.push(data.data.len(), Instant::now());
-                                };
-                            }
+                            && let Some(simulcast_layer) = track_in
+                                .id
+                                .available_simulcast_layers
+                                .iter()
+                                .find(|l| l.rid == rid)
+                        {
+                            simulcast_layer
+                                .bitrate_estimator
+                                .borrow_mut()
+                                .push(data.data.len(), Instant::now());
                         }
+
                         media_datas.push(data);
                     }
                     Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
@@ -138,7 +131,7 @@ impl Client {
                 return None;
             };
 
-            if rid != t.chosen_rid() {
+            if rid != t.chosen_rid {
                 return None;
             };
 
@@ -160,7 +153,7 @@ impl Client {
 
             Some(KeyframeRequest {
                 mid: streamer_mid,
-                rid: t.chosen_rid(),
+                rid: t.chosen_rid,
                 kind: request.kind,
             })
         })
@@ -290,9 +283,9 @@ impl Client {
 
         self.tracks_out.iter().for_each(|to| {
             if let Some(ti) = to.track_in.upgrade()
-                && let Some(highest_layer) = ti.highest_layer()
+                && let Some(highest_estimated_bps) = ti.highest_estimated_bps()
             {
-                *total_bitrate.get_or_insert_default() += u128::from(highest_layer.max_br);
+                *total_bitrate.get_or_insert_default() += u128::from(highest_estimated_bps);
             };
         });
 
@@ -316,13 +309,8 @@ impl Client {
         &mut self,
         mid: Mid,
         kind: MediaKind,
-        simulcast_layers: Vec<SimulcastLayerProfile>,
+        simulcast_layers: Vec<SimulcastLayer>,
     ) -> Rc<TrackIn> {
-        let mut bitrate_estimators: BitrateEstimators = HashMap::new();
-        for layer in &simulcast_layers {
-            bitrate_estimators.insert(layer.rid, BitrateEstimator::new());
-        }
-
         let track_in = Rc::new(TrackIn {
             origin: self.id,
             mid,
@@ -333,7 +321,6 @@ impl Client {
         let track_in_entry = TrackInEntry {
             id: track_in.clone(),
             last_keyframe_requested_at: HashMap::new(),
-            bitrate_estimators,
         };
 
         self.tracks_in.push(track_in_entry);
@@ -568,7 +555,7 @@ impl Client {
 
                 Some(KeyframeRequest {
                     mid: track_in.mid,
-                    rid: to.chosen_rid(),
+                    rid: to.chosen_rid,
                     kind: KeyframeRequestKind::Fir,
                 })
             })
@@ -615,22 +602,22 @@ impl Client {
             return Ok(());
         };
 
-        let Some(available_layer) = track_in
+        let Some(available_rid) = track_in
             .available_simulcast_layers
             .iter()
             .find(|l| l.rid == rid)
-            .copied()
+            .map(|l| l.rid)
         else {
             return Ok(());
         };
 
-        let previous_rid = track_out.chosen_rid();
+        let previous_rid = track_out.chosen_rid;
 
         if previous_rid == Some(rid) {
             return Ok(());
         };
 
-        track_out.chosen_layer = Some(available_layer);
+        track_out.chosen_rid = Some(available_rid);
 
         info!(
             client_id = %self.id,
@@ -761,47 +748,54 @@ impl Client {
     }
 }
 
-fn is_layer_threshold_met(
-    bitrate: u128,
-    layer: &SimulcastLayerProfile,
-    margin_percent: u128,
-) -> bool {
-    let max_br = u128::from(layer.max_br);
-    let margin = max_br * margin_percent / 100;
+fn is_layer_threshold_met(bitrate: u128, bitrate_estimate: u64, margin_percent: u128) -> bool {
+    let bitrate_estimate = bitrate_estimate as u128;
 
-    bitrate >= max_br + margin
+    let margin = bitrate_estimate * margin_percent / 100;
+
+    bitrate >= bitrate_estimate + margin
 }
 
 fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
     if let Some(track_in) = track_out.track_in.upgrade() {
-        let rid = track_in
+        let estimates: Vec<(Rid, u64)> = track_in
             .available_simulcast_layers
             .iter()
-            .filter(|l| is_layer_threshold_met(bitrate, l, HEADROOM_MARGIN_PERCENT))
-            .max_by_key(|l| l.max_br)
-            .or_else(|| {
-                track_in
-                    .available_simulcast_layers
-                    .iter()
-                    .min_by_key(|l| l.max_br)
-            })
-            .and_then(|l| {
-                let current_layer = track_out.chosen_layer?;
+            .filter_map(|l| l.estimate_bps().map(|estimate_bps| (l.rid, estimate_bps)))
+            .collect();
 
-                if current_layer.max_br > l.max_br {
-                    return Some(l.rid);
+        let rid = estimates
+            .iter()
+            .filter(|(_, estimate)| {
+                is_layer_threshold_met(bitrate, *estimate, HEADROOM_MARGIN_PERCENT)
+            })
+            .max_by_key(|(_, estimate)| estimate)
+            .or_else(|| estimates.iter().min_by_key(|(_, estimate)| estimate))
+            .and_then(|(rid, estimate)| {
+                let current_rid = track_out.chosen_rid?;
+                let Some(current_layer_estimated_bps) = estimates
+                    .iter()
+                    .find(|(rid, _)| *rid == current_rid)
+                    .map(|(_, estimate)| *estimate)
+                else {
+                    return None;
+                };
+
+                if current_layer_estimated_bps > *estimate {
+                    return Some(*rid);
                 }
 
                 if is_layer_threshold_met(
                     bitrate,
-                    l,
+                    *estimate,
                     HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT,
                 ) {
-                    Some(l.rid)
+                    Some(*rid)
                 } else {
                     None
                 }
             });
+
         return rid;
     }
     None
@@ -809,7 +803,7 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
 
 #[cfg(test)]
 mod tests {
-    use std::{rc::Rc, time::Instant};
+    use std::{cell::RefCell, rc::Rc, time::Instant};
 
     use str0m::{
         Rtc,
@@ -818,11 +812,19 @@ mod tests {
     };
 
     use crate::types::{
-        Client, ClientRole, LayerMode, SimulcastLayerProfile, TrackIn, TrackOut, TrackOutState,
+        BitrateEstimator, Client, ClientRole, LayerMode, SimulcastLayer, TrackIn, TrackOut,
+        TrackOutState,
     };
 
+    fn simulcast_layer(rid: Rid, estimated_bps: u64) -> SimulcastLayer {
+        SimulcastLayer {
+            rid,
+            bitrate_estimator: RefCell::new(BitrateEstimator::with_estimated_bps(estimated_bps)),
+        }
+    }
+
     fn viewer_with_track_out() -> (Client, Rc<TrackIn>) {
-        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer, vec![]);
+        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer);
 
         let streamer_mid = Mid::from("streamer-video");
         let viewer_mid = Mid::from("viewer-video");
@@ -834,21 +836,15 @@ mod tests {
             mid: streamer_mid,
             kind: MediaKind::Video,
             available_simulcast_layers: vec![
-                SimulcastLayerProfile {
-                    rid: low_rid,
-                    max_br: 300_000,
-                },
-                SimulcastLayerProfile {
-                    rid: high_rid,
-                    max_br: 2_000_000,
-                },
+                simulcast_layer(high_rid, 2_000_000),
+                simulcast_layer(low_rid, 300_000),
             ],
         });
 
         let track_out = TrackOut {
             track_in: Rc::downgrade(&track_in),
             state: TrackOutState::Open(viewer_mid),
-            chosen_layer: track_in.default_layer(),
+            chosen_rid: track_in.default_rid(),
             layer_mode: LayerMode::Auto,
         };
 
@@ -868,7 +864,7 @@ mod tests {
             .set_layer(viewer_mid, high_rid, &mut keyframe_requests)
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(high_rid));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(high_rid));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, streamer_mid);
         assert_eq!(keyframe_requests[0].rid, Some(high_rid));
@@ -887,7 +883,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -904,7 +900,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -921,7 +917,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -954,7 +950,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
@@ -986,7 +982,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
     }
 
@@ -1009,7 +1005,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert!(keyframe_requests.is_empty());
 
         client
@@ -1020,7 +1016,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
@@ -1028,15 +1024,9 @@ mod tests {
 
     #[test]
     fn bwe_falls_back_to_lowest_layer_when_estimate_is_too_low() {
-        let (mut client, track_in) = viewer_with_track_out();
+        let (mut client, _track_in) = viewer_with_track_out();
         let mut keyframe_requests = Vec::new();
-        let high_layer = track_in
-            .available_simulcast_layers
-            .iter()
-            .find(|layer| layer.rid == Rid::from("h"))
-            .copied()
-            .expect("high simulcast layer should exist");
-        client.tracks_out[0].chosen_layer = Some(high_layer);
+        client.tracks_out[0].chosen_rid = Some(Rid::from("h"));
 
         client
             .handle_egress_bitrate_estimate(
@@ -1045,7 +1035,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid(), Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("l")));
     }

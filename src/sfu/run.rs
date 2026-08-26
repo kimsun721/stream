@@ -28,9 +28,8 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     rtc,
                     role,
                     room_id,
-                    simulcast_tracks,
                     reply,
-                } => rooms.register_client(*rtc, role, room_id, simulcast_tracks, reply),
+                } => rooms.register_client(*rtc, role, room_id, reply),
                 SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
                 SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
                 SfuMessage::UpdateRoomState {
@@ -89,7 +88,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         track_in: Rc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
-                        chosen_layer: track.default_layer(),
+                        chosen_rid: track.default_rid(),
                     });
                 }
             }

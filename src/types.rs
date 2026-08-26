@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
     rc::{Rc, Weak},
     sync::{
@@ -41,7 +42,6 @@ pub struct Client {
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
     pub relay_outgoing_kbps: Option<u32>,
-    pub pending_simulcast_tracks: Vec<SimulcastTrack>,
     pub connected_at: Instant,
     pub last_twcc_bitrate: Option<Bitrate>,
 }
@@ -68,8 +68,6 @@ pub struct BitrateEstimator {
     started_at: Option<Instant>,
 }
 
-pub type BitrateEstimators = HashMap<Rid, BitrateEstimator>;
-
 impl BitrateEstimator {
     pub fn new() -> BitrateEstimator {
         BitrateEstimator {
@@ -91,7 +89,7 @@ impl BitrateEstimator {
         self.accumulated_bytes += bytes as u64;
     }
 
-    pub fn bitrate_estimate(&mut self) -> Option<u64> {
+    fn bitrate_estimate(&mut self) -> Option<u64> {
         self.remove_expired();
 
         if self.history.is_empty()
@@ -150,34 +148,33 @@ pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
-    pub available_simulcast_layers: Vec<SimulcastLayerProfile>,
+    pub available_simulcast_layers: Vec<SimulcastLayer>,
 }
 
 #[derive(Debug)]
 pub struct TrackInEntry {
     pub id: Rc<TrackIn>,
     pub last_keyframe_requested_at: HashMap<Option<Rid>, Instant>,
-    pub bitrate_estimators: HashMap<Rid, BitrateEstimator>,
 }
 
 #[derive(Debug)]
 pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
-    pub chosen_layer: Option<SimulcastLayerProfile>,
+    pub chosen_rid: Option<Rid>,
     pub layer_mode: LayerMode,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SimulcastLayerProfile {
+#[derive(Debug)]
+pub struct SimulcastLayer {
     pub rid: Rid,
-    pub max_br: u64,
+    pub bitrate_estimator: RefCell<BitrateEstimator>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SimulcastTrack {
-    pub mid: Mid,
-    pub layers: Vec<SimulcastLayerProfile>,
+impl SimulcastLayer {
+    pub fn estimate_bps(&self) -> Option<u64> {
+        self.bitrate_estimator.borrow_mut().bitrate_estimate()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,11 +192,7 @@ pub enum LayerMode {
 }
 
 impl Client {
-    pub fn new(
-        rtc: Rtc,
-        role: ClientRole,
-        pending_simulcast_tracks: Vec<SimulcastTrack>,
-    ) -> Client {
+    pub fn new(rtc: Rtc, role: ClientRole) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -216,31 +209,20 @@ impl Client {
             available_upload: None,
             connected_at: Instant::now(),
             relay_outgoing_kbps: None,
-            pending_simulcast_tracks,
             last_twcc_bitrate: None,
         }
     }
 }
 
 impl TrackIn {
-    pub fn default_layer(&self) -> Option<SimulcastLayerProfile> {
+    pub fn default_rid(&self) -> Option<Rid> {
+        self.available_simulcast_layers.last().map(|l| l.rid)
+    }
+    pub fn highest_estimated_bps(&self) -> Option<u64> {
         self.available_simulcast_layers
             .iter()
-            .min_by_key(|l| l.max_br)
-            .copied()
-    }
-
-    pub fn highest_layer(&self) -> Option<SimulcastLayerProfile> {
-        self.available_simulcast_layers
-            .iter()
-            .max_by_key(|l| l.max_br)
-            .copied()
-    }
-}
-
-impl TrackOut {
-    pub fn chosen_rid(&self) -> Option<Rid> {
-        self.chosen_layer.map(|layer| layer.rid)
+            .filter_map(|layer| layer.estimate_bps())
+            .max()
     }
 }
 
@@ -254,7 +236,6 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
-        simulcast_tracks: Vec<SimulcastTrack>,
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {
@@ -325,36 +306,51 @@ pub enum LinkState {
 mod tests {
     use super::*;
 
+    impl BitrateEstimator {
+        pub(crate) fn with_estimated_bps(estimated_bps: u64) -> Self {
+            let now = Instant::now();
+            let accumulated_bytes = estimated_bps * BITRATE_ESTIMATION_SECOND / 8;
+            let mut history = VecDeque::new();
+            history.push_back((accumulated_bytes as usize, now));
+
+            BitrateEstimator {
+                history,
+                accumulated_bytes,
+                started_at: Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND)),
+            }
+        }
+    }
+
+    fn simulcast_layer(rid: &str, estimated_bps: Option<u64>) -> SimulcastLayer {
+        let bitrate_estimator = estimated_bps.map_or_else(
+            BitrateEstimator::new,
+            BitrateEstimator::with_estimated_bps,
+        );
+
+        SimulcastLayer {
+            rid: Rid::from(rid),
+            bitrate_estimator: RefCell::new(bitrate_estimator),
+        }
+    }
+
     #[test]
-    fn default_layer_selects_lowest_max_br_regardless_of_rid_and_order() {
+    fn default_rid_selects_last_simulcast_layer() {
         let track = TrackIn {
             origin: ClientId(0),
             mid: Mid::from("video"),
             kind: MediaKind::Video,
             available_simulcast_layers: vec![
-                SimulcastLayerProfile {
-                    rid: Rid::from("first-high"),
-                    max_br: 2_000_000,
-                },
-                SimulcastLayerProfile {
-                    rid: Rid::from("middle-low"),
-                    max_br: 300_000,
-                },
-                SimulcastLayerProfile {
-                    rid: Rid::from("last-medium"),
-                    max_br: 1_000_000,
-                },
+                simulcast_layer("first", None),
+                simulcast_layer("middle", None),
+                simulcast_layer("last", None),
             ],
         };
 
-        let layer = track.default_layer().expect("default layer should exist");
-
-        assert_eq!(layer.rid, Rid::from("middle-low"));
-        assert_eq!(layer.max_br, 300_000);
+        assert_eq!(track.default_rid(), Some(Rid::from("last")));
     }
 
     #[test]
-    fn default_layer_returns_none_without_simulcast_layers() {
+    fn default_rid_returns_none_without_simulcast_layers() {
         let track = TrackIn {
             origin: ClientId(0),
             mid: Mid::from("video"),
@@ -362,6 +358,22 @@ mod tests {
             available_simulcast_layers: vec![],
         };
 
-        assert!(track.default_layer().is_none());
+        assert!(track.default_rid().is_none());
+    }
+
+    #[test]
+    fn highest_estimated_bps_ignores_layers_without_estimate() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![
+                simulcast_layer("low", Some(300_000)),
+                simulcast_layer("unknown", None),
+                simulcast_layer("high", Some(2_000_000)),
+            ],
+        };
+
+        assert_eq!(track.highest_estimated_bps(), Some(2_000_000));
     }
 }

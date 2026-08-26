@@ -14,21 +14,12 @@ use axum::{
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer, media::Rid};
+use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 
-use crate::types::{
-    ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile, SimulcastTrack,
-};
-
-const MAX_SIMULCAST_LAYER_BITRATE_BPS: u64 = 100_000_000;
-const MIN_SIMULCAST_LAYER_BITRATE_BPS: u64 = 500_000;
-
-fn is_valid_simulcast_layer_bitrate(max_br: u64) -> bool {
-    (MIN_SIMULCAST_LAYER_BITRATE_BPS..=MAX_SIMULCAST_LAYER_BITRATE_BPS).contains(&max_br)
-}
+use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
 
 #[derive(Clone)]
 struct SdpState {
@@ -242,50 +233,6 @@ async fn sdp_offer(
 
     let offer = SdpOffer::from_sdp_string(&sdp).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut simulcast_tracks = Vec::new();
-
-    if role == ClientRole::Streamer {
-        for o in offer.media_lines.iter() {
-            if let Some(m) = o.simulcast() {
-                let mid = o.mid();
-
-                let mut track = SimulcastTrack {
-                    mid,
-                    layers: Vec::new(),
-                };
-
-                for layer in m.send.iter() {
-                    let Some(pairs) = &layer.attributes else {
-                        return Err(StatusCode::BAD_REQUEST);
-                    };
-
-                    if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
-                        if name == "max-br" {
-                            value.parse::<u64>().ok()
-                        } else {
-                            None
-                        }
-                    }) {
-                        if !is_valid_simulcast_layer_bitrate(max_br) {
-                            return Err(StatusCode::BAD_REQUEST);
-                        }
-
-                        let rid = Rid::from(layer.restriction_id.0.as_str());
-
-                        track.layers.push(SimulcastLayerProfile { rid, max_br });
-                    } else {
-                        return Err(StatusCode::BAD_REQUEST);
-                    };
-                }
-                if track.layers.is_empty() {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-
-                simulcast_tracks.push(track);
-            }
-        }
-    }
-
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
         error!("accept offer failed: {}", e);
         StatusCode::BAD_REQUEST
@@ -295,7 +242,6 @@ async fn sdp_offer(
         rtc: Box::from(rtc),
         role,
         room_id: RoomId(room_id),
-        simulcast_tracks,
         reply: tx,
     };
 
@@ -319,29 +265,4 @@ async fn sdp_offer(
     })?;
 
     Ok(Json(value))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simulcast_layer_bitrate_accepts_inclusive_bounds() {
-        assert!(is_valid_simulcast_layer_bitrate(
-            MIN_SIMULCAST_LAYER_BITRATE_BPS
-        ));
-        assert!(is_valid_simulcast_layer_bitrate(
-            MAX_SIMULCAST_LAYER_BITRATE_BPS
-        ));
-    }
-
-    #[test]
-    fn simulcast_layer_bitrate_rejects_values_outside_bounds() {
-        assert!(!is_valid_simulcast_layer_bitrate(
-            MIN_SIMULCAST_LAYER_BITRATE_BPS - 1
-        ));
-        assert!(!is_valid_simulcast_layer_bitrate(
-            MAX_SIMULCAST_LAYER_BITRATE_BPS + 1
-        ));
-    }
 }
