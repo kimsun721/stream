@@ -773,13 +773,10 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
             .or_else(|| estimates.iter().min_by_key(|(_, estimate)| estimate))
             .and_then(|(rid, estimate)| {
                 let current_rid = track_out.chosen_rid?;
-                let Some(current_layer_estimated_bps) = estimates
+                let current_layer_estimated_bps = estimates
                     .iter()
                     .find(|(rid, _)| *rid == current_rid)
-                    .map(|(_, estimate)| *estimate)
-                else {
-                    return None;
-                };
+                    .map(|(_, estimate)| *estimate)?;
 
                 if current_layer_estimated_bps > *estimate {
                     return Some(*rid);

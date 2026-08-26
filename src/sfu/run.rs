@@ -183,12 +183,12 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                             c.probe_available_upload();
                         }
                     }
-                    Some(UploadProbeResult::Probing { probed_at }) => {
-                        if probed_at.elapsed() > MAX_PROBE_PENDING {
-                            c.available_upload =
-                                Some(UploadProbeResult::Failed { at: Instant::now() });
-                        }
+                    Some(UploadProbeResult::Probing { probed_at })
+                        if probed_at.elapsed() > MAX_PROBE_PENDING =>
+                    {
+                        c.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
                     }
+
                     _ => (),
                 }
             }
