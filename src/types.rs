@@ -66,6 +66,12 @@ pub struct BitrateEstimator {
     history: VecDeque<(usize, Instant)>,
     accumulated_bytes: u64,
     started_at: Option<Instant>,
+    is_estimate_available: bool,
+}
+
+pub enum PushOutcome {
+    EstimateBecameAvailable,
+    NoChange,
 }
 
 impl BitrateEstimator {
@@ -74,10 +80,11 @@ impl BitrateEstimator {
             history: VecDeque::new(),
             accumulated_bytes: 0,
             started_at: None,
+            is_estimate_available: false,
         }
     }
 
-    pub fn push(&mut self, bytes: usize, now: Instant) {
+    pub fn push(&mut self, bytes: usize, now: Instant) -> PushOutcome {
         self.remove_expired();
 
         if self.history.is_empty() {
@@ -87,6 +94,21 @@ impl BitrateEstimator {
         self.history.push_back((bytes, now));
 
         self.accumulated_bytes += bytes as u64;
+
+        if self
+            .started_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+        {
+            if self.is_estimate_available {
+                PushOutcome::NoChange
+            } else {
+                self.is_estimate_available = true;
+                PushOutcome::EstimateBecameAvailable
+            }
+        } else {
+            self.is_estimate_available = false;
+            PushOutcome::NoChange
+        }
     }
 
     fn bitrate_estimate(&mut self) -> Option<u64> {
@@ -317,20 +339,35 @@ mod tests {
                 history,
                 accumulated_bytes,
                 started_at: Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND)),
+                is_estimate_available: true,
             }
         }
     }
 
     fn simulcast_layer(rid: &str, estimated_bps: Option<u64>) -> SimulcastLayer {
-        let bitrate_estimator = estimated_bps.map_or_else(
-            BitrateEstimator::new,
-            BitrateEstimator::with_estimated_bps,
-        );
+        let bitrate_estimator =
+            estimated_bps.map_or_else(BitrateEstimator::new, BitrateEstimator::with_estimated_bps);
 
         SimulcastLayer {
             rid: Rid::from(rid),
             bitrate_estimator: RefCell::new(bitrate_estimator),
         }
+    }
+
+    #[test]
+    fn push_reports_when_estimate_becomes_available_once() {
+        let mut estimator = BitrateEstimator::new();
+        let now = Instant::now();
+
+        assert!(matches!(estimator.push(1_000, now), PushOutcome::NoChange));
+
+        estimator.started_at = Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND + 1));
+
+        assert!(matches!(
+            estimator.push(1_000, now),
+            PushOutcome::EstimateBecameAvailable
+        ));
+        assert!(matches!(estimator.push(1_000, now), PushOutcome::NoChange));
     }
 
     #[test]

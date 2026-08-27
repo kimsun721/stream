@@ -19,8 +19,8 @@ use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
         BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState,
-        PerfSample, PollResult, RelayStatus, S2cDcPayload, SimulcastLayer, TrackIn, TrackInEntry,
-        TrackOut, TrackOutState, UploadProbeResult,
+        PerfSample, PollResult, PushOutcome, RelayStatus, S2cDcPayload, SimulcastLayer, TrackIn,
+        TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -92,10 +92,14 @@ impl Client {
                                 .iter()
                                 .find(|l| l.rid == rid)
                         {
-                            simulcast_layer
+                            let push_outcome = simulcast_layer
                                 .bitrate_estimator
                                 .borrow_mut()
                                 .push(data.data.len(), Instant::now());
+
+                            if matches!(push_outcome, PushOutcome::EstimateBecameAvailable) {
+                                // 대충 재평가
+                            }
                         }
 
                         media_datas.push(data);
