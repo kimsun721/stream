@@ -46,6 +46,7 @@ impl Client {
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
         disconnected_relays: &mut Vec<ClientId>,
+        should_reevaluate: &mut bool,
     ) -> ClientResult<PollResult> {
         let timeout = loop {
             match self.rtc.poll_output()? {
@@ -98,7 +99,7 @@ impl Client {
                                 .push(data.data.len(), Instant::now());
 
                             if matches!(push_outcome, PushOutcome::EstimateBecameAvailable) {
-                                // 대충 재평가
+                                *should_reevaluate = true;
                             }
                         }
 
@@ -126,6 +127,37 @@ impl Client {
         };
 
         Ok(PollResult::Timeout(timeout))
+    }
+
+    pub(crate) fn reevaluate_auto_layers(
+        &mut self,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        let mut target_layers: Vec<_> = Vec::new();
+
+        let Some(twcc_bitrate) = self.last_twcc_bitrate.map(|b| u128::from(b.as_u64())) else {
+            return Ok(());
+        };
+
+        for track_out in self
+            .tracks_out
+            .iter()
+            .filter(|t| matches!(t.layer_mode, LayerMode::Auto))
+        {
+            let TrackOutState::Open(mid) = track_out.state else {
+                continue;
+            };
+
+            if let Some(rid) = target_rid_for_bitrate(track_out, twcc_bitrate) {
+                target_layers.push((mid, rid));
+            }
+        }
+
+        for (mid, rid) in target_layers {
+            self.set_layer(mid, rid, keyframe_requests)?;
+        }
+
+        Ok(())
     }
 
     fn matching_viewer_mid(&self, mid: Mid, rid: Option<Rid>) -> Option<Mid> {
@@ -254,6 +286,7 @@ impl Client {
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
         disconnected_relays: &mut Vec<ClientId>,
+        should_reevaluate: &mut bool,
     ) -> ClientResult<PollResult> {
         self.renegotiate()?;
         let result = self.poll_output(
@@ -263,6 +296,7 @@ impl Client {
             keyframe_requests,
             p2p_sdps,
             disconnected_relays,
+            should_reevaluate,
         )?;
 
         Ok(result)
@@ -507,35 +541,14 @@ impl Client {
     ) -> ClientResult<()> {
         match kind {
             BweKind::Twcc(bitrate) => {
-                let mut target_layers: Vec<(Mid, Rid)> = Vec::new();
-
                 debug!(
                     client_id = %self.id,
                     bitrate_bps = bitrate.as_u64(),
                     "egress TWCC bitrate estimate"
                 );
-
                 self.last_twcc_bitrate = Some(bitrate);
 
-                let bitrate = u128::from(bitrate.as_u64());
-
-                for track_out in self
-                    .tracks_out
-                    .iter()
-                    .filter(|t| matches!(t.layer_mode, LayerMode::Auto))
-                {
-                    let TrackOutState::Open(mid) = track_out.state else {
-                        continue;
-                    };
-
-                    if let Some(rid) = target_rid_for_bitrate(track_out, bitrate) {
-                        target_layers.push((mid, rid));
-                    }
-                }
-
-                for (mid, rid) in target_layers {
-                    self.set_layer(mid, rid, keyframe_requests)?
-                }
+                self.reevaluate_auto_layers(keyframe_requests)?;
             }
             BweKind::Remb(..) => (),
             _ => (),

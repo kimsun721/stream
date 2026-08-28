@@ -50,6 +50,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
             let mut disconnected_relays = Vec::new();
+            let mut should_reevaluate = false;
 
             let mut fallback_leafs = Vec::new();
 
@@ -61,6 +62,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut keyframe_requests,
                     &mut p2p_sdps,
                     &mut disconnected_relays,
+                    &mut should_reevaluate,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
@@ -97,6 +99,30 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 for client in room.viewers_mut() {
                     if let Some(desired_bitrate) = client.calc_desired_bitrate() {
                         client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                    }
+                }
+            }
+
+            if should_reevaluate {
+                for client in room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| matches!(c.role, ClientRole::Viewer))
+                {
+                    let mut is_auto_layer = false;
+                    for track_out in client.tracks_out.iter() {
+                        if matches!(track_out.layer_mode, LayerMode::Auto) {
+                            is_auto_layer = true;
+                            break;
+                        }
+                    }
+
+                    if is_auto_layer {
+                        if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                            client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                        }
+
+                        client.reevaluate_auto_layers(&mut keyframe_requests)?;
                     }
                 }
             }
