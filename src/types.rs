@@ -20,6 +20,7 @@ use str0m::{
 };
 
 use derive_more::Display;
+use uuid::Uuid;
 
 const BITRATE_ESTIMATION_SECOND: u64 = 3;
 
@@ -44,6 +45,7 @@ pub struct Client {
     pub relay_outgoing_kbps: Option<u32>,
     pub connected_at: Instant,
     pub last_twcc_bitrate: Option<Bitrate>,
+    pub session_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
@@ -214,7 +216,7 @@ pub enum LayerMode {
 }
 
 impl Client {
-    pub fn new(rtc: Rtc, role: ClientRole) -> Client {
+    pub fn new(rtc: Rtc, role: ClientRole, session_id: Uuid) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -232,6 +234,7 @@ impl Client {
             connected_at: Instant::now(),
             relay_outgoing_kbps: None,
             last_twcc_bitrate: None,
+            session_id,
         }
     }
 }
@@ -258,6 +261,7 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
+        session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {

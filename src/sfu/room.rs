@@ -8,6 +8,7 @@ use std::{
 use axum::http::StatusCode;
 use str0m::Rtc;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::types::{
     Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
@@ -24,10 +25,11 @@ impl Rooms {
         rtc: Rtc,
         role: ClientRole,
         room_id: RoomId,
+        session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     ) {
         if let Some(room) = self.get_mut(&room_id.0) {
-            room.add_client(rtc, role, reply);
+            room.add_client(rtc, role, session_id, reply);
         } else {
             warn!("Room does not exist : {:?}", room_id);
             reply.send(Some(StatusCode::NOT_FOUND)).ok();
@@ -155,8 +157,14 @@ impl Room {
         self.state = state;
     }
 
-    fn add_client(&mut self, rtc: Rtc, role: ClientRole, reply: SyncSender<Option<StatusCode>>) {
-        let mut client = Client::new(rtc, role);
+    fn add_client(
+        &mut self,
+        rtc: Rtc,
+        role: ClientRole,
+        session_id: Uuid,
+        reply: SyncSender<Option<StatusCode>>,
+    ) {
+        let mut client = Client::new(rtc, role, session_id);
 
         match role {
             ClientRole::Streamer => {

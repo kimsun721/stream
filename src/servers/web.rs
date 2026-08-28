@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::mpsc::{self, SyncSender},
     time::Instant,
@@ -7,19 +8,34 @@ use std::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
-    response::Result,
+    http::{
+        StatusCode,
+        header::{self, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Result},
     routing,
+};
+use axum_extra::{
+    TypedHeader,
+    headers::{Authorization, ContentType, Mime, authorization::Bearer},
 };
 use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer};
+use str0m::{
+    Candidate, Rtc,
+    bwe::Bitrate,
+    change::{SdpAnswer, SdpOffer},
+};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
+use uuid::Uuid;
 
 use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
+
+const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
+const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
 
 #[derive(Clone)]
 struct SdpState {
@@ -46,6 +62,7 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
 
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
+        .route("/rooms/{room_id}/whip", routing::post(whip_sdp_offer))
         .layer(CorsLayer::permissive())
         .with_state(SdpState {
             addr,
@@ -200,17 +217,62 @@ async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
-    const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
-
     let OfferRequest {
         _sdp_type,
         sdp,
         role,
         room_id,
     } = payload;
-    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
+    let session_id = Uuid::new_v4();
+    register_client(rtc, role, room_id, state.tx, session_id)?;
+
+    let value = serde_json::to_value(&answer).map_err(|e| {
+        error!("json to value failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(value))
+}
+
+async fn whip_sdp_offer(
+    Path(room_id): Path<u64>,
+    State(state): State<SdpState>,
+    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    sdp: String,
+) -> Result<impl IntoResponse, StatusCode> {
+    let role = ClientRole::Streamer;
+
+    let mime: Mime = content_type.into();
+
+    if mime.essence_str() != "application/sdp" {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    };
+
+    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
+
+    let session_id = Uuid::new_v4();
+    let location = format!("/whip/sessions/{}", session_id.to_string());
+
+    register_client(rtc, role, room_id, state.tx, session_id)?;
+
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::CONTENT_TYPE, "application/sdp".to_string()),
+            (header::LOCATION, location),
+        ],
+        answer.to_sdp_string(),
+    ))
+}
+
+fn create_rtc_from_offer(
+    sdp: String,
+    role: ClientRole,
+    addr: SocketAddr,
+) -> Result<(Rtc, SdpAnswer), StatusCode> {
     let mut rtc = {
         let mut builder = Rtc::builder();
 
@@ -226,7 +288,7 @@ async fn sdp_offer(
             .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
     }
 
-    rtc.add_local_candidate(Candidate::host(state.addr, "udp").map_err(|e| {
+    rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?);
@@ -238,31 +300,37 @@ async fn sdp_offer(
         StatusCode::BAD_REQUEST
     })?;
 
+    Ok((rtc, answer))
+}
+
+fn register_client(
+    rtc: Rtc,
+    role: ClientRole,
+    room_id: u64,
+    sfu_tx: SyncSender<SfuMessage>,
+    session_id: Uuid,
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+
     let msg = SfuMessage::RegisterClient {
         rtc: Box::from(rtc),
         role,
         room_id: RoomId(room_id),
+        session_id,
         reply: tx,
     };
 
-    state.tx.send(msg).map_err(|e| {
+    sfu_tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let result = rx.recv().map_err(|e| {
+    if let Some(status_code) = rx.recv().map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if let Some(status_code) = result {
+    })? {
         return Err(status_code);
     };
 
-    let value = serde_json::to_value(&answer).map_err(|e| {
-        error!("json to value failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(value))
+    Ok(())
 }
