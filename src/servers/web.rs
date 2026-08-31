@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::SocketAddr,
     sync::mpsc::{self, SyncSender},
     time::Instant,
@@ -10,7 +9,7 @@ use axum::{
     extract::{Path, State},
     http::{
         StatusCode,
-        header::{self, CONTENT_TYPE},
+        header::{self},
     },
     response::{IntoResponse, Result},
     routing,
@@ -254,7 +253,7 @@ async fn whip_sdp_offer(
     let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
     let session_id = Uuid::new_v4();
-    let location = format!("/whip/sessions/{}", session_id.to_string());
+    let location = format!("/whip/sessions/{}", session_id);
 
     register_client(rtc, role, room_id, state.tx, session_id)?;
 

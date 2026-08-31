@@ -245,6 +245,7 @@ mod tests {
 
     use axum::http::StatusCode;
     use str0m::Rtc;
+    use uuid::Uuid;
 
     use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms};
 
@@ -301,9 +302,9 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), Some(()));
 
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), tx);
+        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), Uuid::new_v4(), tx);
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), tx);
+        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), Uuid::new_v4(), tx);
 
         let (tx, rx) = reply();
         rooms.get_views(RoomId(7), tx);
@@ -343,11 +344,26 @@ mod tests {
         };
 
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
 
         assert_eq!(room.clients.len(), 1);
     }
@@ -368,7 +384,12 @@ mod tests {
             };
 
             let (tx, _rx) = reply::<StatusCode>();
-            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer, tx);
+            room.add_client(
+                Rtc::new(Instant::now()),
+                ClientRole::Viewer,
+                Uuid::new_v4(),
+                tx,
+            );
 
             assert_eq!(
                 room.clients.len(),

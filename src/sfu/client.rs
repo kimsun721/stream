@@ -824,6 +824,7 @@ mod tests {
         bwe::{Bitrate, BweKind},
         media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
     };
+    use uuid::Uuid;
 
     use crate::types::{
         BitrateEstimator, Client, ClientRole, LayerMode, SimulcastLayer, TrackIn, TrackOut,
@@ -838,7 +839,7 @@ mod tests {
     }
 
     fn viewer_with_track_out() -> (Client, Rc<TrackIn>) {
-        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer);
+        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer, Uuid::new_v4());
 
         let streamer_mid = Mid::from("streamer-video");
         let viewer_mid = Mid::from("viewer-video");
