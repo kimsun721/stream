@@ -6,19 +6,19 @@ use std::{
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{
         StatusCode,
         header::{self},
     },
-    response::{IntoResponse, Result},
+    middleware::{self, Next},
+    response::{IntoResponse, Response, Result},
     routing,
 };
 use axum_extra::{
     TypedHeader,
     headers::{Authorization, ContentType, Mime, authorization::Bearer},
 };
-use axum_server::tls_rustls::RustlsConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use str0m::{
@@ -26,12 +26,16 @@ use str0m::{
     bwe::Bitrate,
     change::{SdpAnswer, SdpOffer},
 };
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::types::{ClientRole, RoomId, RoomState, SfuMessage};
+use crate::{
+    config::WebConfig,
+    types::{ClientRole, RoomId, RoomState, SfuMessage},
+};
 
 const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
 const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
@@ -44,6 +48,7 @@ struct SdpState {
 
 #[derive(Clone)]
 struct ApiState {
+    api_key: String,
     tx: SyncSender<SfuMessage>,
 }
 
@@ -56,9 +61,11 @@ struct OfferRequest {
     room_id: u64,
 }
 
-pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result<()> {
-    let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
-
+pub async fn run(
+    addr: SocketAddr,
+    tx: SyncSender<SfuMessage>,
+    config: WebConfig,
+) -> anyhow::Result<()> {
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .route("/rooms/{room_id}/whip", routing::post(whip_sdp_offer))
@@ -68,19 +75,28 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
             tx: tx.clone(),
         });
 
+    let api_state = ApiState {
+        tx,
+        api_key: config.api_key,
+    };
+
     let http_api = Router::new()
         .route("/rooms/{room_id}", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
-        .with_state(ApiState { tx });
+        .layer(middleware::from_fn_with_state(
+            api_state.clone(),
+            api_key_auth_middleware,
+        ))
+        .with_state(api_state);
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls(
             "0.0.0.0:8080"
                 .parse::<SocketAddr>()
                 .expect("bind to 0.0.0.0:8080"),
-            config,
+            config.certificate,
         )
         .serve(https_api.into_make_service())
         .await
@@ -101,6 +117,30 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
     let _ = tokio::join!(https_server, http_server);
 
     Ok(())
+}
+
+async fn api_key_auth_middleware(
+    State(state): State<ApiState>,
+    header: Option<TypedHeader<Authorization<Bearer>>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, impl IntoResponse> {
+    let response_header = [(header::WWW_AUTHENTICATE, "Bearer")];
+    let Some(TypedHeader(Authorization(bearer))) = header else {
+        return Err((StatusCode::UNAUTHORIZED, response_header));
+    };
+
+    let is_token_valid = bearer
+        .token()
+        .as_bytes()
+        .ct_eq(state.api_key.as_bytes())
+        .into();
+
+    if is_token_valid {
+        Ok(next.run(request).await)
+    } else {
+        Err((StatusCode::UNAUTHORIZED, response_header))
+    }
 }
 
 async fn create_room(
