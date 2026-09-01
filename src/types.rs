@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
+    fmt,
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -19,10 +20,15 @@ use str0m::{
     media::{MediaKind, Mid, Rid},
 };
 
-use derive_more::Display;
+use derive_more::{Display, Eq};
 use uuid::Uuid;
 
+use crate::utils::string::{hash_string, random_string};
+
 const BITRATE_ESTIMATION_SECOND: u64 = 3;
+
+const STREAM_KEY_LEN: usize = 32;
+const ROOM_ID_LEN: usize = 12;
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
@@ -51,8 +57,40 @@ pub struct Client {
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
 pub struct ClientId(u64);
 
-#[derive(Debug)]
-pub struct RoomId(pub u64);
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct RoomId(pub String);
+
+pub struct StreamKey(pub String);
+
+impl fmt::Debug for StreamKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StreamKey").field(&"[REDACTED]").finish()
+    }
+}
+
+impl RoomId {
+    pub fn new() -> RoomId {
+        RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl StreamKey {
+    pub fn new() -> StreamKey {
+        StreamKey(format!("SK_{}", random_string(STREAM_KEY_LEN)))
+    }
+
+    pub fn hashed(&self) -> [u8; 32] {
+        hash_string(self.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0.as_str()
+    }
+}
 
 pub type PerfWindow = VecDeque<PerfSample>;
 
@@ -163,9 +201,10 @@ pub struct Room {
     pub streamer_id: Option<ClientId>,
     pub clients: Vec<Client>,
     pub state: RoomState,
+    pub hashed_stream_key: [u8; 32],
 }
 
-pub struct Rooms(pub HashMap<u64, Room>);
+pub struct Rooms(pub HashMap<RoomId, Room>);
 
 #[derive(Debug)]
 pub struct TrackIn {
@@ -265,8 +304,7 @@ pub enum SfuMessage {
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
+        reply: SyncSender<(RoomId, StreamKey)>,
     },
     DeleteRoom {
         room_id: RoomId,

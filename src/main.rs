@@ -1,10 +1,7 @@
-use std::sync::mpsc;
-
-use str0m::crypto::from_feature_flags;
-
-use ::tracing::error;
-
 use crate::types::SfuMessage;
+use ::tracing::error;
+use std::sync::mpsc;
+use str0m::crypto::from_feature_flags;
 
 mod config;
 mod servers;

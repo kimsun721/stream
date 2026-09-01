@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use crate::{
     config::WebConfig,
-    types::{ClientRole, RoomId, RoomState, SfuMessage},
+    types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
 };
 
 const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
@@ -57,8 +57,8 @@ struct OfferRequest {
     #[serde(rename = "type")]
     _sdp_type: String,
     sdp: String,
+    room_id: String,
     role: ClientRole,
-    room_id: u64,
 }
 
 pub async fn run(
@@ -81,7 +81,7 @@ pub async fn run(
     };
 
     let http_api = Router::new()
-        .route("/rooms/{room_id}", routing::post(create_room))
+        .route("/rooms", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
@@ -143,28 +143,34 @@ async fn api_key_auth_middleware(
     }
 }
 
-async fn create_room(
-    Path(room_id): Path<u64>,
-    State(state): State<ApiState>,
-) -> Result<(), StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+#[derive(Serialize)]
+struct CreateRoomResponse {
+    room_id: String,
+    stream_key: String,
+}
 
-    let msg = SfuMessage::CreateRoom {
-        room_id: RoomId(room_id),
-        reply: tx,
-    };
+async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<(RoomId, StreamKey)>(1);
+
+    let msg = SfuMessage::CreateRoom { reply: tx };
 
     state.tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    rx.recv()
-        .map_err(|e| {
-            error!("send to sfu loop failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::CONFLICT)
+    let (room_id, stream_key) = rx.recv().map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateRoomResponse {
+            room_id: room_id.0,
+            stream_key: stream_key.0,
+        }),
+    ))
 }
 
 #[derive(Serialize)]
@@ -173,7 +179,7 @@ struct GetRoomResponse {
 }
 
 async fn get_room(
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
     let (tx, rx) = mpsc::sync_channel::<Option<usize>>(1);
@@ -204,7 +210,7 @@ struct UpdateRoomState {
 
 async fn update_room(
     State(state): State<ApiState>,
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     Json(payload): Json<UpdateRoomState>,
 ) -> Result<(), StatusCode> {
     let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
@@ -229,7 +235,7 @@ async fn update_room(
 }
 
 async fn delete_room(
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<(), StatusCode> {
     let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
@@ -259,13 +265,14 @@ async fn sdp_offer(
     let OfferRequest {
         _sdp_type,
         sdp,
-        role,
         room_id,
+        role,
     } = payload;
     let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
     let session_id = Uuid::new_v4();
-    register_client(rtc, role, room_id, state.tx, session_id)?;
+
+    register_client(rtc, role, RoomId(room_id), state.tx, session_id)?;
 
     let value = serde_json::to_value(&answer).map_err(|e| {
         error!("json to value failed: {}", e);
@@ -276,7 +283,6 @@ async fn sdp_offer(
 }
 
 async fn whip_sdp_offer(
-    Path(room_id): Path<u64>,
     State(state): State<SdpState>,
     TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
     TypedHeader(content_type): TypedHeader<ContentType>,
@@ -294,6 +300,7 @@ async fn whip_sdp_offer(
 
     let session_id = Uuid::new_v4();
     let location = format!("/whip/sessions/{}", session_id);
+    let room_id = RoomId::new();
 
     register_client(rtc, role, room_id, state.tx, session_id)?;
 
@@ -345,7 +352,7 @@ fn create_rtc_from_offer(
 fn register_client(
     rtc: Rtc,
     role: ClientRole,
-    room_id: u64,
+    room_id: RoomId,
     sfu_tx: SyncSender<SfuMessage>,
     session_id: Uuid,
 ) -> Result<(), StatusCode> {
@@ -354,7 +361,7 @@ fn register_client(
     let msg = SfuMessage::RegisterClient {
         rtc: Box::from(rtc),
         role,
-        room_id: RoomId(room_id),
+        room_id,
         session_id,
         reply: tx,
     };
