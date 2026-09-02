@@ -43,6 +43,11 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     hashed_stream_key,
                     reply,
                 } => rooms.resolve_stream_key(hashed_stream_key, reply),
+                SfuMessage::TerminateSession {
+                    room_id,
+                    session_id,
+                    reply,
+                } => rooms.terminate_session(room_id, session_id, reply),
             };
         }
 

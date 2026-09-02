@@ -72,6 +72,10 @@ pub async fn run(
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
         .route("/whip", routing::post(whip_sdp_offer))
+        .route(
+            "/whip/sessions/{session_id}",
+            routing::delete(whip_terminate_session),
+        )
         .layer(CorsLayer::permissive())
         .with_state(SdpState {
             addr,
@@ -346,7 +350,7 @@ async fn whip_sdp_offer(
     let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
     let session_id = Uuid::new_v4();
-    let location = format!("/rooms/{}/whip/sessions/{}", room_id.as_str(), session_id);
+    let location = format!("/whip/sessions/{}", session_id);
 
     register_client(rtc, role, room_id, state.tx, session_id)?;
 
@@ -358,6 +362,33 @@ async fn whip_sdp_offer(
         ],
         answer.to_sdp_string(),
     ))
+}
+
+async fn whip_terminate_session(
+    Path(session_id): Path<Uuid>,
+    AuthStreamKey(room_id): AuthStreamKey,
+    State(state): State<SdpState>,
+) -> Result<StatusCode, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::TerminateSession {
+        room_id,
+        session_id,
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map(|_| StatusCode::NO_CONTENT)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 fn create_rtc_from_offer(

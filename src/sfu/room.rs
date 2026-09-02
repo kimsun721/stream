@@ -72,6 +72,7 @@ impl Rooms {
             Some(room) => {
                 if matches!(state, RoomState::Idle) {
                     room.init();
+                    return;
                 }
                 room.set_state(state);
                 reply.send(Some(())).ok()
@@ -97,6 +98,23 @@ impl Rooms {
         });
 
         reply.send(room_id).ok();
+    }
+
+    pub fn terminate_session(
+        &mut self,
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<()>>,
+    ) {
+        if let Some(room) = self.get_mut(&room_id)
+            && let Some(streamer) = room.streamer()
+            && streamer.session_id == session_id
+        {
+            room.init();
+            reply.send(Some(())).ok();
+        } else {
+            reply.send(None).ok();
+        };
     }
 }
 
@@ -249,6 +267,10 @@ impl Room {
         self.clients.clear();
         self.state = RoomState::Idle;
         self.streamer_id = None;
+    }
+
+    pub fn streamer(&self) -> Option<&Client> {
+        self.clients.iter().find(|c| c.role == ClientRole::Streamer)
     }
 }
 

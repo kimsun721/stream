@@ -72,10 +72,6 @@ impl RoomId {
     pub fn new() -> RoomId {
         RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl StreamKey {
@@ -88,7 +84,7 @@ impl StreamKey {
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0.as_str()
+        self.0.as_str()
     }
 }
 
@@ -322,6 +318,11 @@ pub enum SfuMessage {
     ResolveStreamKey {
         hashed_stream_key: [u8; 32],
         reply: SyncSender<Option<RoomId>>,
+    },
+    TerminateSession {
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<()>>,
     },
 }
 
