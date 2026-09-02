@@ -70,6 +70,9 @@ impl Rooms {
     ) {
         match self.get_mut(&room_id) {
             Some(room) => {
+                if matches!(state, RoomState::Idle) {
+                    room.init();
+                }
                 room.set_state(state);
                 reply.send(Some(())).ok()
             }
@@ -194,6 +197,7 @@ impl Room {
                 } else {
                     self.streamer_id = Some(client.id);
                     self.clients.push(client);
+                    self.state = RoomState::Preview;
 
                     reply.send(None).ok();
                 }
@@ -239,6 +243,12 @@ impl Room {
         self.clients
             .iter_mut()
             .filter(|c| c.role == ClientRole::Viewer)
+    }
+
+    pub fn init(&mut self) {
+        self.clients.clear();
+        self.state = RoomState::Idle;
+        self.streamer_id = None;
     }
 }
 
@@ -338,10 +348,6 @@ mod tests {
 
         let (room_id, _) = create_room(&mut rooms);
 
-        let (tx, rx) = reply();
-        rooms.update_state(room_id.clone(), RoomState::Live, tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
-
         let (tx, _rx) = reply::<StatusCode>();
         rooms.register_client(
             rtc(),
@@ -350,6 +356,15 @@ mod tests {
             Uuid::new_v4(),
             tx,
         );
+        assert!(matches!(
+            rooms.get(&room_id).unwrap().state,
+            RoomState::Preview
+        ));
+
+        let (tx, rx) = reply();
+        rooms.update_state(room_id.clone(), RoomState::Live, tx);
+        assert_eq!(rx.recv().unwrap(), Some(()));
+
         let (tx, _rx) = reply::<StatusCode>();
         rooms.register_client(
             rtc(),

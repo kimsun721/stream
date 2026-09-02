@@ -11,8 +11,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, Rooms, SfuMessage,
-        TrackIn, TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
+        SfuMessage, TrackIn, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -49,6 +49,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for room in rooms.values_mut() {
+            if matches!(room.state, RoomState::Idle) && room.clients.is_empty() {
+                continue;
+            };
+
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
@@ -58,6 +62,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             let mut should_reevaluate = false;
 
             let mut fallback_leafs = Vec::new();
+            let mut needs_init = false;
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -71,6 +76,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
+                        if client.role == ClientRole::Streamer {
+                            needs_init = true;
+                        }
+
                         match &client.relay_status {
                             Some(RelayStatus::Relay { leaf }) => {
                                 fallback_leafs.push(*leaf);
@@ -276,6 +285,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
             for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
                 room.demote(relay_id, leaf_id);
+            }
+
+            if needs_init {
+                room.init();
             }
         }
 
