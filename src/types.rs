@@ -185,7 +185,7 @@ pub enum UploadProbeResult {
     Failed { at: Instant },
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum RoomState {
     Idle,
     Preview,
@@ -311,9 +311,9 @@ pub enum SfuMessage {
         state: RoomState,
         reply: SyncSender<Option<()>>,
     },
-    GetViews {
+    GetRoom {
         room_id: RoomId,
-        reply: SyncSender<Option<usize>>,
+        reply: SyncSender<Option<(usize, RoomState)>>,
     },
     ResolveStreamKey {
         hashed_stream_key: [u8; 32],

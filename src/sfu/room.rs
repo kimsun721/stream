@@ -55,9 +55,9 @@ impl Rooms {
         reply.send((room_id, stream_key)).ok();
     }
 
-    pub fn get_views(&self, room_id: RoomId, reply: SyncSender<Option<usize>>) {
+    pub fn get_room(&self, room_id: RoomId, reply: SyncSender<Option<(usize, RoomState)>>) {
         match self.get(&room_id) {
-            Some(room) => reply.send(Some(room.view_count())).ok(),
+            Some(room) => reply.send(Some((room.view_count(), room.state))).ok(),
             None => reply.send(None).ok(),
         };
     }
@@ -397,12 +397,14 @@ mod tests {
         );
 
         let (tx, rx) = reply();
-        rooms.get_views(room_id, tx);
-        assert_eq!(rx.recv().unwrap(), Some(1));
+        rooms.get_room(room_id, tx);
+        let (views, state) = rx.recv().unwrap().unwrap();
+        assert_eq!(views, 1);
+        assert!(matches!(state, RoomState::Live));
 
-        let (tx, rx) = reply();
-        rooms.get_views(missing_id(), tx);
-        assert_eq!(rx.recv().unwrap(), None);
+        let (tx, rx) = reply::<(usize, RoomState)>();
+        rooms.get_room(missing_id(), tx);
+        assert!(rx.recv().unwrap().is_none());
     }
 
     #[test]

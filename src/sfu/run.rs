@@ -32,7 +32,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.register_client(*rtc, role, room_id, session_id, reply),
                 SfuMessage::CreateRoom { reply } => rooms.create(reply),
-                SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
+                SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
                 SfuMessage::UpdateRoomState {
                     room_id,
                     state,

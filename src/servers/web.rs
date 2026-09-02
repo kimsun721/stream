@@ -226,23 +226,24 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
 #[derive(Serialize)]
 struct GetRoomResponse {
     views: usize,
+    state: RoomState,
 }
 
 async fn get_room(
     Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<usize>>(1);
+    let (tx, rx) = mpsc::sync_channel::<Option<(usize, RoomState)>>(1);
 
     state
         .tx
-        .send(SfuMessage::GetViews {
+        .send(SfuMessage::GetRoom {
             room_id: RoomId(room_id),
             reply: tx,
         })
         .ok();
 
-    let views = rx
+    let (views, state) = rx
         .recv()
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
@@ -250,7 +251,7 @@ async fn get_room(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(GetRoomResponse { views }))
+    Ok(Json(GetRoomResponse { views, state }))
 }
 
 #[derive(Deserialize)]
