@@ -319,6 +319,10 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<usize>>,
     },
+    ResolveStreamKey {
+        hashed_stream_key: [u8; 32],
+        reply: SyncSender<Option<RoomId>>,
+    },
 }
 
 #[derive(Deserialize)]

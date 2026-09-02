@@ -39,6 +39,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
+                SfuMessage::ResolveStreamKey {
+                    hashed_stream_key,
+                    reply,
+                } => rooms.resolve_stream_key(hashed_stream_key, reply),
             };
         }
 

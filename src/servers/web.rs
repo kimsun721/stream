@@ -5,11 +5,12 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
-    extract::{Path, Request, State},
+    Json, RequestPartsExt, Router,
+    extract::{FromRequestParts, Path, Request, State},
     http::{
         StatusCode,
         header::{self},
+        request::Parts,
     },
     middleware::{self, Next},
     response::{IntoResponse, Response, Result},
@@ -35,6 +36,7 @@ use uuid::Uuid;
 use crate::{
     config::WebConfig,
     types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
+    utils::string::hash_string,
 };
 
 const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
@@ -58,8 +60,9 @@ struct OfferRequest {
     _sdp_type: String,
     sdp: String,
     room_id: String,
-    role: ClientRole,
 }
+
+struct AuthStreamKey(RoomId);
 
 pub async fn run(
     addr: SocketAddr,
@@ -68,7 +71,7 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
-        .route("/rooms/{room_id}/whip", routing::post(whip_sdp_offer))
+        .route("/whip", routing::post(whip_sdp_offer))
         .layer(CorsLayer::permissive())
         .with_state(SdpState {
             addr,
@@ -140,6 +143,49 @@ async fn api_key_auth_middleware(
         Ok(next.run(request).await)
     } else {
         Err((StatusCode::UNAUTHORIZED, response_header))
+    }
+}
+
+impl FromRequestParts<SdpState> for AuthStreamKey {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &SdpState,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+            )
+                .into_response()
+        };
+
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| unauthorized())?;
+
+        let (tx, rx) = mpsc::sync_channel::<Option<RoomId>>(1);
+        let hashed_stream_key = hash_string(bearer.token());
+
+        let msg = SfuMessage::ResolveStreamKey {
+            hashed_stream_key,
+            reply: tx,
+        };
+
+        state.tx.send(msg).map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+        rx.recv()
+            .map_err(|e| {
+                error!("send to sfu loop failed: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?
+            .map(AuthStreamKey)
+            .ok_or_else(unauthorized)
     }
 }
 
@@ -266,8 +312,9 @@ async fn sdp_offer(
         _sdp_type,
         sdp,
         room_id,
-        role,
     } = payload;
+    let role = ClientRole::Viewer;
+
     let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
     let session_id = Uuid::new_v4();
@@ -284,7 +331,7 @@ async fn sdp_offer(
 
 async fn whip_sdp_offer(
     State(state): State<SdpState>,
-    TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
+    AuthStreamKey(room_id): AuthStreamKey,
     TypedHeader(content_type): TypedHeader<ContentType>,
     sdp: String,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -299,8 +346,7 @@ async fn whip_sdp_offer(
     let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
 
     let session_id = Uuid::new_v4();
-    let location = format!("/whip/sessions/{}", session_id);
-    let room_id = RoomId::new();
+    let location = format!("/rooms/{}/whip/sessions/{}", room_id.as_str(), session_id);
 
     register_client(rtc, role, room_id, state.tx, session_id)?;
 

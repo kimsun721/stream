@@ -7,6 +7,7 @@ use std::{
 
 use axum::http::StatusCode;
 use str0m::Rtc;
+use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -81,6 +82,18 @@ impl Rooms {
             Some(_) => reply.send(Some(())).ok(),
             None => reply.send(None).ok(),
         };
+    }
+
+    pub fn resolve_stream_key(
+        &self,
+        hashed_stream_key: [u8; 32],
+        reply: SyncSender<Option<RoomId>>,
+    ) {
+        let room_id = self.iter().find_map(|(room_id, room)| {
+            bool::from(hashed_stream_key.ct_eq(&room.hashed_stream_key)).then_some(room_id.clone())
+        });
+
+        reply.send(room_id).ok();
     }
 }
 
