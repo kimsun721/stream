@@ -92,6 +92,10 @@ pub async fn run(
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
+        .route(
+            "/rooms/{room_id}/stream-key",
+            routing::post(reissue_stream_key),
+        )
         .layer(middleware::from_fn_with_state(
             api_state.clone(),
             api_key_auth_middleware,
@@ -307,6 +311,44 @@ async fn delete_room(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Serialize)]
+struct ReissueStreamKeyResponse {
+    stream_key: String,
+}
+
+async fn reissue_stream_key(
+    State(state): State<ApiState>,
+    Path(room_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<StreamKey>>(1);
+
+    let msg = SfuMessage::ReissueStreamKey {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let stream_key = rx.recv().map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let Some(stream_key) = stream_key else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(ReissueStreamKeyResponse {
+            stream_key: stream_key.0,
+        }),
+    ))
 }
 
 async fn sdp_offer(

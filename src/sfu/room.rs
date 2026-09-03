@@ -40,7 +40,7 @@ impl Rooms {
     pub fn create(&mut self, reply: SyncSender<(RoomId, StreamKey)>) {
         let room_id = RoomId::new();
         let stream_key = StreamKey::new();
-        let hashed_stream_key = StreamKey::hashed(&stream_key);
+        let hashed_stream_key = stream_key.hashed();
 
         self.insert(
             room_id.clone(),
@@ -72,7 +72,6 @@ impl Rooms {
             Some(room) => {
                 if matches!(state, RoomState::Idle) {
                     room.init();
-                    return;
                 }
                 room.set_state(state);
                 reply.send(Some(())).ok()
@@ -115,6 +114,19 @@ impl Rooms {
         } else {
             reply.send(None).ok();
         };
+    }
+
+    pub fn reissue_stream_key(&mut self, room_id: RoomId, reply: SyncSender<Option<StreamKey>>) {
+        if let Some(room) = self.get_mut(&room_id) {
+            let stream_key = StreamKey::new();
+            let hashed_stream_key = stream_key.hashed();
+
+            room.hashed_stream_key = hashed_stream_key;
+
+            reply.send(Some(stream_key)).ok();
+        } else {
+            reply.send(None).ok();
+        }
     }
 }
 
@@ -343,6 +355,34 @@ mod tests {
             rooms.get(&room_id).unwrap().hashed_stream_key,
             stream_key.hashed()
         );
+    }
+
+    #[test]
+    fn rooms_reissue_stream_key_retires_the_old_key() {
+        let mut rooms = Rooms::new();
+
+        let (room_id, old_key) = create_room(&mut rooms);
+
+        let (tx, rx) = reply();
+        rooms.reissue_stream_key(room_id.clone(), tx);
+        let new_key = rx.recv().unwrap().expect("room exists");
+
+        let (tx, rx) = reply();
+        rooms.resolve_stream_key(old_key.hashed(), tx);
+        assert_eq!(rx.recv().unwrap(), None, "the old key must stop resolving");
+
+        let (tx, rx) = reply();
+        rooms.resolve_stream_key(new_key.hashed(), tx);
+        assert_eq!(rx.recv().unwrap(), Some(room_id));
+    }
+
+    #[test]
+    fn rooms_reissue_stream_key_reports_missing_room() {
+        let mut rooms = Rooms::new();
+
+        let (tx, rx) = reply();
+        rooms.reissue_stream_key(missing_id(), tx);
+        assert!(rx.recv().unwrap().is_none());
     }
 
     #[test]

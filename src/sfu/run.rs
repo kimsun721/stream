@@ -48,6 +48,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     session_id,
                     reply,
                 } => rooms.terminate_session(room_id, session_id, reply),
+                SfuMessage::ReissueStreamKey { room_id, reply } => {
+                    rooms.reissue_stream_key(room_id, reply)
+                }
             };
         }
 

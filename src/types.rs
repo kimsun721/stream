@@ -324,6 +324,10 @@ pub enum SfuMessage {
         session_id: Uuid,
         reply: SyncSender<Option<()>>,
     },
+    ReissueStreamKey {
+        room_id: RoomId,
+        reply: SyncSender<Option<StreamKey>>,
+    },
 }
 
 #[derive(Deserialize)]
