@@ -1,6 +1,7 @@
 use std::{
     net::UdpSocket,
-    sync::{Arc, mpsc::Receiver},
+    rc::Rc,
+    sync::mpsc::Receiver,
     time::{Duration, Instant},
 };
 
@@ -10,8 +11,8 @@ use tracing::{debug, error};
 use crate::{
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, Rooms, SfuMessage,
-        TrackIn, TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
+        SfuMessage, TrackIn, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -27,31 +28,49 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     rtc,
                     role,
                     room_id,
-                    simulcast_tracks,
+                    session_id,
                     reply,
-                } => rooms.register_client(*rtc, role, room_id, simulcast_tracks, reply),
-                SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
-                SfuMessage::GetViews { room_id, reply } => rooms.get_views(room_id, reply),
+                } => rooms.register_client(*rtc, role, room_id, session_id, reply),
+                SfuMessage::CreateRoom { reply } => rooms.create(reply),
+                SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
                 SfuMessage::UpdateRoomState {
                     room_id,
                     state,
                     reply,
                 } => rooms.update_state(room_id, state, reply),
                 SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
+                SfuMessage::ResolveStreamKey {
+                    hashed_stream_key,
+                    reply,
+                } => rooms.resolve_stream_key(hashed_stream_key, reply),
+                SfuMessage::TerminateSession {
+                    room_id,
+                    session_id,
+                    reply,
+                } => rooms.terminate_session(room_id, session_id, reply),
+                SfuMessage::ReissueStreamKey { room_id, reply } => {
+                    rooms.reissue_stream_key(room_id, reply)
+                }
             };
         }
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for room in rooms.values_mut() {
+            if matches!(room.state, RoomState::Idle) && room.clients.is_empty() {
+                continue;
+            };
+
             let mut to_remove = Vec::new();
-            let mut new_tracks: Vec<Arc<TrackIn>> = Vec::new();
+            let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
             let mut disconnected_relays = Vec::new();
+            let mut should_reevaluate = false;
 
             let mut fallback_leafs = Vec::new();
+            let mut needs_init = false;
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -61,9 +80,14 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut keyframe_requests,
                     &mut p2p_sdps,
                     &mut disconnected_relays,
+                    &mut should_reevaluate,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
+                        if client.role == ClientRole::Streamer {
+                            needs_init = true;
+                        }
+
                         match &client.relay_status {
                             Some(RelayStatus::Relay { leaf }) => {
                                 fallback_leafs.push(*leaf);
@@ -85,10 +109,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             for track in &new_tracks {
                 for client in room.viewers_mut() {
                     client.tracks_out.push(TrackOut {
-                        track_in: Arc::downgrade(track),
+                        track_in: Rc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
-                        chosen_layer: track.default_layer(),
+                        chosen_rid: track.default_rid(),
                     });
                 }
             }
@@ -97,6 +121,30 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 for client in room.viewers_mut() {
                     if let Some(desired_bitrate) = client.calc_desired_bitrate() {
                         client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                    }
+                }
+            }
+
+            if should_reevaluate {
+                for client in room
+                    .clients
+                    .iter_mut()
+                    .filter(|c| matches!(c.role, ClientRole::Viewer))
+                {
+                    let mut is_auto_layer = false;
+                    for track_out in client.tracks_out.iter() {
+                        if matches!(track_out.layer_mode, LayerMode::Auto) {
+                            is_auto_layer = true;
+                            break;
+                        }
+                    }
+
+                    if is_auto_layer {
+                        if let Some(desired_bitrate) = client.calc_desired_bitrate() {
+                            client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                        }
+
+                        client.reevaluate_auto_layers(&mut keyframe_requests)?;
                     }
                 }
             }
@@ -183,12 +231,12 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                             c.probe_available_upload();
                         }
                     }
-                    Some(UploadProbeResult::Probing { probed_at }) => {
-                        if probed_at.elapsed() > MAX_PROBE_PENDING {
-                            c.available_upload =
-                                Some(UploadProbeResult::Failed { at: Instant::now() });
-                        }
+                    Some(UploadProbeResult::Probing { probed_at })
+                        if probed_at.elapsed() > MAX_PROBE_PENDING =>
+                    {
+                        c.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
                     }
+
                     _ => (),
                 }
             }
@@ -245,6 +293,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
             for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
                 room.demote(relay_id, leaf_id);
+            }
+
+            if needs_init {
+                room.init();
             }
         }
 

@@ -1,16 +1,19 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::HashMap,
     ops::{Deref, DerefMut},
-    sync::{Arc, mpsc::SyncSender},
+    rc::Rc,
+    sync::mpsc::SyncSender,
 };
 
 use axum::http::StatusCode;
 use str0m::Rtc;
+use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::types::{
     Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
-    Rooms, SimulcastTrack, TrackOut, TrackOutState,
+    Rooms, StreamKey, TrackOut, TrackOutState,
 };
 
 impl Rooms {
@@ -23,35 +26,38 @@ impl Rooms {
         rtc: Rtc,
         role: ClientRole,
         room_id: RoomId,
-        simulcast_tracks: Vec<SimulcastTrack>,
+        session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     ) {
-        if let Some(room) = self.get_mut(&room_id.0) {
-            room.add_client(rtc, role, simulcast_tracks, reply);
+        if let Some(room) = self.get_mut(&room_id) {
+            room.add_client(rtc, role, session_id, reply);
         } else {
             warn!("Room does not exist : {:?}", room_id);
             reply.send(Some(StatusCode::NOT_FOUND)).ok();
         };
     }
 
-    pub fn create(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.entry(room_id.0) {
-            Entry::Occupied(_) => reply.send(None).ok(),
-            Entry::Vacant(e) => {
-                e.insert(Room {
-                    streamer_id: None,
-                    clients: vec![],
-                    state: RoomState::Idle,
-                });
+    pub fn create(&mut self, reply: SyncSender<(RoomId, StreamKey)>) {
+        let room_id = RoomId::new();
+        let stream_key = StreamKey::new();
+        let hashed_stream_key = stream_key.hashed();
 
-                reply.send(Some(())).ok()
-            }
-        };
+        self.insert(
+            room_id.clone(),
+            Room {
+                streamer_id: None,
+                clients: vec![],
+                state: RoomState::Idle,
+                hashed_stream_key,
+            },
+        );
+
+        reply.send((room_id, stream_key)).ok();
     }
 
-    pub fn get_views(&self, room_id: RoomId, reply: SyncSender<Option<usize>>) {
-        match self.get(&room_id.0) {
-            Some(room) => reply.send(Some(room.view_count())).ok(),
+    pub fn get_room(&self, room_id: RoomId, reply: SyncSender<Option<(usize, RoomState)>>) {
+        match self.get(&room_id) {
+            Some(room) => reply.send(Some((room.view_count(), room.state))).ok(),
             None => reply.send(None).ok(),
         };
     }
@@ -62,8 +68,11 @@ impl Rooms {
         state: RoomState,
         reply: SyncSender<Option<()>>,
     ) {
-        match self.get_mut(&room_id.0) {
+        match self.get_mut(&room_id) {
             Some(room) => {
+                if matches!(state, RoomState::Idle) {
+                    room.init();
+                }
                 room.set_state(state);
                 reply.send(Some(())).ok()
             }
@@ -72,10 +81,52 @@ impl Rooms {
     }
 
     pub fn delete(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.remove(&room_id.0) {
+        match self.remove(&room_id) {
             Some(_) => reply.send(Some(())).ok(),
             None => reply.send(None).ok(),
         };
+    }
+
+    pub fn resolve_stream_key(
+        &self,
+        hashed_stream_key: [u8; 32],
+        reply: SyncSender<Option<RoomId>>,
+    ) {
+        let room_id = self.iter().find_map(|(room_id, room)| {
+            bool::from(hashed_stream_key.ct_eq(&room.hashed_stream_key)).then_some(room_id.clone())
+        });
+
+        reply.send(room_id).ok();
+    }
+
+    pub fn terminate_session(
+        &mut self,
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<()>>,
+    ) {
+        if let Some(room) = self.get_mut(&room_id)
+            && let Some(streamer) = room.streamer()
+            && streamer.session_id == session_id
+        {
+            room.init();
+            reply.send(Some(())).ok();
+        } else {
+            reply.send(None).ok();
+        };
+    }
+
+    pub fn reissue_stream_key(&mut self, room_id: RoomId, reply: SyncSender<Option<StreamKey>>) {
+        if let Some(room) = self.get_mut(&room_id) {
+            let stream_key = StreamKey::new();
+            let hashed_stream_key = stream_key.hashed();
+
+            room.hashed_stream_key = hashed_stream_key;
+
+            reply.send(Some(stream_key)).ok();
+        } else {
+            reply.send(None).ok();
+        }
     }
 }
 
@@ -159,10 +210,10 @@ impl Room {
         &mut self,
         rtc: Rtc,
         role: ClientRole,
-        simulcast_tracks: Vec<SimulcastTrack>,
+        session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     ) {
-        let mut client = Client::new(rtc, role, simulcast_tracks);
+        let mut client = Client::new(rtc, role, session_id);
 
         match role {
             ClientRole::Streamer => {
@@ -176,6 +227,7 @@ impl Room {
                 } else {
                     self.streamer_id = Some(client.id);
                     self.clients.push(client);
+                    self.state = RoomState::Preview;
 
                     reply.send(None).ok();
                 }
@@ -193,16 +245,16 @@ impl Room {
                         .flat_map(|c| {
                             c.tracks_in
                                 .iter()
-                                .map(|t| (Arc::downgrade(&t.id), t.id.default_layer()))
+                                .map(|t| (Rc::downgrade(&t.id), t.id.default_rid()))
                         })
                         .collect();
 
-                    for (track_in, default_layer) in tracks {
+                    for (track_in, default_rid) in tracks {
                         client.tracks_out.push(TrackOut {
                             track_in,
                             state: TrackOutState::ToOpen,
                             layer_mode: LayerMode::Auto,
-                            chosen_layer: default_layer,
+                            chosen_rid: default_rid,
                         });
                     }
 
@@ -222,10 +274,20 @@ impl Room {
             .iter_mut()
             .filter(|c| c.role == ClientRole::Viewer)
     }
+
+    pub fn init(&mut self) {
+        self.clients.clear();
+        self.state = RoomState::Idle;
+        self.streamer_id = None;
+    }
+
+    pub fn streamer(&self) -> Option<&Client> {
+        self.clients.iter().find(|c| c.role == ClientRole::Streamer)
+    }
 }
 
 impl Deref for Rooms {
-    type Target = HashMap<u64, Room>;
+    type Target = HashMap<RoomId, Room>;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -243,8 +305,9 @@ mod tests {
 
     use axum::http::StatusCode;
     use str0m::Rtc;
+    use uuid::Uuid;
 
-    use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms};
+    use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, StreamKey};
 
     fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
         mpsc::sync_channel(1)
@@ -254,35 +317,90 @@ mod tests {
         Rtc::new(Instant::now())
     }
 
+    fn create_room(rooms: &mut Rooms) -> (RoomId, StreamKey) {
+        let (tx, rx) = mpsc::sync_channel(1);
+        rooms.create(tx);
+        rx.recv().unwrap()
+    }
+
+    fn missing_id() -> RoomId {
+        RoomId("RM_missing".to_string())
+    }
+
     #[test]
-    fn rooms_create_inserts_idle_room_and_rejects_duplicate() {
+    fn rooms_create_inserts_idle_room_with_unique_id() {
+        let mut rooms = Rooms::new();
+
+        let (first_id, _) = create_room(&mut rooms);
+        let (second_id, _) = create_room(&mut rooms);
+
+        assert_ne!(first_id, second_id);
+        assert!(matches!(
+            rooms.get(&first_id).unwrap().state,
+            RoomState::Idle
+        ));
+        assert!(matches!(
+            rooms.get(&second_id).unwrap().state,
+            RoomState::Idle
+        ));
+    }
+
+    #[test]
+    fn rooms_create_returns_key_matching_stored_hash() {
+        let mut rooms = Rooms::new();
+
+        let (room_id, stream_key) = create_room(&mut rooms);
+
+        assert_eq!(
+            rooms.get(&room_id).unwrap().hashed_stream_key,
+            stream_key.hashed()
+        );
+    }
+
+    #[test]
+    fn rooms_reissue_stream_key_retires_the_old_key() {
+        let mut rooms = Rooms::new();
+
+        let (room_id, old_key) = create_room(&mut rooms);
+
+        let (tx, rx) = reply();
+        rooms.reissue_stream_key(room_id.clone(), tx);
+        let new_key = rx.recv().unwrap().expect("room exists");
+
+        let (tx, rx) = reply();
+        rooms.resolve_stream_key(old_key.hashed(), tx);
+        assert_eq!(rx.recv().unwrap(), None, "the old key must stop resolving");
+
+        let (tx, rx) = reply();
+        rooms.resolve_stream_key(new_key.hashed(), tx);
+        assert_eq!(rx.recv().unwrap(), Some(room_id));
+    }
+
+    #[test]
+    fn rooms_reissue_stream_key_reports_missing_room() {
         let mut rooms = Rooms::new();
 
         let (tx, rx) = reply();
-        rooms.create(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
-        assert!(matches!(rooms.get(&7).unwrap().state, RoomState::Idle));
-
-        let (tx, rx) = reply();
-        rooms.create(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), None);
+        rooms.reissue_stream_key(missing_id(), tx);
+        assert!(rx.recv().unwrap().is_none());
     }
 
     #[test]
     fn rooms_update_state_updates_existing_room_only() {
         let mut rooms = Rooms::new();
 
-        let (tx, rx) = reply();
-        rooms.create(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        let (room_id, _) = create_room(&mut rooms);
 
         let (tx, rx) = reply();
-        rooms.update_state(RoomId(7), RoomState::Live, tx);
+        rooms.update_state(room_id.clone(), RoomState::Live, tx);
         assert_eq!(rx.recv().unwrap(), Some(()));
-        assert!(matches!(rooms.get(&7).unwrap().state, RoomState::Live));
+        assert!(matches!(
+            rooms.get(&room_id).unwrap().state,
+            RoomState::Live
+        ));
 
         let (tx, rx) = reply();
-        rooms.update_state(RoomId(8), RoomState::Live, tx);
+        rooms.update_state(missing_id(), RoomState::Live, tx);
         assert_eq!(rx.recv().unwrap(), None);
     }
 
@@ -290,43 +408,58 @@ mod tests {
     fn rooms_get_views_counts_viewers_and_reports_missing_room() {
         let mut rooms = Rooms::new();
 
-        let (tx, rx) = reply();
-        rooms.create(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        let (room_id, _) = create_room(&mut rooms);
+
+        let (tx, _rx) = reply::<StatusCode>();
+        rooms.register_client(
+            rtc(),
+            ClientRole::Streamer,
+            room_id.clone(),
+            Uuid::new_v4(),
+            tx,
+        );
+        assert!(matches!(
+            rooms.get(&room_id).unwrap().state,
+            RoomState::Preview
+        ));
 
         let (tx, rx) = reply();
-        rooms.update_state(RoomId(7), RoomState::Live, tx);
+        rooms.update_state(room_id.clone(), RoomState::Live, tx);
         assert_eq!(rx.recv().unwrap(), Some(()));
 
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Streamer, RoomId(7), vec![], tx);
-        let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(rtc(), ClientRole::Viewer, RoomId(7), vec![], tx);
+        rooms.register_client(
+            rtc(),
+            ClientRole::Viewer,
+            room_id.clone(),
+            Uuid::new_v4(),
+            tx,
+        );
 
         let (tx, rx) = reply();
-        rooms.get_views(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), Some(1));
+        rooms.get_room(room_id, tx);
+        let (views, state) = rx.recv().unwrap().unwrap();
+        assert_eq!(views, 1);
+        assert!(matches!(state, RoomState::Live));
 
-        let (tx, rx) = reply();
-        rooms.get_views(RoomId(8), tx);
-        assert_eq!(rx.recv().unwrap(), None);
+        let (tx, rx) = reply::<(usize, RoomState)>();
+        rooms.get_room(missing_id(), tx);
+        assert!(rx.recv().unwrap().is_none());
     }
 
     #[test]
     fn rooms_delete_removes_existing_room_only() {
         let mut rooms = Rooms::new();
 
-        let (tx, rx) = reply();
-        rooms.create(RoomId(7), tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        let (room_id, _) = create_room(&mut rooms);
 
         let (tx, rx) = reply();
-        rooms.delete(RoomId(7), tx);
+        rooms.delete(room_id.clone(), tx);
         assert_eq!(rx.recv().unwrap(), Some(()));
-        assert!(!rooms.contains_key(&7));
+        assert!(!rooms.contains_key(&room_id));
 
         let (tx, rx) = reply();
-        rooms.delete(RoomId(7), tx);
+        rooms.delete(room_id, tx);
         assert_eq!(rx.recv().unwrap(), None);
     }
 
@@ -338,14 +471,30 @@ mod tests {
             streamer_id: None,
             clients,
             state: RoomState::Live,
+            hashed_stream_key: [0; 32],
         };
 
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
         let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(Rtc::new(Instant::now()), ClientRole::Streamer, vec![], tx);
+        room.add_client(
+            Rtc::new(Instant::now()),
+            ClientRole::Streamer,
+            Uuid::new_v4(),
+            tx,
+        );
 
         assert_eq!(room.clients.len(), 1);
     }
@@ -363,10 +512,16 @@ mod tests {
                 streamer_id: None,
                 clients: Vec::new(),
                 state: state.clone(),
+                hashed_stream_key: [0; 32],
             };
 
             let (tx, _rx) = reply::<StatusCode>();
-            room.add_client(Rtc::new(Instant::now()), ClientRole::Viewer, vec![], tx);
+            room.add_client(
+                Rtc::new(Instant::now()),
+                ClientRole::Viewer,
+                Uuid::new_v4(),
+                tx,
+            );
 
             assert_eq!(
                 room.clients.len(),

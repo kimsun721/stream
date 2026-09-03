@@ -5,30 +5,42 @@ use std::{
 };
 
 use axum::{
-    Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
-    response::Result,
+    Json, RequestPartsExt, Router,
+    extract::{FromRequestParts, Path, Request, State},
+    http::{
+        StatusCode,
+        header::{self},
+        request::Parts,
+    },
+    middleware::{self, Next},
+    response::{IntoResponse, Response, Result},
     routing,
 };
-use axum_server::tls_rustls::RustlsConfig;
+use axum_extra::{
+    TypedHeader,
+    headers::{Authorization, ContentType, Mime, authorization::Bearer},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use str0m::{Candidate, Rtc, bwe::Bitrate, change::SdpOffer, media::Rid};
+use str0m::{
+    Candidate, Rtc,
+    bwe::Bitrate,
+    change::{SdpAnswer, SdpOffer},
+};
+use subtle::ConstantTimeEq;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::error;
+use uuid::Uuid;
 
-use crate::types::{
-    ClientRole, RoomId, RoomState, SfuMessage, SimulcastLayerProfile, SimulcastTrack,
+use crate::{
+    config::WebConfig,
+    types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
+    utils::string::hash_string,
 };
 
-const MAX_SIMULCAST_LAYER_BITRATE_BPS: u64 = 100_000_000;
-const MIN_SIMULCAST_LAYER_BITRATE_BPS: u64 = 500_000;
-
-fn is_valid_simulcast_layer_bitrate(max_br: u64) -> bool {
-    (MIN_SIMULCAST_LAYER_BITRATE_BPS..=MAX_SIMULCAST_LAYER_BITRATE_BPS).contains(&max_br)
-}
+const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
+const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
 
 #[derive(Clone)]
 struct SdpState {
@@ -38,6 +50,7 @@ struct SdpState {
 
 #[derive(Clone)]
 struct ApiState {
+    api_key: String,
     tx: SyncSender<SfuMessage>,
 }
 
@@ -46,34 +59,55 @@ struct OfferRequest {
     #[serde(rename = "type")]
     _sdp_type: String,
     sdp: String,
-    role: ClientRole,
-    room_id: u64,
+    room_id: String,
 }
 
-pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result<()> {
-    let config = RustlsConfig::from_pem_file("certs/cer.pem", "certs/key.pem").await?;
+struct AuthStreamKey(RoomId);
 
+pub async fn run(
+    addr: SocketAddr,
+    tx: SyncSender<SfuMessage>,
+    config: WebConfig,
+) -> anyhow::Result<()> {
     let https_api = Router::new()
         .route("/offer", routing::post(sdp_offer))
+        .route("/whip", routing::post(whip_sdp_offer))
+        .route(
+            "/whip/sessions/{session_id}",
+            routing::delete(whip_terminate_session),
+        )
         .layer(CorsLayer::permissive())
         .with_state(SdpState {
             addr,
             tx: tx.clone(),
         });
 
+    let api_state = ApiState {
+        tx,
+        api_key: config.api_key,
+    };
+
     let http_api = Router::new()
-        .route("/rooms/{room_id}", routing::post(create_room))
+        .route("/rooms", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
         .route("/rooms/{room_id}", routing::delete(delete_room))
-        .with_state(ApiState { tx });
+        .route(
+            "/rooms/{room_id}/stream-key",
+            routing::post(reissue_stream_key),
+        )
+        .layer(middleware::from_fn_with_state(
+            api_state.clone(),
+            api_key_auth_middleware,
+        ))
+        .with_state(api_state);
 
     let https_server = tokio::spawn(async move {
         axum_server::bind_rustls(
             "0.0.0.0:8080"
                 .parse::<SocketAddr>()
                 .expect("bind to 0.0.0.0:8080"),
-            config,
+            config.certificate,
         )
         .serve(https_api.into_make_service())
         .await
@@ -96,50 +130,124 @@ pub async fn run(addr: SocketAddr, tx: SyncSender<SfuMessage>) -> anyhow::Result
     Ok(())
 }
 
-async fn create_room(
-    Path(room_id): Path<u64>,
+async fn api_key_auth_middleware(
     State(state): State<ApiState>,
-) -> Result<(), StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
-
-    let msg = SfuMessage::CreateRoom {
-        room_id: RoomId(room_id),
-        reply: tx,
+    header: Option<TypedHeader<Authorization<Bearer>>>,
+    request: Request,
+    next: Next,
+) -> Result<Response, impl IntoResponse> {
+    let response_header = [(header::WWW_AUTHENTICATE, "Bearer")];
+    let Some(TypedHeader(Authorization(bearer))) = header else {
+        return Err((StatusCode::UNAUTHORIZED, response_header));
     };
+
+    let is_token_valid = bearer
+        .token()
+        .as_bytes()
+        .ct_eq(state.api_key.as_bytes())
+        .into();
+
+    if is_token_valid {
+        Ok(next.run(request).await)
+    } else {
+        Err((StatusCode::UNAUTHORIZED, response_header))
+    }
+}
+
+impl FromRequestParts<SdpState> for AuthStreamKey {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &SdpState,
+    ) -> Result<Self, Self::Rejection> {
+        let unauthorized = || {
+            (
+                StatusCode::UNAUTHORIZED,
+                [(header::WWW_AUTHENTICATE, "Bearer")],
+            )
+                .into_response()
+        };
+
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| unauthorized())?;
+
+        let (tx, rx) = mpsc::sync_channel::<Option<RoomId>>(1);
+        let hashed_stream_key = hash_string(bearer.token());
+
+        let msg = SfuMessage::ResolveStreamKey {
+            hashed_stream_key,
+            reply: tx,
+        };
+
+        state.tx.send(msg).map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        })?;
+
+        rx.recv()
+            .map_err(|e| {
+                error!("send to sfu loop failed: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?
+            .map(AuthStreamKey)
+            .ok_or_else(unauthorized)
+    }
+}
+
+#[derive(Serialize)]
+struct CreateRoomResponse {
+    room_id: String,
+    stream_key: String,
+}
+
+async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<(RoomId, StreamKey)>(1);
+
+    let msg = SfuMessage::CreateRoom { reply: tx };
 
     state.tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    rx.recv()
-        .map_err(|e| {
-            error!("send to sfu loop failed: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::CONFLICT)
+    let (room_id, stream_key) = rx.recv().map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateRoomResponse {
+            room_id: room_id.0,
+            stream_key: stream_key.0,
+        }),
+    ))
 }
 
 #[derive(Serialize)]
 struct GetRoomResponse {
     views: usize,
+    state: RoomState,
 }
 
 async fn get_room(
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<usize>>(1);
+    let (tx, rx) = mpsc::sync_channel::<Option<(usize, RoomState)>>(1);
 
     state
         .tx
-        .send(SfuMessage::GetViews {
+        .send(SfuMessage::GetRoom {
             room_id: RoomId(room_id),
             reply: tx,
         })
         .ok();
 
-    let views = rx
+    let (views, state) = rx
         .recv()
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
@@ -147,7 +255,7 @@ async fn get_room(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(Json(GetRoomResponse { views }))
+    Ok(Json(GetRoomResponse { views, state }))
 }
 
 #[derive(Deserialize)]
@@ -157,7 +265,7 @@ struct UpdateRoomState {
 
 async fn update_room(
     State(state): State<ApiState>,
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     Json(payload): Json<UpdateRoomState>,
 ) -> Result<(), StatusCode> {
     let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
@@ -182,7 +290,7 @@ async fn update_room(
 }
 
 async fn delete_room(
-    Path(room_id): Path<u64>,
+    Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<(), StatusCode> {
     let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
@@ -205,21 +313,132 @@ async fn delete_room(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+#[derive(Serialize)]
+struct ReissueStreamKeyResponse {
+    stream_key: String,
+}
+
+async fn reissue_stream_key(
+    State(state): State<ApiState>,
+    Path(room_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<StreamKey>>(1);
+
+    let msg = SfuMessage::ReissueStreamKey {
+        room_id: RoomId(room_id),
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let stream_key = rx.recv().map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let Some(stream_key) = stream_key else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(ReissueStreamKeyResponse {
+            stream_key: stream_key.0,
+        }),
+    ))
+}
+
 async fn sdp_offer(
     State(state): State<SdpState>,
     Json(payload): Json<OfferRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
-    const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
-
     let OfferRequest {
         _sdp_type,
         sdp,
-        role,
         room_id,
     } = payload;
-    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+    let role = ClientRole::Viewer;
 
+    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
+
+    let session_id = Uuid::new_v4();
+
+    register_client(rtc, role, RoomId(room_id), state.tx, session_id)?;
+
+    let value = serde_json::to_value(&answer).map_err(|e| {
+        error!("json to value failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(value))
+}
+
+async fn whip_sdp_offer(
+    State(state): State<SdpState>,
+    AuthStreamKey(room_id): AuthStreamKey,
+    TypedHeader(content_type): TypedHeader<ContentType>,
+    sdp: String,
+) -> Result<impl IntoResponse, StatusCode> {
+    let role = ClientRole::Streamer;
+
+    let mime: Mime = content_type.into();
+
+    if mime.essence_str() != "application/sdp" {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    };
+
+    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
+
+    let session_id = Uuid::new_v4();
+    let location = format!("/whip/sessions/{}", session_id);
+
+    register_client(rtc, role, room_id, state.tx, session_id)?;
+
+    Ok((
+        StatusCode::CREATED,
+        [
+            (header::CONTENT_TYPE, "application/sdp".to_string()),
+            (header::LOCATION, location),
+        ],
+        answer.to_sdp_string(),
+    ))
+}
+
+async fn whip_terminate_session(
+    Path(session_id): Path<Uuid>,
+    AuthStreamKey(room_id): AuthStreamKey,
+    State(state): State<SdpState>,
+) -> Result<StatusCode, StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+
+    let msg = SfuMessage::TerminateSession {
+        room_id,
+        session_id,
+        reply: tx,
+    };
+
+    state.tx.send(msg).map_err(|e| {
+        error!("send to sfu loop failed: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    rx.recv()
+        .map_err(|e| {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map(|_| StatusCode::NO_CONTENT)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+fn create_rtc_from_offer(
+    sdp: String,
+    role: ClientRole,
+    addr: SocketAddr,
+) -> Result<(Rtc, SdpAnswer), StatusCode> {
     let mut rtc = {
         let mut builder = Rtc::builder();
 
@@ -235,113 +454,49 @@ async fn sdp_offer(
             .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
     }
 
-    rtc.add_local_candidate(Candidate::host(state.addr, "udp").map_err(|e| {
+    rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?);
 
     let offer = SdpOffer::from_sdp_string(&sdp).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    let mut simulcast_tracks = Vec::new();
-
-    if role == ClientRole::Streamer {
-        for o in offer.media_lines.iter() {
-            if let Some(m) = o.simulcast() {
-                let mid = o.mid();
-
-                let mut track = SimulcastTrack {
-                    mid,
-                    layers: Vec::new(),
-                };
-
-                for layer in m.send.iter() {
-                    let Some(pairs) = &layer.attributes else {
-                        return Err(StatusCode::BAD_REQUEST);
-                    };
-
-                    if let Some(max_br) = pairs.iter().find_map(|(name, value)| {
-                        if name == "max-br" {
-                            value.parse::<u64>().ok()
-                        } else {
-                            None
-                        }
-                    }) {
-                        if !is_valid_simulcast_layer_bitrate(max_br) {
-                            return Err(StatusCode::BAD_REQUEST);
-                        }
-
-                        let rid = Rid::from(layer.restriction_id.0.as_str());
-
-                        track.layers.push(SimulcastLayerProfile { rid, max_br });
-                    } else {
-                        return Err(StatusCode::BAD_REQUEST);
-                    };
-                }
-                if track.layers.is_empty() {
-                    return Err(StatusCode::BAD_REQUEST);
-                }
-
-                simulcast_tracks.push(track);
-            }
-        }
-    }
-
     let answer = rtc.sdp_api().accept_offer(offer).map_err(|e| {
         error!("accept offer failed: {}", e);
         StatusCode::BAD_REQUEST
     })?;
 
+    Ok((rtc, answer))
+}
+
+fn register_client(
+    rtc: Rtc,
+    role: ClientRole,
+    room_id: RoomId,
+    sfu_tx: SyncSender<SfuMessage>,
+    session_id: Uuid,
+) -> Result<(), StatusCode> {
+    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+
     let msg = SfuMessage::RegisterClient {
         rtc: Box::from(rtc),
         role,
-        room_id: RoomId(room_id),
-        simulcast_tracks,
+        room_id,
+        session_id,
         reply: tx,
     };
 
-    state.tx.send(msg).map_err(|e| {
+    sfu_tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let result = rx.recv().map_err(|e| {
+    if let Some(status_code) = rx.recv().map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    if let Some(status_code) = result {
+    })? {
         return Err(status_code);
     };
 
-    let value = serde_json::to_value(&answer).map_err(|e| {
-        error!("json to value failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    Ok(Json(value))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn simulcast_layer_bitrate_accepts_inclusive_bounds() {
-        assert!(is_valid_simulcast_layer_bitrate(
-            MIN_SIMULCAST_LAYER_BITRATE_BPS
-        ));
-        assert!(is_valid_simulcast_layer_bitrate(
-            MAX_SIMULCAST_LAYER_BITRATE_BPS
-        ));
-    }
-
-    #[test]
-    fn simulcast_layer_bitrate_rejects_values_outside_bounds() {
-        assert!(!is_valid_simulcast_layer_bitrate(
-            MIN_SIMULCAST_LAYER_BITRATE_BPS - 1
-        ));
-        assert!(!is_valid_simulcast_layer_bitrate(
-            MAX_SIMULCAST_LAYER_BITRATE_BPS + 1
-        ));
-    }
+    Ok(())
 }

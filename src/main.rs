@@ -1,10 +1,9 @@
-use std::sync::mpsc;
-
-use str0m::crypto::from_feature_flags;
-
 use crate::types::SfuMessage;
 use ::tracing::error;
+use std::sync::mpsc;
+use str0m::crypto::from_feature_flags;
 
+mod config;
 mod servers;
 mod sfu;
 mod types;
@@ -13,6 +12,7 @@ mod utils;
 #[tokio::main]
 async fn main() {
     utils::log::init_log();
+    let config = config::load().await;
 
     from_feature_flags().install_process_default();
 
@@ -26,7 +26,7 @@ async fn main() {
         };
     });
 
-    if let Err(e) = servers::web::run(addr, tx).await {
+    if let Err(e) = servers::web::run(addr, tx, config).await {
         error!("web server erorr : {}", e);
     };
 }

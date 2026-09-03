@@ -1,11 +1,13 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
+    fmt,
+    rc::{Rc, Weak},
     sync::{
-        Arc, Weak,
         atomic::{AtomicU64, Ordering},
         mpsc::SyncSender,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::http::StatusCode;
@@ -18,7 +20,15 @@ use str0m::{
     media::{MediaKind, Mid, Rid},
 };
 
-use derive_more::Display;
+use derive_more::{Display, Eq};
+use uuid::Uuid;
+
+use crate::utils::string::{hash_string, random_string};
+
+const BITRATE_ESTIMATION_SECOND: u64 = 3;
+
+const STREAM_KEY_LEN: usize = 32;
+const ROOM_ID_LEN: usize = 12;
 
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 pub enum ClientRole {
@@ -39,16 +49,44 @@ pub struct Client {
     pub perf: PerfWindow,
     pub available_upload: Option<UploadProbeResult>,
     pub relay_outgoing_kbps: Option<u32>,
-    pub pending_simulcast_tracks: Vec<SimulcastTrack>,
     pub connected_at: Instant,
     pub last_twcc_bitrate: Option<Bitrate>,
+    pub session_id: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Display)]
 pub struct ClientId(u64);
 
-#[derive(Debug)]
-pub struct RoomId(pub u64);
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct RoomId(pub String);
+
+pub struct StreamKey(pub String);
+
+impl fmt::Debug for StreamKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StreamKey").field(&"[REDACTED]").finish()
+    }
+}
+
+impl RoomId {
+    pub fn new() -> RoomId {
+        RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
+    }
+}
+
+impl StreamKey {
+    pub fn new() -> StreamKey {
+        StreamKey(format!("SK_{}", random_string(STREAM_KEY_LEN)))
+    }
+
+    pub fn hashed(&self) -> [u8; 32] {
+        hash_string(self.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
 
 pub type PerfWindow = VecDeque<PerfSample>;
 
@@ -60,13 +98,94 @@ pub struct PerfSample {
 }
 
 #[derive(Debug)]
+pub struct BitrateEstimator {
+    history: VecDeque<(usize, Instant)>,
+    accumulated_bytes: u64,
+    started_at: Option<Instant>,
+    is_estimate_available: bool,
+}
+
+pub enum PushOutcome {
+    EstimateBecameAvailable,
+    NoChange,
+}
+
+impl BitrateEstimator {
+    pub fn new() -> BitrateEstimator {
+        BitrateEstimator {
+            history: VecDeque::new(),
+            accumulated_bytes: 0,
+            started_at: None,
+            is_estimate_available: false,
+        }
+    }
+
+    pub fn push(&mut self, bytes: usize, now: Instant) -> PushOutcome {
+        self.remove_expired();
+
+        if self.history.is_empty() {
+            self.started_at = Some(now);
+        }
+
+        self.history.push_back((bytes, now));
+
+        self.accumulated_bytes += bytes as u64;
+
+        if self
+            .started_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+        {
+            if self.is_estimate_available {
+                PushOutcome::NoChange
+            } else {
+                self.is_estimate_available = true;
+                PushOutcome::EstimateBecameAvailable
+            }
+        } else {
+            self.is_estimate_available = false;
+            PushOutcome::NoChange
+        }
+    }
+
+    fn bitrate_estimate(&mut self) -> Option<u64> {
+        self.remove_expired();
+
+        if self.history.is_empty()
+            || self
+                .started_at
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+        {
+            None
+        } else {
+            Some(self.accumulated_bytes * 8 / BITRATE_ESTIMATION_SECOND)
+        }
+    }
+
+    fn remove_expired(&mut self) {
+        while let Some((bytes, timestamp)) = self.history.front() {
+            if timestamp.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND) {
+                self.accumulated_bytes -= *bytes as u64;
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.history.is_empty() {
+            self.started_at = None;
+            self.accumulated_bytes = 0;
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum UploadProbeResult {
     Probing { probed_at: Instant },
     Probed { available_upload_kbps: u32 },
     Failed { at: Instant },
 }
 
-#[derive(Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 pub enum RoomState {
     Idle,
     Preview,
@@ -78,21 +197,22 @@ pub struct Room {
     pub streamer_id: Option<ClientId>,
     pub clients: Vec<Client>,
     pub state: RoomState,
+    pub hashed_stream_key: [u8; 32],
 }
 
-pub struct Rooms(pub HashMap<u64, Room>);
+pub struct Rooms(pub HashMap<RoomId, Room>);
 
 #[derive(Debug)]
 pub struct TrackIn {
     pub origin: ClientId,
     pub mid: Mid,
     pub kind: MediaKind,
-    pub available_simulcast_layers: Vec<SimulcastLayerProfile>,
+    pub available_simulcast_layers: Vec<SimulcastLayer>,
 }
 
 #[derive(Debug)]
 pub struct TrackInEntry {
-    pub id: Arc<TrackIn>,
+    pub id: Rc<TrackIn>,
     pub last_keyframe_requested_at: HashMap<Option<Rid>, Instant>,
 }
 
@@ -100,20 +220,20 @@ pub struct TrackInEntry {
 pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
-    pub chosen_layer: Option<SimulcastLayerProfile>,
+    pub chosen_rid: Option<Rid>,
     pub layer_mode: LayerMode,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SimulcastLayerProfile {
+#[derive(Debug)]
+pub struct SimulcastLayer {
     pub rid: Rid,
-    pub max_br: u64,
+    pub bitrate_estimator: RefCell<BitrateEstimator>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SimulcastTrack {
-    pub mid: Mid,
-    pub layers: Vec<SimulcastLayerProfile>,
+impl SimulcastLayer {
+    pub fn estimate_bps(&self) -> Option<u64> {
+        self.bitrate_estimator.borrow_mut().bitrate_estimate()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,11 +251,7 @@ pub enum LayerMode {
 }
 
 impl Client {
-    pub fn new(
-        rtc: Rtc,
-        role: ClientRole,
-        pending_simulcast_tracks: Vec<SimulcastTrack>,
-    ) -> Client {
+    pub fn new(rtc: Rtc, role: ClientRole, session_id: Uuid) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
         let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
 
@@ -152,31 +268,21 @@ impl Client {
             available_upload: None,
             connected_at: Instant::now(),
             relay_outgoing_kbps: None,
-            pending_simulcast_tracks,
             last_twcc_bitrate: None,
+            session_id,
         }
     }
 }
 
 impl TrackIn {
-    pub fn default_layer(&self) -> Option<SimulcastLayerProfile> {
+    pub fn default_rid(&self) -> Option<Rid> {
+        self.available_simulcast_layers.last().map(|l| l.rid)
+    }
+    pub fn highest_estimated_bps(&self) -> Option<u64> {
         self.available_simulcast_layers
             .iter()
-            .min_by_key(|l| l.max_br)
-            .copied()
-    }
-
-    pub fn highest_layer(&self) -> Option<SimulcastLayerProfile> {
-        self.available_simulcast_layers
-            .iter()
-            .max_by_key(|l| l.max_br)
-            .copied()
-    }
-}
-
-impl TrackOut {
-    pub fn chosen_rid(&self) -> Option<Rid> {
-        self.chosen_layer.map(|layer| layer.rid)
+            .filter_map(|layer| layer.estimate_bps())
+            .max()
     }
 }
 
@@ -190,12 +296,11 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         role: ClientRole,
         room_id: RoomId,
-        simulcast_tracks: Vec<SimulcastTrack>,
+        session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {
-        room_id: RoomId,
-        reply: SyncSender<Option<()>>,
+        reply: SyncSender<(RoomId, StreamKey)>,
     },
     DeleteRoom {
         room_id: RoomId,
@@ -206,9 +311,22 @@ pub enum SfuMessage {
         state: RoomState,
         reply: SyncSender<Option<()>>,
     },
-    GetViews {
+    GetRoom {
         room_id: RoomId,
-        reply: SyncSender<Option<usize>>,
+        reply: SyncSender<Option<(usize, RoomState)>>,
+    },
+    ResolveStreamKey {
+        hashed_stream_key: [u8; 32],
+        reply: SyncSender<Option<RoomId>>,
+    },
+    TerminateSession {
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<()>>,
+    },
+    ReissueStreamKey {
+        room_id: RoomId,
+        reply: SyncSender<Option<StreamKey>>,
     },
 }
 
@@ -261,36 +379,66 @@ pub enum LinkState {
 mod tests {
     use super::*;
 
+    impl BitrateEstimator {
+        pub(crate) fn with_estimated_bps(estimated_bps: u64) -> Self {
+            let now = Instant::now();
+            let accumulated_bytes = estimated_bps * BITRATE_ESTIMATION_SECOND / 8;
+            let mut history = VecDeque::new();
+            history.push_back((accumulated_bytes as usize, now));
+
+            BitrateEstimator {
+                history,
+                accumulated_bytes,
+                started_at: Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND)),
+                is_estimate_available: true,
+            }
+        }
+    }
+
+    fn simulcast_layer(rid: &str, estimated_bps: Option<u64>) -> SimulcastLayer {
+        let bitrate_estimator =
+            estimated_bps.map_or_else(BitrateEstimator::new, BitrateEstimator::with_estimated_bps);
+
+        SimulcastLayer {
+            rid: Rid::from(rid),
+            bitrate_estimator: RefCell::new(bitrate_estimator),
+        }
+    }
+
     #[test]
-    fn default_layer_selects_lowest_max_br_regardless_of_rid_and_order() {
+    fn push_reports_when_estimate_becomes_available_once() {
+        let mut estimator = BitrateEstimator::new();
+        let now = Instant::now();
+
+        assert!(matches!(estimator.push(1_000, now), PushOutcome::NoChange));
+
+        estimator.started_at = Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND + 1));
+
+        assert!(matches!(
+            estimator.push(1_000, now),
+            PushOutcome::EstimateBecameAvailable
+        ));
+        assert!(matches!(estimator.push(1_000, now), PushOutcome::NoChange));
+    }
+
+    #[test]
+    fn default_rid_selects_last_simulcast_layer() {
         let track = TrackIn {
             origin: ClientId(0),
             mid: Mid::from("video"),
             kind: MediaKind::Video,
             available_simulcast_layers: vec![
-                SimulcastLayerProfile {
-                    rid: Rid::from("first-high"),
-                    max_br: 2_000_000,
-                },
-                SimulcastLayerProfile {
-                    rid: Rid::from("middle-low"),
-                    max_br: 300_000,
-                },
-                SimulcastLayerProfile {
-                    rid: Rid::from("last-medium"),
-                    max_br: 1_000_000,
-                },
+                simulcast_layer("first", None),
+                simulcast_layer("middle", None),
+                simulcast_layer("last", None),
             ],
         };
 
-        let layer = track.default_layer().expect("default layer should exist");
-
-        assert_eq!(layer.rid, Rid::from("middle-low"));
-        assert_eq!(layer.max_br, 300_000);
+        assert_eq!(track.default_rid(), Some(Rid::from("last")));
     }
 
     #[test]
-    fn default_layer_returns_none_without_simulcast_layers() {
+    fn default_rid_returns_none_without_simulcast_layers() {
         let track = TrackIn {
             origin: ClientId(0),
             mid: Mid::from("video"),
@@ -298,6 +446,22 @@ mod tests {
             available_simulcast_layers: vec![],
         };
 
-        assert!(track.default_layer().is_none());
+        assert!(track.default_rid().is_none());
+    }
+
+    #[test]
+    fn highest_estimated_bps_ignores_layers_without_estimate() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![
+                simulcast_layer("low", Some(300_000)),
+                simulcast_layer("unknown", None),
+                simulcast_layer("high", Some(2_000_000)),
+            ],
+        };
+
+        assert_eq!(track.highest_estimated_bps(), Some(2_000_000));
     }
 }
