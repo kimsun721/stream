@@ -18,9 +18,9 @@ use tracing::{debug, error, info, warn};
 use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
-        BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole, LayerMode, LinkState,
-        PerfSample, PollResult, PushOutcome, RelayStatus, S2cDcPayload, SimulcastLayer, TrackIn,
-        TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
+        AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
+        LayerMode, LinkState, PerfSample, PollResult, PushOutcome, RelayStatus, S2cDcPayload,
+        SimulcastLayer, TrackIn, TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -303,15 +303,9 @@ impl Client {
     }
 
     pub fn request_sdp_offer(&mut self) -> ClientResult<()> {
-        let mut channel = self
-            .cid
-            .and_then(|id| self.rtc.channel(id))
-            .ok_or(ClientError::ChannelNotFound)?;
-
         let payload = S2cDcPayload::RequestOffer {};
-        let json = serde_json::to_string(&payload)?;
 
-        channel.write(false, json.as_bytes())?;
+        self.send_payload_via_dc(payload)?;
 
         Ok(())
     }
@@ -440,6 +434,7 @@ impl Client {
     ) -> ClientResult<()> {
         let answer = SdpAnswer::from_sdp_string(answer)?;
         let bitrate = self.last_twcc_bitrate;
+        let mut payloads = Vec::new();
 
         let mut bwe_target_layer: Option<(Mid, Rid)> = None;
 
@@ -452,6 +447,26 @@ impl Client {
                 };
                 track_out.state = TrackOutState::Open(mid);
 
+                if let Some(track_in) = track_out.track_in.upgrade() {
+                    let available_simulcast_layers: Vec<_> = track_in
+                        .available_simulcast_layers
+                        .iter()
+                        .map(|l| AvailableSimulcastLayer {
+                            rid: l.rid,
+                            bitrate_estimate: l.estimate_bps(),
+                        })
+                        .collect();
+
+                    let payload = S2cDcPayload::LayerStatus {
+                        mid,
+                        available_simulcast_layers,
+                        chosen_layer: track_out.chosen_rid,
+                        layer_mode: track_out.layer_mode,
+                    };
+
+                    payloads.push(payload);
+                }
+
                 if let Some(bitrate) = bitrate {
                     let bitrate = u128::from(bitrate.as_u64());
 
@@ -462,6 +477,12 @@ impl Client {
                     }
                 };
             }
+        }
+
+        for payload in payloads {
+            if let Err(e) = self.send_payload_via_dc(payload) {
+                error!("send_payload_via_dc failed error: {e}");
+            };
         }
 
         if let Some((mid, rid)) = bwe_target_layer {
@@ -651,17 +672,11 @@ impl Client {
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
 
-        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
-            let payload = S2cDcPayload::LayerChanged { rid, mid };
-            let Ok(json) = serde_json::to_string(&payload) else {
-                error!("serde_json to_string failed: client_id={}", self.id);
-                return Ok(());
-            };
+        let payload = S2cDcPayload::LayerChanged { rid, mid };
 
-            if let Err(e) = channel.write(false, json.as_bytes()) {
-                error!("send layer_changed via dc failed: {e}");
-            };
-        }
+        if let Err(e) = self.send_payload_via_dc(payload) {
+            error!("send_payload_via_dc failed error: {e}");
+        };
 
         Ok(())
     }
@@ -762,6 +777,19 @@ impl Client {
         loss_pct_avg /= len as f32;
 
         rtt_ms_avg < RTT_MS_CUTOFF && loss_pct_avg < LOSS_PCT_CUTOFF && len > MIN_SAMPLES_LEN
+    }
+
+    fn send_payload_via_dc(&mut self, payload: S2cDcPayload) -> ClientResult<()> {
+        let mut channel = self
+            .cid
+            .and_then(|id| self.rtc.channel(id))
+            .ok_or(ClientError::ChannelNotFound)?;
+
+        let json = serde_json::to_string(&payload)?;
+
+        channel.write(false, json.as_bytes())?;
+
+        Ok(())
     }
 }
 
