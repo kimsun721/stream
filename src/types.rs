@@ -243,7 +243,7 @@ pub enum TrackOutState {
     Open(Mid),
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
+#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerMode {
     Manual,
@@ -350,11 +350,30 @@ pub enum C2sDcPayload {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum S2cDcPayload {
     RequestOffer,
-    P2pOffer { sdp: String },
-    P2pAnswer { sdp: String },
+    P2pOffer {
+        sdp: String,
+    },
+    P2pAnswer {
+        sdp: String,
+    },
     Demote,
     ProbeAvailableUpload,
-    LayerChanged { rid: Rid, mid: Mid },
+    LayerChanged {
+        rid: Rid,
+        mid: Mid,
+    },
+    LayerStatus {
+        mid: Mid,
+        available_simulcast_layers: Vec<AvailableSimulcastLayer>,
+        chosen_layer: Option<Rid>,
+        layer_mode: LayerMode,
+    },
+}
+
+#[derive(Serialize)]
+pub struct AvailableSimulcastLayer {
+    pub rid: Rid,
+    pub bitrate_estimate: Option<u64>,
 }
 
 #[derive(Debug)]
