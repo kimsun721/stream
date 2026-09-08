@@ -1,4 +1,4 @@
-use std::{fs, sync::OnceLock, time::Duration};
+use std::{fs, net::IpAddr, sync::OnceLock, time::Duration};
 
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
@@ -6,7 +6,7 @@ use tracing::warn;
 
 pub struct WebConfig {
     pub api_key: String,
-    pub certificate: RustlsConfig,
+    pub certificate: Option<RustlsConfig>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -39,12 +39,30 @@ pub struct BitrateConfig {
     pub estimate_secs: u64,
 }
 
-#[derive(Deserialize, Clone, Copy, Default)]
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerConfig {
+    pub public_ip: Option<IpAddr>,
+    pub media_port: u16,
+    pub https_sdp_server_port: u16,
+    pub http_rest_server_port: u16,
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Deserialize, Clone, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Tuning {
     pub perf: PerfConfig,
     pub relay: RelayConfig,
     pub bitrate: BitrateConfig,
+    pub server: ServerConfig,
 }
 
 static CONFIG: OnceLock<Tuning> = OnceLock::new();
@@ -99,8 +117,6 @@ pub async fn load_web_config() -> WebConfig {
     };
 
     let api_key = load_from_env("API_KEY");
-    let cert_path = load_from_env("CERT_PATH");
-    let key_path = load_from_env("KEY_PATH");
 
     if api_key.len() < 16 {
         panic!(
@@ -109,11 +125,17 @@ pub async fn load_web_config() -> WebConfig {
         );
     }
 
-    let certificate = RustlsConfig::from_pem_file(cert_path, key_path)
-        .await
-        .unwrap_or_else(|e| {
-            panic!("failed to load certificate: {e}");
-        });
+    let certificate = match &tuning().server.tls {
+        Some(tls) => Some(
+            RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                .await
+                .unwrap_or_else(|e| panic!("failed to load certificate: {e}")),
+        ),
+        None => {
+            warn!("No [server.tls] section; serving plain HTTP");
+            None
+        }
+    };
 
     WebConfig {
         api_key,
@@ -153,6 +175,18 @@ impl Default for BitrateConfig {
             headroom_margin_percent: 10,
             upswitch_margin_percent: 10,
             estimate_secs: 3,
+        }
+    }
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig {
+            public_ip: None,
+            media_port: 40000,
+            https_sdp_server_port: 8443,
+            http_rest_server_port: 8080,
+            tls: None,
         }
     }
 }

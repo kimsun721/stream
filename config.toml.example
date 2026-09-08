@@ -2,6 +2,26 @@
 # so a partial file is fine. Copy to config.toml and change only what you need.
 # Deleting the file entirely runs on defaults.
 
+# Listen ports and the address clients are told to send media to.
+[server]
+# UDP port for media. Must be reachable from clients, so publish it when
+# running in a container.
+media_port = 40000
+# Address put in the ICE candidate. Absent falls back to the first usable
+# interface, which inside a container is the bridge address and unroutable
+# from outside. Set it for any deployment behind NAT or in a container.
+# public_ip = "203.0.113.10"
+# SDP and WHIP, called by clients directly.
+https_sdp_server_port = 8443
+# Room CRUD, called only by a trusted backend. Never expose it publicly.
+http_rest_server_port = 8080
+
+# Absent serves plain HTTP on both ports, which is correct when a reverse
+# proxy terminates TLS. Present requires both paths.
+# [server.tls]
+# cert_path = "certs/cer.pem"
+# key_path = "certs/key.pem"
+
 # Link quality of a viewer, judged over a sliding window of its perf reports.
 # Gates relay promotion and triggers demotion.
 [perf]

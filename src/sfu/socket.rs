@@ -1,6 +1,6 @@
 use std::{
     io::ErrorKind,
-    net::{SocketAddr, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, UdpSocket},
     time::Instant,
 };
 
@@ -9,14 +9,20 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
-use crate::{sfu::error::SocketResult, utils};
+use crate::{config::tuning, sfu::error::SocketResult, utils};
 
 pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
-    let host_addr = utils::addr::select_host_address();
-    let socket = UdpSocket::bind(format!("{host_addr}:0")).expect("binding a random UDP port");
-    let addr = socket.local_addr().expect("a local socket address");
+    let port = tuning().server.media_port;
 
-    (addr, socket)
+    let socket = UdpSocket::bind(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port))
+        .unwrap_or_else(|e| panic!("binding UDP port {port}: {e}"));
+
+    let public_ip = tuning()
+        .server
+        .public_ip
+        .unwrap_or_else(utils::addr::select_host_address);
+
+    (SocketAddr::new(public_ip, port), socket)
 }
 
 pub fn read_socket_input<'a>(

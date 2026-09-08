@@ -1,5 +1,5 @@
 use std::{
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     sync::mpsc::{self, SyncSender},
     time::Instant,
 };
@@ -100,26 +100,41 @@ pub async fn run(
         .with_state(api_state);
 
     let https_server = tokio::spawn(async move {
-        axum_server::bind_rustls(
-            "0.0.0.0:8080"
-                .parse::<SocketAddr>()
-                .expect("bind to 0.0.0.0:8080"),
-            config.certificate,
-        )
-        .serve(https_api.into_make_service())
-        .await
-        .expect("start to 0.0.0.0:8080");
+        let sdp_addr = SocketAddr::new(
+            Ipv4Addr::UNSPECIFIED.into(),
+            tuning().server.https_sdp_server_port,
+        );
+
+        match config.certificate {
+            Some(certificate) => axum_server::bind_rustls(sdp_addr, certificate)
+                .serve(https_api.into_make_service())
+                .await
+                .unwrap_or_else(|e| panic!("serving sdp api on {sdp_addr}; error={e}")),
+            None => {
+                let listener = TcpListener::bind(sdp_addr)
+                    .await
+                    .unwrap_or_else(|e| panic!("binding {sdp_addr}; error={e}"));
+
+                axum::serve(listener, https_api)
+                    .await
+                    .unwrap_or_else(|e| panic!("serving sdp api on {sdp_addr}; error={e}"));
+            }
+        }
     });
 
     let http_server = tokio::spawn(async move {
-        axum::serve(
-            TcpListener::bind("0.0.0.0:8443")
-                .await
-                .expect("bind to 0.0.0.0:8443"),
-            http_api,
-        )
-        .await
-        .expect("start to 0.0.0.0:8443");
+        let rest_addr = SocketAddr::new(
+            Ipv4Addr::UNSPECIFIED.into(),
+            tuning().server.http_rest_server_port,
+        );
+
+        let listener = TcpListener::bind(rest_addr)
+            .await
+            .unwrap_or_else(|e| panic!("binding {rest_addr}; error={e}"));
+
+        axum::serve(listener, http_api)
+            .await
+            .unwrap_or_else(|e| panic!("serving rest api on {rest_addr}; error={e}"));
     });
 
     let _ = tokio::join!(https_server, http_server);
