@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         mpsc::SyncSender,
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use axum::http::StatusCode;
@@ -23,9 +23,10 @@ use str0m::{
 use derive_more::{Display, Eq};
 use uuid::Uuid;
 
-use crate::utils::string::{hash_string, random_string};
-
-const BITRATE_ESTIMATION_SECOND: u64 = 3;
+use crate::{
+    config::tuning,
+    utils::string::{hash_string, random_string},
+};
 
 const STREAM_KEY_LEN: usize = 32;
 const ROOM_ID_LEN: usize = 12;
@@ -133,7 +134,7 @@ impl BitrateEstimator {
 
         if self
             .started_at
-            .is_some_and(|at| at.elapsed() >= Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+            .is_some_and(|at| at.elapsed() >= tuning().bitrate.estimation_interval())
         {
             if self.is_estimate_available {
                 PushOutcome::NoChange
@@ -153,17 +154,17 @@ impl BitrateEstimator {
         if self.history.is_empty()
             || self
                 .started_at
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(BITRATE_ESTIMATION_SECOND))
+                .is_some_and(|at| at.elapsed() < tuning().bitrate.estimation_interval())
         {
             None
         } else {
-            Some(self.accumulated_bytes * 8 / BITRATE_ESTIMATION_SECOND)
+            Some(self.accumulated_bytes * 8 / tuning().bitrate.estimate_secs)
         }
     }
 
     fn remove_expired(&mut self) {
         while let Some((bytes, timestamp)) = self.history.front() {
-            if timestamp.elapsed() > Duration::from_secs(BITRATE_ESTIMATION_SECOND) {
+            if timestamp.elapsed() > tuning().bitrate.estimation_interval() {
                 self.accumulated_bytes -= *bytes as u64;
                 self.history.pop_front();
             } else {
@@ -396,19 +397,21 @@ pub enum LinkState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     impl BitrateEstimator {
         pub(crate) fn with_estimated_bps(estimated_bps: u64) -> Self {
             let now = Instant::now();
-            let accumulated_bytes = estimated_bps * BITRATE_ESTIMATION_SECOND / 8;
+            let accumulated_bytes = estimated_bps * tuning().bitrate.estimate_secs / 8;
             let mut history = VecDeque::new();
             history.push_back((accumulated_bytes as usize, now));
 
             BitrateEstimator {
                 history,
                 accumulated_bytes,
-                started_at: Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND)),
+                started_at: Some(now - tuning().bitrate.estimation_interval()),
                 is_estimate_available: true,
             }
         }
@@ -431,7 +434,7 @@ mod tests {
 
         assert!(matches!(estimator.push(1_000, now), PushOutcome::NoChange));
 
-        estimator.started_at = Some(now - Duration::from_secs(BITRATE_ESTIMATION_SECOND + 1));
+        estimator.started_at = Some(now - Duration::from_secs(tuning().bitrate.estimate_secs + 1));
 
         assert!(matches!(
             estimator.push(1_000, now),

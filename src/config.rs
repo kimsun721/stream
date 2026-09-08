@@ -1,4 +1,4 @@
-use std::{fs, sync::OnceLock};
+use std::{fs, sync::OnceLock, time::Duration};
 
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
@@ -10,7 +10,7 @@ pub struct WebConfig {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PerfConfig {
     pub window_max_age_secs: u64,
     pub window_max_len: usize,
@@ -20,7 +20,7 @@ pub struct PerfConfig {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct RelayConfig {
     pub probe_timeout_secs: u64,
     pub probe_interval_secs: u64,
@@ -30,16 +30,17 @@ pub struct RelayConfig {
 }
 
 #[derive(Deserialize, Clone, Copy)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BitrateConfig {
     pub initial_mbps: u64,
     pub desired_mbps: u64,
     pub headroom_margin_percent: u128,
     pub upswitch_margin_percent: u128,
+    pub estimate_secs: u64,
 }
 
 #[derive(Deserialize, Clone, Copy, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Tuning {
     pub perf: PerfConfig,
     pub relay: RelayConfig,
@@ -56,6 +57,32 @@ pub fn tuning() -> &'static Tuning {
             Tuning::default()
         }
     })
+}
+
+impl RelayConfig {
+    pub fn probe_timeout(&self) -> Duration {
+        Duration::from_secs(self.probe_timeout_secs)
+    }
+
+    pub fn probe_interval(&self) -> Duration {
+        Duration::from_secs(self.probe_interval_secs)
+    }
+
+    pub fn min_connection_age(&self) -> Duration {
+        Duration::from_secs(self.min_connection_age_secs)
+    }
+}
+
+impl PerfConfig {
+    pub fn window_max_age(&self) -> Duration {
+        Duration::from_secs(self.window_max_age_secs)
+    }
+}
+
+impl BitrateConfig {
+    pub fn estimation_interval(&self) -> Duration {
+        Duration::from_secs(self.estimate_secs)
+    }
 }
 
 pub fn init_tuning() {
@@ -125,6 +152,7 @@ impl Default for BitrateConfig {
             desired_mbps: 10,
             headroom_margin_percent: 10,
             upswitch_margin_percent: 10,
+            estimate_secs: 3,
         }
     }
 }

@@ -34,13 +34,10 @@ use tracing::error;
 use uuid::Uuid;
 
 use crate::{
-    config::WebConfig,
+    config::{WebConfig, tuning},
     types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
     utils::string::hash_string,
 };
-
-const BWE_INITIAL_BITRATE_MBPS: u64 = 4;
-const BWE_DESIRED_BITRATE_MPBS: u64 = 10;
 
 #[derive(Clone)]
 struct SdpState {
@@ -443,7 +440,7 @@ fn create_rtc_from_offer(
         let mut builder = Rtc::builder();
 
         if role == ClientRole::Viewer {
-            builder = builder.enable_bwe(Some(Bitrate::mbps(BWE_INITIAL_BITRATE_MBPS)));
+            builder = builder.enable_bwe(Some(Bitrate::mbps(tuning().bitrate.initial_mbps)));
         }
 
         builder.build(Instant::now())
@@ -451,7 +448,7 @@ fn create_rtc_from_offer(
 
     if role == ClientRole::Viewer {
         rtc.bwe()
-            .set_desired_bitrate(Bitrate::mbps(BWE_DESIRED_BITRATE_MPBS));
+            .set_desired_bitrate(Bitrate::mbps(tuning().bitrate.desired_mbps));
     }
 
     rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
