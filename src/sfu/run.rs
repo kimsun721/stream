@@ -17,6 +17,8 @@ use crate::{
     },
 };
 
+const MAX_SOCKET_READ_COUNT: u64 = 100;
+
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
@@ -296,22 +298,37 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         }
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
+        let mut socket_read_count = 0;
 
         socket
             .set_read_timeout(Some(timeout_duration))
             .expect("setting socket read timeout");
 
-        if let Ok(Some(input)) = read_socket_input(&socket, &mut buf) {
-            let client = rooms
-                .iter_mut()
-                .flat_map(|(_, room)| room.clients.iter_mut())
-                .find(|c| c.rtc.accepts(&input));
+        if let Err(e) = socket.set_nonblocking(false) {
+            error!("socket set_nonblocking error={e}");
+        } else {
+            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf) {
+                route_socket_input(&mut rooms, input);
+                socket_read_count += 1;
+            }
+        }
 
-            if let Some(client) = client {
-                client.handle_input(input);
-            } else {
-                debug!("No client accepts UDP input");
-            };
+        if let Err(e) = socket.set_nonblocking(true) {
+            error!("socket set_nonblocking error={e}");
+        } else {
+            loop {
+                if socket_read_count > MAX_SOCKET_READ_COUNT {
+                    break;
+                }
+
+                match read_socket_input(&socket, &mut buf) {
+                    Ok(Some(input)) => {
+                        route_socket_input(&mut rooms, input);
+                        socket_read_count += 1;
+                    }
+                    _ => break,
+                }
+            }
         };
 
         let now = Instant::now();
@@ -321,4 +338,17 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
         }
     }
+}
+
+fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
+    let client = rooms
+        .iter_mut()
+        .flat_map(|(_, room)| room.clients.iter_mut())
+        .find(|c| c.rtc.accepts(&input));
+
+    if let Some(client) = client {
+        client.handle_input(input);
+    } else {
+        debug!("No client accepts UDP input");
+    };
 }

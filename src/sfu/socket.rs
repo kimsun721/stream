@@ -9,6 +9,8 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
+use tracing::error;
+
 use crate::{config::tuning, sfu::error::SocketResult, utils};
 
 pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
@@ -46,7 +48,10 @@ pub fn read_socket_input<'a>(
 
         Err(e) => match e.kind() {
             ErrorKind::WouldBlock | ErrorKind::TimedOut => None,
-            _ => return Err(e.into()),
+            _ => {
+                error!("read_socket_input error={e}");
+                return Err(e.into());
+            }
         },
     };
     Ok(input)
