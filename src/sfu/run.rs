@@ -9,6 +9,7 @@ use str0m::Input;
 use tracing::{debug, error};
 
 use crate::{
+    config::tuning,
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
         ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
@@ -212,9 +213,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 };
             }
 
-            const MAX_PROBE_PENDING: Duration = Duration::from_secs(60);
-            const MIN_PROBE_INTERVAL: Duration = Duration::from_secs(120);
-
             for c in room.clients.iter_mut().filter(|c| {
                 matches!(c.role, ClientRole::Viewer)
                     && !c.perf.is_empty()
@@ -222,7 +220,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }) {
                 match c.available_upload {
                     Some(UploadProbeResult::Failed { at }) => {
-                        if at.elapsed() > MIN_PROBE_INTERVAL && c.is_perf_healthy() {
+                        if at.elapsed() > tuning().relay.probe_interval() && c.is_perf_healthy() {
                             c.probe_available_upload()
                         }
                     }
@@ -232,7 +230,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         }
                     }
                     Some(UploadProbeResult::Probing { probed_at })
-                        if probed_at.elapsed() > MAX_PROBE_PENDING =>
+                        if probed_at.elapsed() > tuning().relay.probe_timeout() =>
                     {
                         c.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
                     }
@@ -240,9 +238,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     _ => (),
                 }
             }
-
-            const AVAILABLE_UPLOAD_CUTOFF: u32 = 13000;
-            const MIN_CONNECTION_AGE: Duration = Duration::from_secs(300);
 
             let relay_ids: Vec<ClientId> = room
                 .clients
@@ -255,9 +250,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         return None;
                     };
 
-                    if available_upload_kbps > AVAILABLE_UPLOAD_CUTOFF
+                    if available_upload_kbps > tuning().relay.available_upload_cutoff_kbps
                         && c.relay_status.is_none()
-                        && c.connected_at.elapsed() >= MIN_CONNECTION_AGE
+                        && c.connected_at.elapsed() >= tuning().relay.min_connection_age()
                         && c.is_perf_healthy()
                     {
                         return Some(c.id);
@@ -271,8 +266,6 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 room.promote(relay_id);
             }
 
-            const RELAY_OUTGOING_KBPS_CUTOFF: u32 = 7000;
-
             let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
                 .clients
                 .iter()
@@ -283,7 +276,9 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
 
                     let relay_outgoing_kbps = c.relay_outgoing_kbps?;
 
-                    if relay_outgoing_kbps < RELAY_OUTGOING_KBPS_CUTOFF || !c.is_perf_healthy() {
+                    if relay_outgoing_kbps < tuning().relay.outgoing_cutoff_kbps
+                        || !c.is_perf_healthy()
+                    {
                         return Some((c.id, leaf));
                     };
 

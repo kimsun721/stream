@@ -12,12 +12,13 @@ mod utils;
 #[tokio::main]
 async fn main() {
     utils::log::init_log();
-    let config = config::load().await;
+    config::init_tuning();
+
+    let config = config::load_web_config().await;
 
     from_feature_flags().install_process_default();
 
     let (addr, socket) = sfu::socket::bind_udp_socket();
-
     let (tx, rx) = mpsc::sync_channel::<SfuMessage>(32);
 
     std::thread::spawn(move || {

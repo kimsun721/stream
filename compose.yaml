@@ -1,0 +1,18 @@
+services:
+  stream:
+    build: .
+    image: stream:latest
+    restart: unless-stopped
+    environment:
+      API_KEY: ${API_KEY:?set API_KEY in .env or the environment}
+    ports:
+      # /udp is required, or signalling succeeds and no media arrives.
+      - "40000:40000/udp"
+      - "8443:8443"
+      # Room CRUD. Keep it off the internet.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Create the files before uncommenting, or Docker makes directories.
+      # - ./config.toml:/app/config.toml:ro
+      # - ./certs:/app/certs:ro
+      []

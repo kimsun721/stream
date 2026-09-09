@@ -1,0 +1,63 @@
+# Tuning for the SFU. Every key is optional and falls back to the value shown here,
+# so a partial file is fine. Copy to config.toml and change only what you need.
+# Deleting the file entirely runs on defaults.
+
+# Listen ports and the address clients are told to send media to.
+[server]
+# UDP port for media. Must be reachable from clients, so publish it when
+# running in a container.
+media_port = 40000
+# Address put in the ICE candidate. Absent falls back to the first usable
+# interface, which inside a container is the bridge address and unroutable
+# from outside. Set it for any deployment behind NAT or in a container.
+# public_ip = "203.0.113.10"
+# SDP and WHIP, called by clients directly.
+https_sdp_server_port = 8443
+# Room CRUD, called only by a trusted backend. Never expose it publicly.
+http_rest_server_port = 8080
+
+# Absent serves plain HTTP on both ports, which is correct when a reverse
+# proxy terminates TLS. Present requires both paths.
+# [server.tls]
+# cert_path = "certs/cer.pem"
+# key_path = "certs/key.pem"
+
+# Link quality of a viewer, judged over a sliding window of its perf reports.
+# Gates relay promotion and triggers demotion.
+[perf]
+# How long a report stays in the window.
+window_max_age_secs = 300
+# Hard cap on window length, so a chatty client cannot grow it without bound.
+window_max_len = 1000
+# A viewer is healthy while its windowed averages stay under both cutoffs.
+rtt_ms_cutoff = 30
+loss_pct_cutoff = 10.0
+# Reports required before the window is trusted at all.
+min_samples_len = 200
+
+# Promotion and demotion of viewers acting as P2P relays.
+# See docs/decisions/0009-auto-promote-demote-policy.md.
+[relay]
+# A requested upload probe that goes unanswered this long is marked failed.
+probe_timeout_secs = 60
+# Backoff before probing the same viewer again after a failure.
+probe_interval_secs = 120
+# How long a viewer must stay connected before it is considered stable.
+min_connection_age_secs = 300
+# Probed upload a candidate must clear to be promoted.
+available_upload_cutoff_kbps = 13000
+# Measured outbound rate a relay must sustain, or it is demoted.
+outgoing_cutoff_kbps = 7000
+
+# Bandwidth estimation and simulcast layer selection for viewers.
+[bitrate]
+# Starting estimate before TWCC has data, and the ceiling the server asks for.
+initial_mbps = 4
+desired_mbps = 10
+# Slack kept below the estimate so a layer is not run right at the limit.
+headroom_margin_percent = 10
+# Extra margin required before switching up, which keeps layers from flapping.
+upswitch_margin_percent = 10
+# Measurement window for the per layer bitrate estimator. Shorter reacts faster
+# and is noisier.
+estimate_secs = 3

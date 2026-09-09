@@ -16,6 +16,7 @@ use str0m::{
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    config::tuning,
     sfu::error::{ClientError, ClientResult},
     types::{
         AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
@@ -23,9 +24,6 @@ use crate::{
         SimulcastLayer, TrackIn, TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
-
-const HEADROOM_MARGIN_PERCENT: u128 = 10;
-const UPSWITCH_MARGIN_PERCENT: u128 = 10;
 
 impl Client {
     pub fn handle_input(&mut self, input: Input) {
@@ -322,8 +320,10 @@ impl Client {
         });
 
         if let Some(mut total_bitrate) = total_bitrate {
-            let bitrate_margin =
-                total_bitrate * (HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT) / 100;
+            let bitrate_margin = total_bitrate
+                * (tuning().bitrate.headroom_margin_percent
+                    + tuning().bitrate.upswitch_margin_percent)
+                / 100;
 
             total_bitrate += bitrate_margin;
 
@@ -714,9 +714,6 @@ impl Client {
     }
 
     pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
-        const MAX_AGE: Duration = Duration::from_secs(60 * 5);
-        const MAX_LEN: usize = 1000;
-
         let now = Instant::now();
 
         self.perf.push_back(PerfSample {
@@ -725,11 +722,10 @@ impl Client {
             timestamp: now,
         });
 
-        while self
-            .perf
-            .front()
-            .is_some_and(|p| now.duration_since(p.timestamp) > MAX_AGE || self.perf.len() > MAX_LEN)
-        {
+        while self.perf.front().is_some_and(|p| {
+            now.duration_since(p.timestamp) > tuning().perf.window_max_age()
+                || self.perf.len() > tuning().perf.window_max_len
+        }) {
             self.perf.pop_front();
         }
 
@@ -756,10 +752,6 @@ impl Client {
     }
 
     pub fn is_perf_healthy(&self) -> bool {
-        const RTT_MS_CUTOFF: u32 = 30;
-        const LOSS_PCT_CUTOFF: f32 = 10.0;
-        const MIN_SAMPLES_LEN: u32 = 200;
-
         if self.perf.is_empty() {
             return false;
         }
@@ -776,7 +768,9 @@ impl Client {
         rtt_ms_avg /= len;
         loss_pct_avg /= len as f32;
 
-        rtt_ms_avg < RTT_MS_CUTOFF && loss_pct_avg < LOSS_PCT_CUTOFF && len > MIN_SAMPLES_LEN
+        rtt_ms_avg < tuning().perf.rtt_ms_cutoff
+            && loss_pct_avg < tuning().perf.loss_pct_cutoff
+            && len > tuning().perf.min_samples_len
     }
 
     fn send_payload_via_dc(&mut self, payload: S2cDcPayload) -> ClientResult<()> {
@@ -812,7 +806,7 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
         let rid = estimates
             .iter()
             .filter(|(_, estimate)| {
-                is_layer_threshold_met(bitrate, *estimate, HEADROOM_MARGIN_PERCENT)
+                is_layer_threshold_met(bitrate, *estimate, tuning().bitrate.headroom_margin_percent)
             })
             .max_by_key(|(_, estimate)| estimate)
             .or_else(|| estimates.iter().min_by_key(|(_, estimate)| estimate))
@@ -830,7 +824,8 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
                 if is_layer_threshold_met(
                     bitrate,
                     *estimate,
-                    HEADROOM_MARGIN_PERCENT + UPSWITCH_MARGIN_PERCENT,
+                    tuning().bitrate.headroom_margin_percent
+                        + tuning().bitrate.upswitch_margin_percent,
                 ) {
                     Some(*rid)
                 } else {
