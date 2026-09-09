@@ -1,0 +1,6 @@
+target
+.git
+.env
+config.toml
+certs
+docs
