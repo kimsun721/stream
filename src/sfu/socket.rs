@@ -9,6 +9,8 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
+use tracing::error;
+
 use crate::{config::tuning, sfu::error::SocketResult, utils};
 
 pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
@@ -27,26 +29,29 @@ pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
 
 pub fn read_socket_input<'a>(
     socket: &UdpSocket,
-    buf: &'a mut Vec<u8>,
+    buf: &'a mut [u8],
+    destination: SocketAddr,
 ) -> SocketResult<Option<Input<'a>>> {
-    buf.resize(2000, 0);
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
-            buf.truncate(n);
+            let data = &buf[..n];
             Some(Input::Receive(
                 Instant::now(),
                 Receive {
                     proto: Protocol::Udp,
                     source,
-                    destination: socket.local_addr()?,
-                    contents: buf.as_slice().try_into()?,
+                    destination,
+                    contents: data.try_into()?,
                 },
             ))
         }
 
         Err(e) => match e.kind() {
             ErrorKind::WouldBlock | ErrorKind::TimedOut => None,
-            _ => return Err(e.into()),
+            _ => {
+                error!("read_socket_input error={e}");
+                return Err(e.into());
+            }
         },
     };
     Ok(input)
