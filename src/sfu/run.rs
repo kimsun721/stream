@@ -21,8 +21,9 @@ const MAX_SOCKET_READ_COUNT: u64 = 100;
 
 pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
-
     let mut rooms = Rooms::new();
+
+    let socket_destination = socket.local_addr().expect("socket local address");
 
     loop {
         while let Ok(message) = rx.try_recv() {
@@ -307,7 +308,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         if let Err(e) = socket.set_nonblocking(false) {
             error!("socket set_nonblocking error={e}");
         } else {
-            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf) {
+            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, socket_destination) {
                 route_socket_input(&mut rooms, input);
                 socket_read_count += 1;
             }
@@ -321,7 +322,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     break;
                 }
 
-                match read_socket_input(&socket, &mut buf) {
+                match read_socket_input(&socket, &mut buf, socket_destination) {
                     Ok(Some(input)) => {
                         route_socket_input(&mut rooms, input);
                         socket_read_count += 1;

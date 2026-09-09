@@ -29,19 +29,19 @@ pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
 
 pub fn read_socket_input<'a>(
     socket: &UdpSocket,
-    buf: &'a mut Vec<u8>,
+    buf: &'a mut [u8],
+    destination: SocketAddr,
 ) -> SocketResult<Option<Input<'a>>> {
-    buf.resize(2000, 0);
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
-            buf.truncate(n);
+            let data = &buf[..n];
             Some(Input::Receive(
                 Instant::now(),
                 Receive {
                     proto: Protocol::Udp,
                     source,
-                    destination: socket.local_addr()?,
-                    contents: buf.as_slice().try_into()?,
+                    destination,
+                    contents: data.try_into()?,
                 },
             ))
         }
