@@ -22,7 +22,7 @@ async fn main() {
     let (tx, rx) = mpsc::sync_channel::<SfuMessage>(32);
 
     std::thread::spawn(move || {
-        if let Err(e) = sfu::run::run(rx, socket) {
+        if let Err(e) = sfu::run::run(rx, socket, addr) {
             error!("udp error : {}", e);
         };
     });

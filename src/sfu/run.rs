@@ -1,5 +1,5 @@
 use std::{
-    net::UdpSocket,
+    net::{SocketAddr, UdpSocket},
     rc::Rc,
     sync::mpsc::Receiver,
     time::{Duration, Instant},
@@ -19,11 +19,17 @@ use crate::{
 
 const MAX_SOCKET_READ_COUNT: u64 = 100;
 
-pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
+/// `advertised_addr` is the address handed to clients in ICE candidates, which
+/// is not the bind address: the socket listens on every interface so a
+/// container can receive, but str0m matches an incoming datagram to a local
+/// candidate by its destination, and `0.0.0.0` matches none of them.
+pub fn run(
+    rx: Receiver<SfuMessage>,
+    socket: UdpSocket,
+    advertised_addr: SocketAddr,
+) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
-
-    let socket_destination = socket.local_addr().expect("socket local address");
 
     loop {
         while let Ok(message) = rx.try_recv() {
@@ -308,7 +314,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         if let Err(e) = socket.set_nonblocking(false) {
             error!("socket set_nonblocking error={e}");
         } else {
-            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, socket_destination) {
+            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, advertised_addr) {
                 route_socket_input(&mut rooms, input);
                 socket_read_count += 1;
             }
@@ -322,7 +328,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     break;
                 }
 
-                match read_socket_input(&socket, &mut buf, socket_destination) {
+                match read_socket_input(&socket, &mut buf, advertised_addr) {
                     Ok(Some(input)) => {
                         route_socket_input(&mut rooms, input);
                         socket_read_count += 1;
