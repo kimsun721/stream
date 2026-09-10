@@ -168,3 +168,31 @@ async fn the_server_stops_sending_to_a_connected_leaf() {
 fn received_media(peer: &mut Peer) -> bool {
     peer.run_until(SETTLE, |event| matches!(event, Event::MediaData(_)))
 }
+
+/// Nothing times the peer link out, so a handshake that never completes leaves
+/// the pair joined for good and takes both viewers out of the candidate pool.
+/// What it must not do is cost the leaf its stream: the server only skips a leaf
+/// once the leaf itself reports the link up.
+#[tokio::test]
+async fn a_leaf_keeps_its_stream_while_the_peer_link_hangs() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let (_publisher, mut candidate, mut leaf) =
+        room_with_two_viewers(&server, &client, healthy(PLENTY_OF_UPLOAD)).await;
+
+    assert!(
+        run_both(&mut candidate, &mut leaf, PROMOTE, |event| dc_message(
+            event,
+            "p2p_offer"
+        )
+        .is_some()),
+        "the offer never reached the leaf"
+    );
+
+    // No p2p_connected follows, so the link stays Connecting.
+    run_both(&mut candidate, &mut leaf, SETTLE * 3, |_| false);
+
+    assert!(received_media(&mut leaf), "the leaf lost its stream");
+    assert!(received_media(&mut candidate), "the relay lost its stream");
+}
