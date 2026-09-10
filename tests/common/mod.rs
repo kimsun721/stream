@@ -58,9 +58,12 @@ fn spawn_server() -> Server {
     let api_key = "integration-test-api-key".to_string();
 
     // The server reads config.toml from its working directory, so give it one
-    // of its own rather than picking up the repository's. The bitrate window is
-    // shortened because every test that waits on a layer estimate waits a full
-    // window for it.
+    // of its own rather than picking up the repository's.
+    //
+    // Only the knobs that would otherwise put a test in minutes are scaled down,
+    // and none to zero: a test that disables a gate stops proving the gate
+    // works. The value cutoffs stay at their defaults and the clients report
+    // numbers on either side of them.
     let dir = std::env::temp_dir().join(format!("stream-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     std::fs::write(
@@ -73,7 +76,13 @@ fn spawn_server() -> Server {
              http_rest_server_port = {control_port}\n\
              \n\
              [bitrate]\n\
-             estimate_secs = 1\n"
+             estimate_secs = 1\n\
+             \n\
+             [perf]\n\
+             min_samples_len = 5\n\
+             \n\
+             [relay]\n\
+             min_connection_age_secs = 2\n"
         ),
     )
     .expect("write config");
@@ -391,6 +400,7 @@ pub struct Peer {
     pub session_location: Option<String>,
     media_mid: Option<Mid>,
     media: Option<MediaSource>,
+    relay: Option<RelayClient>,
 }
 
 impl Peer {
@@ -402,6 +412,7 @@ impl Peer {
             session_location: None,
             media_mid: None,
             media: None,
+            relay: None,
         }
     }
 
@@ -413,6 +424,8 @@ impl Peer {
 
         while Instant::now() < give_up_at {
             let mut offers = Vec::new();
+            let mut replies = Vec::new();
+            let mut stopped = false;
 
             let timeout = loop {
                 match self.rtc.poll_output().expect("poll_output") {
@@ -428,13 +441,19 @@ impl Peer {
                             Event::ChannelData(data) => {
                                 if let Ok(offer) = serde_json::from_slice::<SdpOffer>(&data.data) {
                                     offers.push(offer);
+                                } else if let Ok(value) =
+                                    serde_json::from_slice::<Value>(&data.data)
+                                    && let Some(reply) = relay_reply(&value, self.relay.as_ref())
+                                {
+                                    replies.push(reply);
                                 }
                             }
                             _ => (),
                         }
 
                         if stop(&event) {
-                            return true;
+                            stopped = true;
+                            break Instant::now();
                         }
                     }
                 }
@@ -450,6 +469,16 @@ impl Peer {
                 self.send(&serde_json::to_value(&answer).expect("answer value"));
             }
 
+            for reply in replies {
+                self.send(&reply);
+            }
+
+            if stopped {
+                return true;
+            }
+
+            let report_at = self.report_perf();
+
             let media_at = match &mut self.media {
                 Some(media) => {
                     media.pump(&mut self.rtc);
@@ -463,7 +492,7 @@ impl Peer {
                 .saturating_duration_since(Instant::now())
                 .min(give_up_at.saturating_duration_since(Instant::now()));
 
-            if let Some(at) = media_at {
+            for at in [media_at, report_at].into_iter().flatten() {
                 wait = wait.min(at.saturating_duration_since(Instant::now()));
             }
 
@@ -498,6 +527,43 @@ impl Peer {
         }
 
         false
+    }
+
+    /// Reports the samples the server needs before it will consider promoting
+    /// this peer to a relay. A real client measures them; a test states them.
+    pub fn advertise_relay_capacity(&mut self, capacity: RelayCapacity) {
+        self.relay = Some(RelayClient {
+            capacity,
+            next_report_at: Instant::now(),
+        });
+    }
+
+    fn report_perf(&mut self) -> Option<Instant> {
+        let now = Instant::now();
+        self.channel?;
+        let relay = self.relay.as_mut()?;
+
+        if now.saturating_duration_since(relay.next_report_at) > MAX_CATCH_UP {
+            relay.next_report_at = now;
+        }
+
+        let mut reports = Vec::new();
+        while relay.next_report_at <= now {
+            reports.push(json!({
+                "type": "perf_report",
+                "rtt_ms": relay.capacity.rtt_ms,
+                "loss_pct": relay.capacity.loss_pct,
+            }));
+            relay.next_report_at += PERF_REPORT_INTERVAL;
+        }
+
+        let next_at = relay.next_report_at;
+
+        for report in reports {
+            self.send(&report);
+        }
+
+        Some(next_at)
     }
 
     /// Starts sending on rids already declared at connect time. Layers not named
@@ -535,6 +601,37 @@ impl Peer {
             stop,
             handle: Some(handle),
         }
+    }
+}
+
+pub struct RelayCapacity {
+    pub upload_kbps: u32,
+    pub rtt_ms: u32,
+    pub loss_pct: f32,
+}
+
+struct RelayClient {
+    capacity: RelayCapacity,
+    next_report_at: Instant,
+}
+
+const PERF_REPORT_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The server forwards peer to peer SDP between two clients without reading it,
+/// so a test that only asserts on what the server does never needs a real one.
+const OPAQUE_SDP: &str = "v=0\r\n";
+
+/// The half of the relay protocol every client answers the same way. Whether a
+/// peer is ever asked depends on what the server decided about it.
+fn relay_reply(message: &Value, relay: Option<&RelayClient>) -> Option<Value> {
+    match message.get("type")?.as_str()? {
+        "probe_available_upload" => Some(json!({
+            "type": "available_upload",
+            "available_upload_kbps": relay?.capacity.upload_kbps,
+        })),
+        "request_offer" => Some(json!({ "type": "p2p_offer", "sdp": OPAQUE_SDP })),
+        "p2p_offer" => Some(json!({ "type": "p2p_answer", "sdp": OPAQUE_SDP })),
+        _ => None,
     }
 }
 
