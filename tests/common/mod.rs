@@ -1,5 +1,6 @@
 //! Talks to the server over HTTP and UDP only, so it links nothing from the
 //! binary and can point at a remote host.
+#![allow(dead_code)]
 
 use std::{
     io::ErrorKind,
@@ -14,6 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use str0m::{
@@ -136,6 +138,12 @@ pub struct CreatedRoom {
     pub stream_key: String,
 }
 
+#[derive(Deserialize, Debug, PartialEq)]
+pub struct RoomView {
+    pub views: usize,
+    pub state: String,
+}
+
 impl Server {
     pub fn sdp_url(&self, path: &str) -> String {
         format!("http://{}:{}{}", self.host, self.sdp_port, path)
@@ -172,6 +180,47 @@ impl Server {
             .expect("PATCH room status");
     }
 
+    pub async fn set_idle(&self, client: &reqwest::Client, room_id: &str) -> StatusCode {
+        client
+            .patch(self.control_url(&format!("/rooms/{room_id}")))
+            .bearer_auth(&self.api_key)
+            .json(&json!({ "state": "Idle" }))
+            .send()
+            .await
+            .expect("PATCH room")
+            .status()
+    }
+
+    pub async fn room(&self, client: &reqwest::Client, room_id: &str) -> RoomView {
+        client
+            .get(self.control_url(&format!("/rooms/{room_id}")))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .expect("GET room")
+            .error_for_status()
+            .expect("GET room status")
+            .json()
+            .await
+            .expect("room json")
+    }
+
+    /// `location` is the path the WHIP response handed back.
+    pub async fn delete_session(
+        &self,
+        client: &reqwest::Client,
+        stream_key: &str,
+        location: &str,
+    ) -> StatusCode {
+        client
+            .delete(self.sdp_url(location))
+            .bearer_auth(stream_key)
+            .send()
+            .await
+            .expect("DELETE session")
+            .status()
+    }
+
     pub async fn create_live_room(&self, client: &reqwest::Client) -> CreatedRoom {
         let room = self.create_room(client).await;
         self.set_live(client, &room.room_id).await;
@@ -205,7 +254,7 @@ impl Server {
         );
         let (offer, pending) = change.apply().expect("offer has changes");
 
-        let body = client
+        let response = client
             .post(self.sdp_url("/whip"))
             .bearer_auth(stream_key)
             .header("Content-Type", "application/sdp")
@@ -214,10 +263,17 @@ impl Server {
             .await
             .expect("POST /whip")
             .error_for_status()
-            .expect("POST /whip status")
-            .text()
-            .await
-            .expect("answer body");
+            .expect("POST /whip status");
+
+        let location = response
+            .headers()
+            .get("location")
+            .expect("Location header")
+            .to_str()
+            .expect("Location is text")
+            .to_string();
+
+        let body = response.text().await.expect("answer body");
 
         rtc.sdp_api()
             .accept_answer(
@@ -226,19 +282,31 @@ impl Server {
             )
             .expect("accept answer");
 
-        Peer::new(rtc, socket)
+        let mut peer = Peer::new(rtc, socket);
+        peer.session_location = Some(location);
+        peer
     }
 
     /// The offer carries only a data channel. The server adds media later by
     /// sending its own offer over that channel.
     pub async fn connect_viewer(&self, client: &reqwest::Client, room_id: &str) -> Peer {
+        self.try_connect_viewer(client, room_id)
+            .await
+            .expect("POST /offer status")
+    }
+
+    pub async fn try_connect_viewer(
+        &self,
+        client: &reqwest::Client,
+        room_id: &str,
+    ) -> Result<Peer, StatusCode> {
         let (mut rtc, socket) = new_peer();
 
         let mut change = rtc.sdp_api();
         change.add_channel("data".into());
         let (offer, pending) = change.apply().expect("offer has changes");
 
-        let answer: SdpAnswer = client
+        let response = client
             .post(self.sdp_url("/offer"))
             .json(&json!({
                 "type": "offer",
@@ -247,18 +315,19 @@ impl Server {
             }))
             .send()
             .await
-            .expect("POST /offer")
-            .error_for_status()
-            .expect("POST /offer status")
-            .json()
-            .await
-            .expect("answer json");
+            .expect("POST /offer");
+
+        if !response.status().is_success() {
+            return Err(response.status());
+        }
+
+        let answer: SdpAnswer = response.json().await.expect("answer json");
 
         rtc.sdp_api()
             .accept_answer(pending, answer)
             .expect("accept answer");
 
-        Peer::new(rtc, socket)
+        Ok(Peer::new(rtc, socket))
     }
 }
 
@@ -278,6 +347,8 @@ pub struct Peer {
     rtc: Rtc,
     socket: UdpSocket,
     channel: Option<ChannelId>,
+    /// Set for publishers: the WHIP session resource to delete.
+    pub session_location: Option<String>,
 }
 
 impl Peer {
@@ -286,6 +357,7 @@ impl Peer {
             rtc,
             socket,
             channel: None,
+            session_location: None,
         }
     }
 
