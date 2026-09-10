@@ -381,6 +381,7 @@ pub struct AvailableSimulcastLayer {
 pub enum RelayStatus {
     Relay {
         leaf: ClientId,
+        p2p_connected_at: Option<Instant>,
     },
 
     Leaf {

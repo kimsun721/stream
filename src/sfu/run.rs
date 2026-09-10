@@ -76,6 +76,7 @@ pub fn run(
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
+            let mut connected_relays = Vec::new();
             let mut disconnected_relays = Vec::new();
             let mut should_reevaluate = false;
 
@@ -89,6 +90,7 @@ pub fn run(
                     &mut media_datas,
                     &mut keyframe_requests,
                     &mut p2p_sdps,
+                    &mut connected_relays,
                     &mut disconnected_relays,
                     &mut should_reevaluate,
                 ) {
@@ -99,7 +101,7 @@ pub fn run(
                         }
 
                         match &client.relay_status {
-                            Some(RelayStatus::Relay { leaf }) => {
+                            Some(RelayStatus::Relay { leaf, .. }) => {
                                 fallback_leafs.push(*leaf);
                             }
                             Some(RelayStatus::Leaf { relay, .. }) => {
@@ -275,19 +277,54 @@ pub fn run(
                 room.promote(relay_id);
             }
 
+            for relay_id in connected_relays {
+                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+                    && let Some(RelayStatus::Relay {
+                        p2p_connected_at, ..
+                    }) = &mut relay.relay_status
+                {
+                    *p2p_connected_at = Some(Instant::now());
+                };
+            }
+
             let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
                 .clients
                 .iter()
                 .filter_map(|c| {
-                    let Some(RelayStatus::Relay { leaf }) = c.relay_status else {
+                    let Some(RelayStatus::Relay {
+                        leaf,
+                        p2p_connected_at,
+                    }) = c.relay_status
+                    else {
                         return None;
                     };
 
-                    let relay_outgoing_kbps = c.relay_outgoing_kbps?;
+                    let relay_outgoing_kbps = c.relay_outgoing_kbps? as u64;
 
-                    if relay_outgoing_kbps < tuning().relay.outgoing_cutoff_kbps
-                        || !c.is_perf_healthy()
-                    {
+                    let relay_outgoing_cutoff_kbps = c
+                        .tracks_out
+                        .iter()
+                        .filter_map(|t| {
+                            let chosen_rid = t.chosen_rid?;
+
+                            t.track_in
+                                .upgrade()?
+                                .available_simulcast_layers
+                                .iter()
+                                .find(|layer| layer.rid == chosen_rid)?
+                                .estimate_bps()
+                                .map(|bps| bps / 1000)
+                        })
+                        .sum::<u64>()
+                        .max(tuning().relay.min_outgoing_kbps as u64)
+                        * (100 - tuning().relay.traffic_headroom_percent)
+                        / 100;
+
+                    if p2p_connected_at?.elapsed() < tuning().relay.min_p2p_connection_age() {
+                        return None;
+                    };
+
+                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
                         return Some((c.id, leaf));
                     };
 

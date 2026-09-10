@@ -26,7 +26,9 @@ pub struct RelayConfig {
     pub probe_interval_secs: u64,
     pub min_connection_age_secs: u64,
     pub available_upload_cutoff_kbps: u32,
-    pub outgoing_cutoff_kbps: u32,
+    pub min_outgoing_kbps: u32,
+    pub traffic_headroom_percent: u64,
+    pub min_p2p_connection_age_secs: u64,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -88,6 +90,10 @@ impl RelayConfig {
 
     pub fn min_connection_age(&self) -> Duration {
         Duration::from_secs(self.min_connection_age_secs)
+    }
+
+    pub fn min_p2p_connection_age(&self) -> Duration {
+        Duration::from_secs(self.min_p2p_connection_age_secs)
     }
 }
 
@@ -162,7 +168,9 @@ impl Default for RelayConfig {
             probe_interval_secs: 120,
             min_connection_age_secs: 300,
             available_upload_cutoff_kbps: 13000,
-            outgoing_cutoff_kbps: 7000,
+            min_outgoing_kbps: 300,
+            traffic_headroom_percent: 30,
+            min_p2p_connection_age_secs: 4,
         }
     }
 }

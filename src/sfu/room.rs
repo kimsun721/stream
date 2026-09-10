@@ -156,7 +156,10 @@ impl Room {
             return;
         };
 
-        relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
+        relay.relay_status = Some(RelayStatus::Relay {
+            leaf: leaf_id,
+            p2p_connected_at: None,
+        });
         relay.relay_outgoing_kbps = None;
 
         let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
