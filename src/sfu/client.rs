@@ -394,7 +394,7 @@ impl Client {
                 }
             }
             C2sDcPayload::SetLayerMode { mid, layer_mode } => {
-                self.set_layer_mode(mid, layer_mode, keyframe_requests)
+                self.set_layer_mode(Mid::from(mid.as_str()), layer_mode, keyframe_requests)
             }
             C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
@@ -452,15 +452,15 @@ impl Client {
                         .available_simulcast_layers
                         .iter()
                         .map(|l| AvailableSimulcastLayer {
-                            rid: l.rid,
+                            rid: l.rid.to_string(),
                             bitrate_estimate: l.estimate_bps(),
                         })
                         .collect();
 
                     let payload = S2cDcPayload::LayerStatus {
-                        mid,
+                        mid: mid.to_string(),
                         available_simulcast_layers,
-                        chosen_layer: track_out.chosen_rid,
+                        chosen_layer: track_out.chosen_rid.map(|rid| rid.to_string()),
                         layer_mode: track_out.layer_mode,
                     };
 
@@ -672,7 +672,10 @@ impl Client {
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
 
-        let payload = S2cDcPayload::LayerChanged { rid, mid };
+        let payload = S2cDcPayload::LayerChanged {
+            rid: rid.to_string(),
+            mid: mid.to_string(),
+        };
 
         if let Err(e) = self.send_payload_via_dc(payload) {
             error!("send_payload_via_dc failed error: {e}");

@@ -337,7 +337,7 @@ pub enum C2sDcPayload {
     Offer { sdp: String },
     Answer { sdp: String },
     SetLayer { mid: String, rid: String },
-    SetLayerMode { mid: Mid, layer_mode: LayerMode },
+    SetLayerMode { mid: String, layer_mode: LayerMode },
     PerfReport { rtt_ms: u32, loss_pct: f32 },
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },
@@ -360,20 +360,20 @@ pub enum S2cDcPayload {
     Demote,
     ProbeAvailableUpload,
     LayerChanged {
-        rid: Rid,
-        mid: Mid,
+        rid: String,
+        mid: String,
     },
     LayerStatus {
-        mid: Mid,
+        mid: String,
         available_simulcast_layers: Vec<AvailableSimulcastLayer>,
-        chosen_layer: Option<Rid>,
+        chosen_layer: Option<String>,
         layer_mode: LayerMode,
     },
 }
 
 #[derive(Serialize)]
 pub struct AvailableSimulcastLayer {
-    pub rid: Rid,
+    pub rid: String,
     pub bitrate_estimate: Option<u64>,
 }
 
