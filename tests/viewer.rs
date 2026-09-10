@@ -12,10 +12,7 @@ use str0m::Event;
 const CONNECT: Duration = Duration::from_secs(10);
 const REACT: Duration = Duration::from_secs(5);
 
-/// Requires a running server. Start one with `cargo run`; the key comes from
-/// `.env`, the same file the server reads.
 #[tokio::test]
-#[ignore = "needs a running server"]
 async fn viewer_connects_to_a_live_room() {
     let server = Server::default();
     let client = reqwest::Client::new();
@@ -31,7 +28,7 @@ async fn viewer_connects_to_a_live_room() {
 
 /// Also requires ffmpeg, which stands in for a real encoder over WHIP.
 #[tokio::test]
-#[ignore = "needs a running server and ffmpeg"]
+#[ignore = "needs ffmpeg"]
 async fn viewer_receives_media_from_a_publisher() {
     let server = Server::default();
     let client = reqwest::Client::new();
@@ -51,7 +48,6 @@ async fn viewer_receives_media_from_a_publisher() {
 }
 
 #[tokio::test]
-#[ignore = "needs a running server"]
 async fn viewer_is_told_which_layers_exist() {
     let server = Server::default();
     let client = reqwest::Client::new();
@@ -78,7 +74,6 @@ async fn viewer_is_told_which_layers_exist() {
 }
 
 #[tokio::test]
-#[ignore = "needs a running server"]
 async fn viewer_switches_layers_by_hand() {
     let server = Server::default();
     let client = reqwest::Client::new();

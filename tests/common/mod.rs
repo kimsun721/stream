@@ -3,9 +3,11 @@
 
 use std::{
     io::ErrorKind,
-    net::{Ipv4Addr, SocketAddr, UdpSocket},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket},
+    os::unix::process::CommandExt,
+    process::{Command, Stdio},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -22,7 +24,6 @@ use str0m::{
     net::{Protocol, Receive},
 };
 
-/// A shell variable wins over `.env`, so overriding for a remote server works.
 pub struct Server {
     pub host: String,
     pub sdp_port: u16,
@@ -30,23 +31,103 @@ pub struct Server {
     pub api_key: String,
 }
 
+/// One server per test binary. Rooms carry random ids, so tests never collide
+/// and there is no reason to pay for a process each.
+static SHARED: OnceLock<Server> = OnceLock::new();
+
 impl Default for Server {
     fn default() -> Self {
-        dotenvy::dotenv().ok();
-
-        let env =
-            |key: &str, fallback: &str| std::env::var(key).unwrap_or_else(|_| fallback.to_string());
+        let server = SHARED.get_or_init(spawn_server);
 
         Server {
-            host: env("STREAM_HOST", "127.0.0.1"),
-            sdp_port: env("STREAM_SDP_PORT", "8443").parse().expect("sdp port"),
-            control_port: env("STREAM_CONTROL_PORT", "8080")
-                .parse()
-                .expect("control port"),
-            api_key: std::env::var("API_KEY")
-                .expect("API_KEY is not set in .env or the environment"),
+            host: server.host.clone(),
+            sdp_port: server.sdp_port,
+            control_port: server.control_port,
+            api_key: server.api_key.clone(),
         }
     }
+}
+
+fn spawn_server() -> Server {
+    let sdp_port = free_port();
+    let control_port = free_port();
+    let media_port = free_port();
+    let api_key = "integration-test-api-key".to_string();
+
+    // The server reads config.toml from its working directory, so give it one
+    // of its own rather than picking up the repository's.
+    let dir = std::env::temp_dir().join(format!("stream-it-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "[server]\n\
+             public_ip = \"127.0.0.1\"\n\
+             media_port = {media_port}\n\
+             https_sdp_server_port = {sdp_port}\n\
+             http_rest_server_port = {control_port}\n"
+        ),
+    )
+    .expect("write config");
+
+    let log = dir.join("server.log");
+
+    // PR_SET_PDEATHSIG fires when the *thread* that spawned the child exits, not
+    // the process, and cargo gives every test its own thread. Spawn from a
+    // thread that lives as long as the test binary instead, so the server dies
+    // with it rather than with whichever test happened to start it.
+    let spawn_dir = dir.clone();
+    let spawn_key = api_key.clone();
+    thread::spawn(move || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stream"));
+        command
+            .current_dir(&spawn_dir)
+            .env("API_KEY", &spawn_key)
+            .stdout(Stdio::from(std::fs::File::create(log).expect("server log")))
+            .stderr(Stdio::null());
+
+        unsafe {
+            command.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
+        }
+
+        let mut child = command.spawn().expect("spawn server");
+        let _ = child.wait();
+    });
+
+    let server = Server {
+        host: "127.0.0.1".to_string(),
+        sdp_port,
+        control_port,
+        api_key,
+    };
+
+    wait_until_listening(control_port);
+
+    server
+}
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .expect("bind for a free port")
+        .local_addr()
+        .expect("local address")
+        .port()
+}
+
+fn wait_until_listening(port: u16) {
+    let give_up_at = Instant::now() + Duration::from_secs(10);
+
+    while Instant::now() < give_up_at {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    panic!("server never started listening on {port}");
 }
 
 #[derive(Deserialize)]
