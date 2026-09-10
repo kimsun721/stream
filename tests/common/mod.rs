@@ -149,7 +149,7 @@ impl Server {
         format!("http://{}:{}{}", self.host, self.sdp_port, path)
     }
 
-    fn control_url(&self, path: &str) -> String {
+    pub fn control_url(&self, path: &str) -> String {
         format!("http://{}:{}{}", self.host, self.control_port, path)
     }
 
@@ -221,6 +221,26 @@ impl Server {
             .status()
     }
 
+    /// Returns the replacement key. The old one stops working at the same time.
+    pub async fn reissue_stream_key(&self, client: &reqwest::Client, room_id: &str) -> String {
+        let body: Value = client
+            .post(self.control_url(&format!("/rooms/{room_id}/stream-key")))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .expect("POST stream-key")
+            .error_for_status()
+            .expect("POST stream-key status")
+            .json()
+            .await
+            .expect("stream key json");
+
+        body["stream_key"]
+            .as_str()
+            .expect("stream key is text")
+            .to_string()
+    }
+
     pub async fn create_live_room(&self, client: &reqwest::Client) -> CreatedRoom {
         let room = self.create_room(client).await;
         self.set_live(client, &room.room_id).await;
@@ -237,6 +257,17 @@ impl Server {
         stream_key: &str,
         rids: &[&str],
     ) -> Peer {
+        self.try_connect_publisher(client, stream_key, rids)
+            .await
+            .expect("POST /whip status")
+    }
+
+    pub async fn try_connect_publisher(
+        &self,
+        client: &reqwest::Client,
+        stream_key: &str,
+        rids: &[&str],
+    ) -> Result<Peer, StatusCode> {
         let (mut rtc, socket) = new_peer();
 
         let mut simulcast = Simulcast::new();
@@ -261,9 +292,11 @@ impl Server {
             .body(offer.to_sdp_string())
             .send()
             .await
-            .expect("POST /whip")
-            .error_for_status()
-            .expect("POST /whip status");
+            .expect("POST /whip");
+
+        if !response.status().is_success() {
+            return Err(response.status());
+        }
 
         let location = response
             .headers()
@@ -284,7 +317,7 @@ impl Server {
 
         let mut peer = Peer::new(rtc, socket);
         peer.session_location = Some(location);
-        peer
+        Ok(peer)
     }
 
     /// The offer carries only a data channel. The server adds media later by
