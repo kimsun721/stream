@@ -277,7 +277,12 @@ impl Client {
 
 impl TrackIn {
     pub fn default_rid(&self) -> Option<Rid> {
-        self.available_simulcast_layers.last().map(|l| l.rid)
+        self.available_simulcast_layers
+            .iter()
+            .filter(|l| l.estimate_bps().is_some())
+            .min_by_key(|l| l.estimate_bps())
+            .or_else(|| self.available_simulcast_layers.first())
+            .map(|l| l.rid)
     }
     pub fn highest_estimated_bps(&self) -> Option<u64> {
         self.available_simulcast_layers
@@ -445,7 +450,26 @@ mod tests {
     }
 
     #[test]
-    fn default_rid_selects_last_simulcast_layer() {
+    fn default_rid_selects_the_cheapest_measured_layer() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![
+                simulcast_layer("high", Some(2_500_000)),
+                simulcast_layer("low", Some(300_000)),
+                simulcast_layer("middle", Some(800_000)),
+            ],
+        };
+
+        assert_eq!(track.default_rid(), Some(Rid::from("low")));
+    }
+
+    /// Every layer is unmeasured for the first window of a broadcast, and a
+    /// viewer that arrives then still needs a layer: without one it matches no
+    /// incoming rid and auto cannot move it, since auto reads the current layer.
+    #[test]
+    fn default_rid_falls_back_to_the_first_layer_before_any_estimate() {
         let track = TrackIn {
             origin: ClientId(0),
             mid: Mid::from("video"),
@@ -457,7 +481,22 @@ mod tests {
             ],
         };
 
-        assert_eq!(track.default_rid(), Some(Rid::from("last")));
+        assert_eq!(track.default_rid(), Some(Rid::from("first")));
+    }
+
+    #[test]
+    fn default_rid_ignores_layers_without_an_estimate() {
+        let track = TrackIn {
+            origin: ClientId(0),
+            mid: Mid::from("video"),
+            kind: MediaKind::Video,
+            available_simulcast_layers: vec![
+                simulcast_layer("unknown", None),
+                simulcast_layer("measured", Some(800_000)),
+            ],
+        };
+
+        assert_eq!(track.default_rid(), Some(Rid::from("measured")));
     }
 
     #[test]
