@@ -11,7 +11,8 @@ use serde::Deserialize;
 use serde_json::json;
 use str0m::{
     Candidate, Event, IceConnectionState, Input, Output, Rtc,
-    change::SdpAnswer,
+    change::{SdpAnswer, SdpOffer},
+    channel::ChannelId,
     net::{Protocol, Receive},
 };
 
@@ -128,6 +129,8 @@ impl Server {
     }
 }
 
+/// Answers the offers the server sends over the data channel, which is the only
+/// way a viewer ever receives media: its own offer asks for no tracks.
 pub fn run_until(
     rtc: &mut Rtc,
     socket: &UdpSocket,
@@ -136,8 +139,11 @@ pub fn run_until(
 ) -> bool {
     let give_up_at = Instant::now() + deadline;
     let mut buf = vec![0u8; 2000];
+    let mut channel: Option<ChannelId> = None;
 
     while Instant::now() < give_up_at {
+        let mut offers = Vec::new();
+
         let timeout = loop {
             match rtc.poll_output().expect("poll_output") {
                 Output::Timeout(at) => break at,
@@ -145,12 +151,33 @@ pub fn run_until(
                     socket.send_to(&t.contents, t.destination).expect("send_to");
                 }
                 Output::Event(event) => {
+                    match &event {
+                        Event::ChannelOpen(id, _) => channel = Some(*id),
+                        Event::ChannelData(data) => {
+                            if let Ok(offer) = serde_json::from_slice::<SdpOffer>(&data.data) {
+                                offers.push(offer);
+                            }
+                        }
+                        _ => (),
+                    }
+
                     if stop(&event) {
                         return true;
                     }
                 }
             }
         };
+
+        for offer in offers {
+            let answer = rtc.sdp_api().accept_offer(offer).expect("accept offer");
+            let json = serde_json::to_string(&answer).expect("answer json");
+
+            let mut channel = channel
+                .and_then(|id| rtc.channel(id))
+                .expect("data channel open");
+
+            channel.write(false, json.as_bytes()).expect("write answer");
+        }
 
         // Capped, or a silent server holds the test for as long as str0m asked to sleep.
         let wait = timeout
