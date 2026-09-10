@@ -22,7 +22,8 @@ use str0m::{
     Candidate, Event, IceConnectionState, Input, Output, Rtc,
     change::{SdpAnswer, SdpOffer},
     channel::ChannelId,
-    media::{Direction, MediaKind, Simulcast, SimulcastLayer},
+    format::Codec,
+    media::{Direction, MediaKind, MediaTime, Mid, Pt, Rid, Simulcast, SimulcastLayer},
     net::{Protocol, Receive},
 };
 
@@ -57,7 +58,9 @@ fn spawn_server() -> Server {
     let api_key = "integration-test-api-key".to_string();
 
     // The server reads config.toml from its working directory, so give it one
-    // of its own rather than picking up the repository's.
+    // of its own rather than picking up the repository's. The bitrate window is
+    // shortened because every test that waits on a layer estimate waits a full
+    // window for it.
     let dir = std::env::temp_dir().join(format!("stream-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     std::fs::write(
@@ -67,7 +70,10 @@ fn spawn_server() -> Server {
              public_ip = \"127.0.0.1\"\n\
              media_port = {media_port}\n\
              https_sdp_server_port = {sdp_port}\n\
-             http_rest_server_port = {control_port}\n"
+             http_rest_server_port = {control_port}\n\
+             \n\
+             [bitrate]\n\
+             estimate_secs = 1\n"
         ),
     )
     .expect("write config");
@@ -276,7 +282,7 @@ impl Server {
         }
 
         let mut change = rtc.sdp_api();
-        change.add_media(
+        let mid = change.add_media(
             MediaKind::Video,
             Direction::SendOnly,
             None,
@@ -317,6 +323,7 @@ impl Server {
 
         let mut peer = Peer::new(rtc, socket);
         peer.session_location = Some(location);
+        peer.media_mid = Some(mid);
         Ok(peer)
     }
 
@@ -382,6 +389,8 @@ pub struct Peer {
     channel: Option<ChannelId>,
     /// Set for publishers: the WHIP session resource to delete.
     pub session_location: Option<String>,
+    media_mid: Option<Mid>,
+    media: Option<MediaSource>,
 }
 
 impl Peer {
@@ -391,6 +400,8 @@ impl Peer {
             socket,
             channel: None,
             session_location: None,
+            media_mid: None,
+            media: None,
         }
     }
 
@@ -439,10 +450,22 @@ impl Peer {
                 self.send(&serde_json::to_value(&answer).expect("answer value"));
             }
 
+            let media_at = match &mut self.media {
+                Some(media) => {
+                    media.pump(&mut self.rtc);
+                    media.next_frame_at()
+                }
+                None => None,
+            };
+
             // Capped, or a silent server holds the test for as long as str0m asked to sleep.
-            let wait = timeout
+            let mut wait = timeout
                 .saturating_duration_since(Instant::now())
                 .min(give_up_at.saturating_duration_since(Instant::now()));
+
+            if let Some(at) = media_at {
+                wait = wait.min(at.saturating_duration_since(Instant::now()));
+            }
 
             if wait.is_zero() {
                 self.rtc
@@ -477,6 +500,14 @@ impl Peer {
         false
     }
 
+    /// Starts sending on rids already declared at connect time. Layers not named
+    /// here stay silent, which is how a test tells the server that a declared
+    /// layer carries nothing.
+    pub fn start_media(&mut self, rates: &[(&str, u32)]) {
+        let mid = self.media_mid.expect("not a publisher");
+        self.media = Some(MediaSource::new(mid, rates));
+    }
+
     pub fn send(&mut self, payload: &Value) {
         let id = self.channel.expect("data channel open");
         let json = serde_json::to_string(payload).expect("payload json");
@@ -503,6 +534,111 @@ impl Peer {
         Detached {
             stop,
             handle: Some(handle),
+        }
+    }
+}
+
+const FRAMES_PER_SECOND: u64 = 30;
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / FRAMES_PER_SECOND);
+const RTP_TICKS_PER_FRAME: u64 = 90_000 / FRAMES_PER_SECOND;
+
+/// The largest lag the sender tries to make up. A test thread that was
+/// descheduled must not answer with a burst, which would tell the server's
+/// estimator a bitrate that was never sent.
+const MAX_CATCH_UP: Duration = Duration::from_millis(500);
+
+struct Layer {
+    rid: Rid,
+    frame: Vec<u8>,
+    next_at: Instant,
+    rtp_time: u64,
+}
+
+/// Writes fixed size frames at a fixed rate per rid.
+///
+/// The payload is not VP8. The SFU forwards frames without decoding them and
+/// sizes a layer by `data.len()` alone, so bytes of the right length are
+/// indistinguishable from an encoder's. Byte zero is cleared because str0m
+/// reads its low bit as VP8's P flag, and a stream that never declares a
+/// keyframe stalls whatever downstream waits for one.
+struct MediaSource {
+    mid: Mid,
+    pt: Option<Pt>,
+    layers: Vec<Layer>,
+}
+
+impl MediaSource {
+    fn new(mid: Mid, rates: &[(&str, u32)]) -> Self {
+        let now = Instant::now();
+
+        let layers = rates
+            .iter()
+            .map(|(rid, kbps)| {
+                let bytes_per_frame = (*kbps as usize) * 1000 / 8 / FRAMES_PER_SECOND as usize;
+                let mut frame = vec![0x5au8; bytes_per_frame.max(2)];
+                frame[0] = 0;
+
+                Layer {
+                    rid: Rid::from(*rid),
+                    frame,
+                    next_at: now,
+                    rtp_time: 0,
+                }
+            })
+            .collect();
+
+        MediaSource {
+            mid,
+            pt: None,
+            layers,
+        }
+    }
+
+    fn next_frame_at(&self) -> Option<Instant> {
+        self.layers.iter().map(|l| l.next_at).min()
+    }
+
+    fn pump(&mut self, rtc: &mut Rtc) {
+        let now = Instant::now();
+
+        if self.pt.is_none() {
+            let Some(writer) = rtc.writer(self.mid) else {
+                return;
+            };
+
+            self.pt = writer
+                .payload_params()
+                .find(|p| p.spec().codec == Codec::Vp8)
+                .map(|p| p.pt());
+        }
+
+        let Some(pt) = self.pt else {
+            return;
+        };
+
+        for layer in &mut self.layers {
+            if now.saturating_duration_since(layer.next_at) > MAX_CATCH_UP {
+                layer.next_at = now;
+            }
+
+            while layer.next_at <= now {
+                let Some(writer) = rtc.writer(self.mid) else {
+                    return;
+                };
+
+                writer
+                    .rid(layer.rid)
+                    .write(
+                        pt,
+                        now,
+                        MediaTime::from_90khz(layer.rtp_time),
+                        layer.frame.clone(),
+                    )
+                    .expect("write media");
+
+                layer.rtp_time += RTP_TICKS_PER_FRAME;
+                layer.next_at += FRAME_INTERVAL;
+            }
         }
     }
 }

@@ -102,6 +102,67 @@ async fn viewer_switches_layers_by_hand() {
     drop(room);
 }
 
+/// The estimates are what auto layer selection filters on, and they come from
+/// counted RTP bytes rather than from the SDP, so nothing but real traffic
+/// proves the path is alive.
+#[tokio::test]
+async fn the_server_measures_every_layer_it_receives() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let room = server.create_room(&client).await;
+
+    let mut publisher = server
+        .connect_publisher(&client, &room.stream_key, &["l", "m", "h"])
+        .await;
+    assert!(
+        publisher.run_until(CONNECT, is_connected),
+        "publisher connect"
+    );
+
+    publisher.start_media(&[("l", 300), ("m", 800), ("h", 2500)]);
+
+    // layer_status is sent once, when the viewer's track opens, so the window
+    // has to have filled before the viewer arrives.
+    publisher.run_until(Duration::from_secs(2), |_| false);
+    let _publisher = publisher.detach();
+
+    server.set_live(&client, &room.room_id).await;
+
+    let mut viewer = server.connect_viewer(&client, &room.room_id).await;
+    assert!(viewer.run_until(CONNECT, is_connected), "viewer connect");
+
+    let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
+
+    let estimates: Vec<(String, Option<u64>)> = status["available_simulcast_layers"]
+        .as_array()
+        .expect("layer array")
+        .iter()
+        .map(|layer| {
+            (
+                layer["rid"].as_str().expect("rid").to_string(),
+                layer["bitrate_estimate"].as_u64(),
+            )
+        })
+        .collect();
+
+    let measured: Vec<u64> = estimates
+        .iter()
+        .map(|(rid, estimate)| estimate.unwrap_or_else(|| panic!("{rid} was never measured")))
+        .collect();
+
+    assert!(
+        measured.windows(2).all(|w| w[0] < w[1]),
+        "layers rank by the bitrate they carry: {estimates:?}"
+    );
+
+    let (low, high) = (measured[0], measured[measured.len() - 1]);
+    assert!(
+        high > low * 4,
+        "the gap matches what was sent, 300 against 2500 kbps: {estimates:?}"
+    );
+}
+
 /// A room with a simulcast publisher attached and a connected viewer. The
 /// publisher connects first because that moves the room to `Preview`, and the
 /// viewer needs it `Live`.
