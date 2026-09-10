@@ -5,8 +5,12 @@ use std::{
     time::Duration,
 };
 
-use common::{Server, is_connected, run_until};
+use common::{Server, dc_message, is_connected};
+use serde_json::{Value, json};
 use str0m::Event;
+
+const CONNECT: Duration = Duration::from_secs(10);
+const REACT: Duration = Duration::from_secs(5);
 
 /// Requires a running server. Start one with `cargo run`; the key comes from
 /// `.env`, the same file the server reads.
@@ -17,11 +21,12 @@ async fn viewer_connects_to_a_live_room() {
     let client = reqwest::Client::new();
 
     let room = server.create_live_room(&client).await;
-    let (mut rtc, socket) = server.connect_viewer(&client, &room.room_id).await;
+    let mut viewer = server.connect_viewer(&client, &room.room_id).await;
 
-    let connected = run_until(&mut rtc, &socket, Duration::from_secs(10), is_connected);
-
-    assert!(connected, "ICE never reported a usable path");
+    assert!(
+        viewer.run_until(CONNECT, is_connected),
+        "ICE never reported a usable path"
+    );
 }
 
 /// Also requires ffmpeg, which stands in for a real encoder over WHIP.
@@ -32,25 +37,116 @@ async fn viewer_receives_media_from_a_publisher() {
     let client = reqwest::Client::new();
 
     let room = server.create_live_room(&client).await;
-    let (mut rtc, socket) = server.connect_viewer(&client, &room.room_id).await;
+    let mut viewer = server.connect_viewer(&client, &room.room_id).await;
 
-    assert!(
-        run_until(&mut rtc, &socket, Duration::from_secs(10), is_connected),
-        "ICE never reported a usable path"
-    );
+    assert!(viewer.run_until(CONNECT, is_connected), "viewer connect");
 
-    let _publisher = Publisher::spawn(&server, &room.stream_key);
+    let _publisher = Ffmpeg::spawn(&server, &room.stream_key);
 
-    let got_media = run_until(&mut rtc, &socket, Duration::from_secs(20), |event| {
+    let got_media = viewer.run_until(Duration::from_secs(20), |event| {
         matches!(event, Event::MediaData(_))
     });
 
     assert!(got_media, "no media arrived after the publisher started");
 }
 
-struct Publisher(Child);
+#[tokio::test]
+#[ignore = "needs a running server"]
+async fn viewer_is_told_which_layers_exist() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
 
-impl Publisher {
+    let (_publisher, room, mut viewer) = live_simulcast(&server, &client, &["l", "m", "h"]).await;
+
+    let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
+
+    let rids: Vec<&str> = status["available_simulcast_layers"]
+        .as_array()
+        .expect("layer array")
+        .iter()
+        .map(|layer| layer["rid"].as_str().expect("rid"))
+        .collect();
+
+    assert_eq!(rids, ["l", "m", "h"], "advertised layers");
+    assert_eq!(status["layer_mode"], "auto", "viewers start in auto");
+    assert!(
+        !status["chosen_layer"].is_null(),
+        "a layer is already chosen"
+    );
+
+    drop(room);
+}
+
+#[tokio::test]
+#[ignore = "needs a running server"]
+async fn viewer_switches_layers_by_hand() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let (_publisher, room, mut viewer) = live_simulcast(&server, &client, &["l", "m", "h"]).await;
+
+    let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
+    let mid = status["mid"].clone();
+    let chosen = status["chosen_layer"].as_str().expect("chosen layer");
+
+    // Auto owns the choice until the viewer takes it, so a set_layer in auto
+    // mode is ignored.
+    viewer.send(&json!({ "type": "set_layer_mode", "mid": mid, "layer_mode": "manual" }));
+
+    let target = ["l", "m", "h"]
+        .into_iter()
+        .find(|rid| *rid != chosen)
+        .expect("another layer");
+
+    viewer.send(&json!({ "type": "set_layer", "mid": mid, "rid": target }));
+
+    let changed = wait_for(&mut viewer, "layer_changed").expect("no layer_changed arrived");
+
+    assert_eq!(changed["rid"], target, "switched to the requested layer");
+
+    drop(room);
+}
+
+/// A room with a simulcast publisher attached and a connected viewer. The
+/// publisher connects first because that moves the room to `Preview`, and the
+/// viewer needs it `Live`.
+async fn live_simulcast(
+    server: &Server,
+    client: &reqwest::Client,
+    rids: &[&str],
+) -> (common::Detached, common::CreatedRoom, common::Peer) {
+    let room = server.create_room(client).await;
+
+    let mut publisher = server
+        .connect_publisher(client, &room.stream_key, rids)
+        .await;
+    assert!(
+        publisher.run_until(CONNECT, is_connected),
+        "publisher connect"
+    );
+
+    server.set_live(client, &room.room_id).await;
+
+    let mut viewer = server.connect_viewer(client, &room.room_id).await;
+    assert!(viewer.run_until(CONNECT, is_connected), "viewer connect");
+
+    (publisher.detach(), room, viewer)
+}
+
+fn wait_for(viewer: &mut common::Peer, tag: &str) -> Option<Value> {
+    let mut found = None;
+
+    viewer.run_until(REACT, |event| {
+        found = dc_message(event, tag);
+        found.is_some()
+    });
+
+    found
+}
+
+struct Ffmpeg(Child);
+
+impl Ffmpeg {
     fn spawn(server: &Server, stream_key: &str) -> Self {
         let child = Command::new("ffmpeg")
             .args([
@@ -74,18 +170,18 @@ impl Publisher {
                 "whip",
                 "-authorization",
                 stream_key,
-                &format!("http://{}:{}/whip", server.host, server.sdp_port),
+                &server.sdp_url("/whip"),
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::inherit())
             .spawn()
             .expect("spawn ffmpeg");
 
-        Publisher(child)
+        Ffmpeg(child)
     }
 }
 
-impl Drop for Publisher {
+impl Drop for Ffmpeg {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
