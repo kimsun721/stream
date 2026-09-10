@@ -163,6 +163,53 @@ async fn the_server_measures_every_layer_it_receives() {
     );
 }
 
+/// Auto mode filters on two numbers the SDP cannot supply: a bitrate estimate
+/// per layer, and the viewer's own egress estimate. Both stay empty until media
+/// flows, so nothing short of real traffic shows that auto selection is wired up
+/// rather than merely implemented.
+#[tokio::test]
+async fn auto_mode_moves_a_viewer_up_to_the_layer_its_bandwidth_allows() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let room = server.create_room(&client).await;
+
+    // A viewer starts on the cheapest layer, so auto has somewhere to move as
+    // long as the link carries more than that.
+    let mut publisher = server
+        .connect_publisher(&client, &room.stream_key, &["l", "m", "h"])
+        .await;
+    assert!(
+        publisher.run_until(CONNECT, is_connected),
+        "publisher connect"
+    );
+
+    publisher.start_media(&[("l", 300), ("m", 800), ("h", 2500)]);
+    publisher.run_until(Duration::from_secs(2), |_| false);
+    let _publisher = publisher.detach();
+
+    server.set_live(&client, &room.room_id).await;
+
+    let mut viewer = server.connect_viewer(&client, &room.room_id).await;
+    assert!(viewer.run_until(CONNECT, is_connected), "viewer connect");
+
+    let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
+    assert_eq!(status["layer_mode"], "auto", "viewers start in auto");
+    assert_eq!(status["chosen_layer"], "l", "and on the default layer");
+
+    let mut changed = None;
+    viewer.run_until(Duration::from_secs(15), |event| {
+        changed = dc_message(event, "layer_changed");
+        changed.is_some()
+    });
+
+    let changed = changed.expect("auto never moved the viewer");
+    assert_eq!(
+        changed["rid"], "h",
+        "an idle loopback link carries the top layer"
+    );
+}
+
 /// A room with a simulcast publisher attached and a connected viewer. The
 /// publisher connects first because that moves the room to `Preview`, and the
 /// viewer needs it `Live`.
