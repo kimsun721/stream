@@ -8,6 +8,8 @@ use str0m::Event;
 
 const CONNECT: Duration = Duration::from_secs(10);
 const PROMOTE: Duration = Duration::from_secs(10);
+/// Covers the handshake timeout with room to spare.
+const TEAR_DOWN: Duration = Duration::from_secs(15);
 /// Long enough that a promotion would already have happened: the connection age
 /// gate is the slowest step at 2 seconds.
 const NEVER: Duration = Duration::from_secs(5);
@@ -169,10 +171,9 @@ fn received_media(peer: &mut Peer) -> bool {
     peer.run_until(SETTLE, |event| matches!(event, Event::MediaData(_)))
 }
 
-/// Nothing times the peer link out, so a handshake that never completes leaves
-/// the pair joined for good and takes both viewers out of the candidate pool.
-/// What it must not do is cost the leaf its stream: the server only skips a leaf
-/// once the leaf itself reports the link up.
+/// The server skips a leaf only once the leaf reports the link up, so a
+/// handshake still in progress must not cost the leaf its stream. It holds until
+/// the handshake times out, which the next test covers.
 #[tokio::test]
 async fn a_leaf_keeps_its_stream_while_the_peer_link_hangs() {
     let server = Server::default();
@@ -195,4 +196,34 @@ async fn a_leaf_keeps_its_stream_while_the_peer_link_hangs() {
 
     assert!(received_media(&mut leaf), "the leaf lost its stream");
     assert!(received_media(&mut candidate), "the relay lost its stream");
+}
+
+/// A handshake that never completes would otherwise leave the pair joined for
+/// good, taking both viewers out of the candidate pool for the rest of the
+/// broadcast. Nothing in the protocol reports this: the clients have no reason
+/// to say anything, so the server times it out itself.
+#[tokio::test]
+async fn a_peer_link_that_never_comes_up_is_torn_down() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let (_publisher, mut candidate, mut leaf) =
+        room_with_two_viewers(&server, &client, healthy(PLENTY_OF_UPLOAD)).await;
+
+    assert!(
+        run_both(&mut candidate, &mut leaf, PROMOTE, |event| dc_message(
+            event,
+            "p2p_offer"
+        )
+        .is_some()),
+        "the offer never reached the leaf"
+    );
+
+    assert!(
+        run_both(&mut candidate, &mut leaf, TEAR_DOWN, |event| dc_message(
+            event, "demote"
+        )
+        .is_some()),
+        "the pair was never released"
+    );
 }
