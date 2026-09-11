@@ -51,11 +51,7 @@ impl Histogram {
 
         Durations {
             count,
-            mean_us: if count == 0 {
-                0
-            } else {
-                self.total_us.load(Relaxed) / count
-            },
+            mean_us: self.total_us.load(Relaxed).checked_div(count).unwrap_or(0),
             max_us: self.max_us.load(Relaxed),
             p50_us: percentile(&counts, count, 50),
             p95_us: percentile(&counts, count, 95),
