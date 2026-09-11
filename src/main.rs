@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use str0m::crypto::from_feature_flags;
 
 mod config;
+mod metrics;
 mod servers;
 mod sfu;
 mod types;
