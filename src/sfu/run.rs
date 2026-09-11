@@ -10,6 +10,7 @@ use tracing::{debug, error};
 
 use crate::{
     config::tuning,
+    metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
         ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
@@ -31,9 +32,22 @@ pub fn run(
 ) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
+    let mut woken_for: Option<Instant> = None;
 
     loop {
+        let _lap = metrics::time(Phase::Lap);
+        metrics::lap();
+
+        if let Some(deadline) = woken_for {
+            metrics::lap_lateness(Instant::now().saturating_duration_since(deadline));
+        }
+
+        let mut handled = 0;
+        let control_drain = metrics::time(Phase::ControlDrain);
+
         while let Ok(message) = rx.try_recv() {
+            handled += 1;
+
             match message {
                 SfuMessage::RegisterClient {
                     rtc,
@@ -65,12 +79,19 @@ pub fn run(
             };
         }
 
+        drop(control_drain);
+        metrics::control_messages(handled);
+
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for room in rooms.values_mut() {
             if matches!(room.state, RoomState::Idle) && room.clients.is_empty() {
+                metrics::room_skipped();
                 continue;
             };
+
+            metrics::room_visited();
+            let _room = metrics::time(Phase::RoomIteration);
 
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
@@ -83,6 +104,8 @@ pub fn run(
 
             let mut fallback_leafs = Vec::new();
             let mut needs_init = false;
+
+            let client_tick = metrics::time(Phase::ClientTick);
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -97,6 +120,8 @@ pub fn run(
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
+                        metrics::client_disconnected();
+
                         if client.role == ClientRole::Streamer {
                             needs_init = true;
                         }
@@ -113,11 +138,14 @@ pub fn run(
                         to_remove.push(idx);
                     }
                     Err(e) => {
+                        metrics::client_tick_error();
                         to_remove.push(idx);
                         error!("client tick failed: {}", e);
                     }
                 };
             }
+
+            drop(client_tick);
 
             for track in &new_tracks {
                 for client in room.viewers_mut() {
@@ -176,20 +204,30 @@ pub fn run(
                 };
             }
 
-            for c in room.clients.iter_mut().filter(|c| {
-                c.role == ClientRole::Viewer
-                    && !matches!(
-                        c.relay_status,
-                        Some(RelayStatus::Leaf {
-                            link_state: LinkState::Connected,
-                            ..
-                        })
-                    )
-            }) {
+            let media_fanout = metrics::time(Phase::MediaFanout);
+
+            for c in room
+                .clients
+                .iter_mut()
+                .filter(|c| c.role == ClientRole::Viewer)
+            {
+                if matches!(
+                    c.relay_status,
+                    Some(RelayStatus::Leaf {
+                        link_state: LinkState::Connected,
+                        ..
+                    })
+                ) {
+                    c.count_relay_saved(&media_datas);
+                    continue;
+                }
+
                 if let Err(e) = c.handle_media_datas(&media_datas) {
                     error!("handle_media_datas failed: {}", e);
                 };
             }
+
+            drop(media_fanout);
 
             if let Some(streamer) = room
                 .clients
@@ -224,6 +262,8 @@ pub fn run(
                     error!("demote relay failed error={e}")
                 };
             }
+
+            let relay_policy = metrics::time(Phase::RelayPolicy);
 
             for c in room.clients.iter_mut().filter(|c| {
                 matches!(c.role, ClientRole::Viewer)
@@ -348,10 +388,16 @@ pub fn run(
                 room.demote(relay_id, leaf_id);
             }
 
+            drop(relay_policy);
+
             if needs_init {
                 room.init();
             }
         }
+
+        metrics::gauges(count_gauges(&rooms));
+
+        woken_for = Some(timeout);
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
         let mut socket_read_count = 0;
@@ -387,6 +433,10 @@ pub fn run(
             }
         };
 
+        if socket_read_count > MAX_SOCKET_READ_COUNT {
+            metrics::socket_drain_full();
+        }
+
         let now = Instant::now();
         for room in rooms.values_mut() {
             for client in room.clients.iter_mut() {
@@ -394,6 +444,39 @@ pub fn run(
             }
         }
     }
+}
+
+/// Recounted every lap rather than tracked by increments, because clients leave
+/// through several paths and a missed decrement would never correct itself.
+fn count_gauges(rooms: &Rooms) -> Gauges {
+    let mut gauges = Gauges {
+        rooms: rooms.len() as u64,
+        clients: 0,
+        viewers: 0,
+        relays: 0,
+        connected_leaves: 0,
+    };
+
+    for room in rooms.values() {
+        gauges.clients += room.clients.len() as u64;
+
+        for client in &room.clients {
+            if client.role == ClientRole::Viewer {
+                gauges.viewers += 1;
+            }
+
+            match client.relay_status {
+                Some(RelayStatus::Relay { .. }) => gauges.relays += 1,
+                Some(RelayStatus::Leaf {
+                    link_state: LinkState::Connected,
+                    ..
+                }) => gauges.connected_leaves += 1,
+                _ => (),
+            }
+        }
+    }
+
+    gauges
 }
 
 fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
