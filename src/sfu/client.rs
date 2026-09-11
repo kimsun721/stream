@@ -514,7 +514,7 @@ impl Client {
             }
             Some(RelayStatus::Leaf {
                 relay,
-                link_state: LinkState::Connecting,
+                link_state: LinkState::Connecting { .. },
             }) => {
                 p2p_sdps.push((relay, sdp));
             }

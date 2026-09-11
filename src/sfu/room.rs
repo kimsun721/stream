@@ -3,6 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::mpsc::SyncSender,
+    time::Instant,
 };
 
 use axum::http::StatusCode;
@@ -168,7 +169,7 @@ impl Room {
 
         leaf.relay_status = Some(RelayStatus::Leaf {
             relay: relay_id,
-            link_state: LinkState::Connecting,
+            link_state: LinkState::Connecting { at: Instant::now() },
         });
 
         info!("promote relay={relay_id} leaf={}", leaf_id);

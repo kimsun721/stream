@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MAX_SOCKET_READ_COUNT: u64 = 100;
+const P2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `advertised_addr` is the address handed to clients in ICE candidates, which
 /// is not the bind address: the socket listens on every interface so a
@@ -287,7 +288,7 @@ pub fn run(
                 };
             }
 
-            let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
+            let mut leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
                 .clients
                 .iter()
                 .filter_map(|c| {
@@ -331,6 +332,17 @@ pub fn run(
                     None
                 })
                 .collect();
+
+            for client in room.clients.iter() {
+                if let Some(RelayStatus::Leaf {
+                    relay,
+                    link_state: LinkState::Connecting { at },
+                }) = client.relay_status
+                    && at.elapsed() >= P2P_CONNECT_TIMEOUT
+                {
+                    leaf_relay_ids_to_demote.push((relay, client.id));
+                }
+            }
 
             for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
                 room.demote(relay_id, leaf_id);

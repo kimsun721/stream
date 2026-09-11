@@ -397,7 +397,7 @@ pub enum RelayStatus {
 
 #[derive(Debug)]
 pub enum LinkState {
-    Connecting,
+    Connecting { at: Instant },
     Connected,
 }
 
