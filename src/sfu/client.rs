@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::tuning,
+    metrics,
     sfu::error::{ClientError, ClientResult},
     types::{
         AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
@@ -52,6 +53,7 @@ impl Client {
                 Output::Timeout(v) => break v,
                 Output::Transmit(v) => {
                     socket.send_to(&v.contents, v.destination)?;
+                    metrics::sent(v.contents.len());
                 }
 
                 Output::Event(e) => match e {
@@ -82,6 +84,8 @@ impl Client {
                         }
                     }
                     Event::MediaData(data) => {
+                        metrics::media_data();
+
                         if self.role == ClientRole::Streamer
                             && let Some(rid) = data.rid
                             && let Some(track_in) =
@@ -210,8 +214,20 @@ impl Client {
             };
 
             writer.write(pt, data.network_time, data.time, data.data.clone())?;
+            metrics::media_write();
         }
         Ok(())
+    }
+
+    /// What a leaf would have been sent had its relay not been carrying it. The
+    /// same match the fanout applies, because a leaf takes one layer and
+    /// counting every frame would inflate the figure by the layer count.
+    pub fn count_relay_saved(&self, datas: &Vec<MediaData>) {
+        for data in datas {
+            if self.matching_viewer_mid(data.mid, data.rid).is_some() {
+                metrics::relay_saved(data.data.len());
+            }
+        }
     }
 
     pub fn handle_keyframe_requests(

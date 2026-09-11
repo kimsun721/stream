@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::metrics;
 use crate::types::{
     Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
     Rooms, StreamKey, TrackOut, TrackOutState,
@@ -172,6 +173,8 @@ impl Room {
             link_state: LinkState::Connecting { at: Instant::now() },
         });
 
+        metrics::promoted();
+
         info!("promote relay={relay_id} leaf={}", leaf_id);
     }
 
@@ -179,6 +182,8 @@ impl Room {
         let Some(relay) = self.clients.iter_mut().find(|c| c.id == relay_id) else {
             return;
         };
+
+        metrics::demoted();
 
         if let Err(e) = relay.demote_relay() {
             error!("demote relay failed error={e}");
