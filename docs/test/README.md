@@ -23,6 +23,10 @@ The load run is separate and is described below.
 | `tests/relay.rs` | Relay promotion, the upload cutoff, leaf gating, the peer link timeout |
 | `tests/load.rs` | The load baseline. Ignored by default |
 
+Each load run worth keeping is recorded under [`baseline/`](baseline/), from
+[`_template.md`](baseline/_template.md), so a later run is compared against an
+earlier one rather than against memory.
+
 ## The harness
 
 `tests/common/mod.rs` spawns one server per test binary and hands out clients
