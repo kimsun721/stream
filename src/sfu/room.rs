@@ -520,7 +520,7 @@ mod tests {
             let mut room = Room {
                 streamer_id: None,
                 clients: Vec::new(),
-                state: state.clone(),
+                state,
                 hashed_stream_key: [0; 32],
             };
 
