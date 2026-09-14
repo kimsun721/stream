@@ -1,5 +1,5 @@
 use std::{
-    net::UdpSocket,
+    net::{SocketAddr, UdpSocket},
     rc::Rc,
     sync::mpsc::Receiver,
     time::{Duration, Instant},
@@ -10,6 +10,7 @@ use tracing::{debug, error};
 
 use crate::{
     config::tuning,
+    metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
         ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
@@ -18,15 +19,35 @@ use crate::{
 };
 
 const MAX_SOCKET_READ_COUNT: u64 = 100;
+const P2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
+/// `advertised_addr` is the address handed to clients in ICE candidates, which
+/// is not the bind address: the socket listens on every interface so a
+/// container can receive, but str0m matches an incoming datagram to a local
+/// candidate by its destination, and `0.0.0.0` matches none of them.
+pub fn run(
+    rx: Receiver<SfuMessage>,
+    socket: UdpSocket,
+    advertised_addr: SocketAddr,
+) -> SfuResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
-
-    let socket_destination = socket.local_addr().expect("socket local address");
+    let mut woken_for: Option<Instant> = None;
 
     loop {
+        let _lap = metrics::time(Phase::Lap);
+        metrics::lap();
+
+        if let Some(deadline) = woken_for {
+            metrics::lap_lateness(Instant::now().saturating_duration_since(deadline));
+        }
+
+        let mut handled = 0;
+        let control_drain = metrics::time(Phase::ControlDrain);
+
         while let Ok(message) = rx.try_recv() {
+            handled += 1;
+
             match message {
                 SfuMessage::RegisterClient {
                     rtc,
@@ -58,23 +79,33 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             };
         }
 
+        drop(control_drain);
+        metrics::control_messages(handled);
+
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
         for room in rooms.values_mut() {
             if matches!(room.state, RoomState::Idle) && room.clients.is_empty() {
+                metrics::room_skipped();
                 continue;
             };
+
+            metrics::room_visited();
+            let _room = metrics::time(Phase::RoomIteration);
 
             let mut to_remove = Vec::new();
             let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
             let mut media_datas = Vec::new();
             let mut keyframe_requests = Vec::new();
             let mut p2p_sdps = Vec::new();
+            let mut connected_relays = Vec::new();
             let mut disconnected_relays = Vec::new();
             let mut should_reevaluate = false;
 
             let mut fallback_leafs = Vec::new();
             let mut needs_init = false;
+
+            let client_tick = metrics::time(Phase::ClientTick);
 
             for (idx, client) in room.clients.iter_mut().enumerate() {
                 match client.tick(
@@ -83,17 +114,20 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     &mut media_datas,
                     &mut keyframe_requests,
                     &mut p2p_sdps,
+                    &mut connected_relays,
                     &mut disconnected_relays,
                     &mut should_reevaluate,
                 ) {
                     Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
                     Ok(PollResult::Disconnected) => {
+                        metrics::client_disconnected();
+
                         if client.role == ClientRole::Streamer {
                             needs_init = true;
                         }
 
                         match &client.relay_status {
-                            Some(RelayStatus::Relay { leaf }) => {
+                            Some(RelayStatus::Relay { leaf, .. }) => {
                                 fallback_leafs.push(*leaf);
                             }
                             Some(RelayStatus::Leaf { relay, .. }) => {
@@ -104,11 +138,14 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                         to_remove.push(idx);
                     }
                     Err(e) => {
+                        metrics::client_tick_error();
                         to_remove.push(idx);
                         error!("client tick failed: {}", e);
                     }
                 };
             }
+
+            drop(client_tick);
 
             for track in &new_tracks {
                 for client in room.viewers_mut() {
@@ -167,20 +204,30 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 };
             }
 
-            for c in room.clients.iter_mut().filter(|c| {
-                c.role == ClientRole::Viewer
-                    && !matches!(
-                        c.relay_status,
-                        Some(RelayStatus::Leaf {
-                            link_state: LinkState::Connected,
-                            ..
-                        })
-                    )
-            }) {
+            let media_fanout = metrics::time(Phase::MediaFanout);
+
+            for c in room
+                .clients
+                .iter_mut()
+                .filter(|c| c.role == ClientRole::Viewer)
+            {
+                if matches!(
+                    c.relay_status,
+                    Some(RelayStatus::Leaf {
+                        link_state: LinkState::Connected,
+                        ..
+                    })
+                ) {
+                    c.count_relay_saved(&media_datas);
+                    continue;
+                }
+
                 if let Err(e) = c.handle_media_datas(&media_datas) {
                     error!("handle_media_datas failed: {}", e);
                 };
             }
+
+            drop(media_fanout);
 
             if let Some(streamer) = room
                 .clients
@@ -215,6 +262,8 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     error!("demote relay failed error={e}")
                 };
             }
+
+            let relay_policy = metrics::time(Phase::RelayPolicy);
 
             for c in room.clients.iter_mut().filter(|c| {
                 matches!(c.role, ClientRole::Viewer)
@@ -269,19 +318,54 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 room.promote(relay_id);
             }
 
-            let leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
+            for relay_id in connected_relays {
+                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+                    && let Some(RelayStatus::Relay {
+                        p2p_connected_at, ..
+                    }) = &mut relay.relay_status
+                {
+                    *p2p_connected_at = Some(Instant::now());
+                };
+            }
+
+            let mut leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
                 .clients
                 .iter()
                 .filter_map(|c| {
-                    let Some(RelayStatus::Relay { leaf }) = c.relay_status else {
+                    let Some(RelayStatus::Relay {
+                        leaf,
+                        p2p_connected_at,
+                    }) = c.relay_status
+                    else {
                         return None;
                     };
 
-                    let relay_outgoing_kbps = c.relay_outgoing_kbps?;
+                    let relay_outgoing_kbps = c.relay_outgoing_kbps? as u64;
 
-                    if relay_outgoing_kbps < tuning().relay.outgoing_cutoff_kbps
-                        || !c.is_perf_healthy()
-                    {
+                    let relay_outgoing_cutoff_kbps = c
+                        .tracks_out
+                        .iter()
+                        .filter_map(|t| {
+                            let chosen_rid = t.chosen_rid?;
+
+                            t.track_in
+                                .upgrade()?
+                                .available_simulcast_layers
+                                .iter()
+                                .find(|layer| layer.rid == chosen_rid)?
+                                .estimate_bps()
+                                .map(|bps| bps / 1000)
+                        })
+                        .sum::<u64>()
+                        .max(tuning().relay.min_outgoing_kbps as u64)
+                        * (100 - tuning().relay.traffic_headroom_percent)
+                        / 100;
+
+                    if p2p_connected_at?.elapsed() < tuning().relay.min_p2p_connection_age() {
+                        return None;
+                    };
+
+                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
                         return Some((c.id, leaf));
                     };
 
@@ -289,14 +373,31 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                 })
                 .collect();
 
+            for client in room.clients.iter() {
+                if let Some(RelayStatus::Leaf {
+                    relay,
+                    link_state: LinkState::Connecting { at },
+                }) = client.relay_status
+                    && at.elapsed() >= P2P_CONNECT_TIMEOUT
+                {
+                    leaf_relay_ids_to_demote.push((relay, client.id));
+                }
+            }
+
             for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
                 room.demote(relay_id, leaf_id);
             }
+
+            drop(relay_policy);
 
             if needs_init {
                 room.init();
             }
         }
+
+        metrics::gauges(count_gauges(&rooms));
+
+        woken_for = Some(timeout);
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
         let mut socket_read_count = 0;
@@ -308,7 +409,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
         if let Err(e) = socket.set_nonblocking(false) {
             error!("socket set_nonblocking error={e}");
         } else {
-            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, socket_destination) {
+            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, advertised_addr) {
                 route_socket_input(&mut rooms, input);
                 socket_read_count += 1;
             }
@@ -322,7 +423,7 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
                     break;
                 }
 
-                match read_socket_input(&socket, &mut buf, socket_destination) {
+                match read_socket_input(&socket, &mut buf, advertised_addr) {
                     Ok(Some(input)) => {
                         route_socket_input(&mut rooms, input);
                         socket_read_count += 1;
@@ -332,6 +433,10 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
         };
 
+        if socket_read_count > MAX_SOCKET_READ_COUNT {
+            metrics::socket_drain_full();
+        }
+
         let now = Instant::now();
         for room in rooms.values_mut() {
             for client in room.clients.iter_mut() {
@@ -339,6 +444,39 @@ pub fn run(rx: Receiver<SfuMessage>, socket: UdpSocket) -> SfuResult<()> {
             }
         }
     }
+}
+
+/// Recounted every lap rather than tracked by increments, because clients leave
+/// through several paths and a missed decrement would never correct itself.
+fn count_gauges(rooms: &Rooms) -> Gauges {
+    let mut gauges = Gauges {
+        rooms: rooms.len() as u64,
+        clients: 0,
+        viewers: 0,
+        relays: 0,
+        connected_leaves: 0,
+    };
+
+    for room in rooms.values() {
+        gauges.clients += room.clients.len() as u64;
+
+        for client in &room.clients {
+            if client.role == ClientRole::Viewer {
+                gauges.viewers += 1;
+            }
+
+            match client.relay_status {
+                Some(RelayStatus::Relay { .. }) => gauges.relays += 1,
+                Some(RelayStatus::Leaf {
+                    link_state: LinkState::Connected,
+                    ..
+                }) => gauges.connected_leaves += 1,
+                _ => (),
+            }
+        }
+    }
+
+    gauges
 }
 
 fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {

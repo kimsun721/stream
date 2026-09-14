@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use str0m::crypto::from_feature_flags;
 
 mod config;
+mod metrics;
 mod servers;
 mod sfu;
 mod types;
@@ -22,7 +23,7 @@ async fn main() {
     let (tx, rx) = mpsc::sync_channel::<SfuMessage>(32);
 
     std::thread::spawn(move || {
-        if let Err(e) = sfu::run::run(rx, socket) {
+        if let Err(e) = sfu::run::run(rx, socket, addr) {
             error!("udp error : {}", e);
         };
     });

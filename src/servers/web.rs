@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{WebConfig, tuning},
+    metrics,
     types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
     utils::string::hash_string,
 };
@@ -85,6 +86,7 @@ pub async fn run(
     };
 
     let http_api = Router::new()
+        .route("/metrics", routing::get(get_metrics))
         .route("/rooms", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
@@ -237,6 +239,12 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
             stream_key: stream_key.0,
         }),
     ))
+}
+
+/// Cumulative since start, so a caller takes two readings and subtracts. A read
+/// that reset them would spoil the next one.
+async fn get_metrics() -> Json<metrics::Snapshot> {
+    Json(metrics::snapshot())
 }
 
 #[derive(Serialize)]

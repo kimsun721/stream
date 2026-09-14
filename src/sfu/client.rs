@@ -17,6 +17,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     config::tuning,
+    metrics,
     sfu::error::{ClientError, ClientResult},
     types::{
         AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
@@ -43,6 +44,7 @@ impl Client {
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        connected_relays: &mut Vec<ClientId>,
         disconnected_relays: &mut Vec<ClientId>,
         should_reevaluate: &mut bool,
     ) -> ClientResult<PollResult> {
@@ -51,6 +53,7 @@ impl Client {
                 Output::Timeout(v) => break v,
                 Output::Transmit(v) => {
                     socket.send_to(&v.contents, v.destination)?;
+                    metrics::sent(v.contents.len());
                 }
 
                 Output::Event(e) => match e {
@@ -81,6 +84,8 @@ impl Client {
                         }
                     }
                     Event::MediaData(data) => {
+                        metrics::media_data();
+
                         if self.role == ClientRole::Streamer
                             && let Some(rid) = data.rid
                             && let Some(track_in) =
@@ -108,6 +113,7 @@ impl Client {
                         data,
                         keyframe_requests,
                         p2p_sdps,
+                        connected_relays,
                         disconnected_relays,
                     )?,
 
@@ -208,8 +214,20 @@ impl Client {
             };
 
             writer.write(pt, data.network_time, data.time, data.data.clone())?;
+            metrics::media_write(data.data.len());
         }
         Ok(())
+    }
+
+    /// What a leaf would have been sent had its relay not been carrying it. The
+    /// same match the fanout applies, because a leaf takes one layer and
+    /// counting every frame would inflate the figure by the layer count.
+    pub fn count_relay_saved(&self, datas: &Vec<MediaData>) {
+        for data in datas {
+            if self.matching_viewer_mid(data.mid, data.rid).is_some() {
+                metrics::relay_saved(data.data.len());
+            }
+        }
     }
 
     pub fn handle_keyframe_requests(
@@ -283,6 +301,7 @@ impl Client {
         media_datas: &mut Vec<MediaData>,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        connected_relays: &mut Vec<ClientId>,
         disconnected_relays: &mut Vec<ClientId>,
         should_reevaluate: &mut bool,
     ) -> ClientResult<PollResult> {
@@ -293,6 +312,7 @@ impl Client {
             media_datas,
             keyframe_requests,
             p2p_sdps,
+            connected_relays,
             disconnected_relays,
             should_reevaluate,
         )?;
@@ -364,6 +384,7 @@ impl Client {
         data: ChannelData,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
+        connected_relays: &mut Vec<ClientId>,
         disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
         let payload: C2sDcPayload = match serde_json::from_slice(&data.data) {
@@ -394,7 +415,7 @@ impl Client {
                 }
             }
             C2sDcPayload::SetLayerMode { mid, layer_mode } => {
-                self.set_layer_mode(mid, layer_mode, keyframe_requests)
+                self.set_layer_mode(Mid::from(mid.as_str()), layer_mode, keyframe_requests)
             }
             C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
@@ -403,7 +424,13 @@ impl Client {
             C2sDcPayload::P2pAnswer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
             }
-            C2sDcPayload::P2pConnected => self.handle_p2p_connected(),
+            C2sDcPayload::P2pConnected => {
+                if let Ok(Some(relay_id)) = self.handle_p2p_connected() {
+                    connected_relays.push(relay_id);
+                };
+
+                Ok(())
+            }
             C2sDcPayload::P2pDisconnected => {
                 self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
             }
@@ -452,15 +479,15 @@ impl Client {
                         .available_simulcast_layers
                         .iter()
                         .map(|l| AvailableSimulcastLayer {
-                            rid: l.rid,
+                            rid: l.rid.to_string(),
                             bitrate_estimate: l.estimate_bps(),
                         })
                         .collect();
 
                     let payload = S2cDcPayload::LayerStatus {
-                        mid,
+                        mid: mid.to_string(),
                         available_simulcast_layers,
-                        chosen_layer: track_out.chosen_rid,
+                        chosen_layer: track_out.chosen_rid.map(|rid| rid.to_string()),
                         layer_mode: track_out.layer_mode,
                     };
 
@@ -498,12 +525,12 @@ impl Client {
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<()> {
         match self.relay_status {
-            Some(RelayStatus::Relay { leaf }) => {
+            Some(RelayStatus::Relay { leaf, .. }) => {
                 p2p_sdps.push((leaf, sdp));
             }
             Some(RelayStatus::Leaf {
                 relay,
-                link_state: LinkState::Connecting,
+                link_state: LinkState::Connecting { .. },
             }) => {
                 p2p_sdps.push((relay, sdp));
             }
@@ -512,12 +539,13 @@ impl Client {
         Ok(())
     }
 
-    fn handle_p2p_connected(&mut self) -> ClientResult<()> {
-        if let Some(RelayStatus::Leaf { link_state, .. }) = &mut self.relay_status {
+    fn handle_p2p_connected(&mut self) -> ClientResult<Option<ClientId>> {
+        if let Some(RelayStatus::Leaf { link_state, relay }) = &mut self.relay_status {
             *link_state = LinkState::Connected;
+            Ok(Some(*relay))
+        } else {
+            Ok(None)
         }
-
-        Ok(())
     }
 
     fn handle_p2p_disconnected(
@@ -672,7 +700,10 @@ impl Client {
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
 
-        let payload = S2cDcPayload::LayerChanged { rid, mid };
+        let payload = S2cDcPayload::LayerChanged {
+            rid: rid.to_string(),
+            mid: mid.to_string(),
+        };
 
         if let Err(e) = self.send_payload_via_dc(payload) {
             error!("send_payload_via_dc failed error: {e}");

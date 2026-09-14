@@ -3,6 +3,7 @@ use std::{
     ops::{Deref, DerefMut},
     rc::Rc,
     sync::mpsc::SyncSender,
+    time::Instant,
 };
 
 use axum::http::StatusCode;
@@ -11,6 +12,7 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::metrics;
 use crate::types::{
     Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
     Rooms, StreamKey, TrackOut, TrackOutState,
@@ -156,7 +158,10 @@ impl Room {
             return;
         };
 
-        relay.relay_status = Some(RelayStatus::Relay { leaf: leaf_id });
+        relay.relay_status = Some(RelayStatus::Relay {
+            leaf: leaf_id,
+            p2p_connected_at: None,
+        });
         relay.relay_outgoing_kbps = None;
 
         let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
@@ -165,8 +170,10 @@ impl Room {
 
         leaf.relay_status = Some(RelayStatus::Leaf {
             relay: relay_id,
-            link_state: LinkState::Connecting,
+            link_state: LinkState::Connecting { at: Instant::now() },
         });
+
+        metrics::promoted();
 
         info!("promote relay={relay_id} leaf={}", leaf_id);
     }
@@ -175,6 +182,8 @@ impl Room {
         let Some(relay) = self.clients.iter_mut().find(|c| c.id == relay_id) else {
             return;
         };
+
+        metrics::demoted();
 
         if let Err(e) = relay.demote_relay() {
             error!("demote relay failed error={e}");
@@ -511,7 +520,7 @@ mod tests {
             let mut room = Room {
                 streamer_id: None,
                 clients: Vec::new(),
-                state: state.clone(),
+                state,
                 hashed_stream_key: [0; 32],
             };
 

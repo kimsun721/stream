@@ -11,7 +11,7 @@ use str0m::{
 
 use tracing::error;
 
-use crate::{config::tuning, sfu::error::SocketResult, utils};
+use crate::{config::tuning, metrics, sfu::error::SocketResult, utils};
 
 pub fn bind_udp_socket() -> (SocketAddr, UdpSocket) {
     let port = tuning().server.media_port;
@@ -34,6 +34,8 @@ pub fn read_socket_input<'a>(
 ) -> SocketResult<Option<Input<'a>>> {
     let input = match socket.recv_from(buf) {
         Ok((n, source)) => {
+            metrics::socket_read(n);
+
             let data = &buf[..n];
             Some(Input::Receive(
                 Instant::now(),
