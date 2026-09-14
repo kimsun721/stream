@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+
+      # too_many_arguments is allowed until the client storage rework splits
+      # those signatures up. Everything else fails the build rather than
+      # accumulating.
+      - run: cargo clippy --all-targets -- -D warnings -A clippy::too_many_arguments
+
+      # The load run and the tests that need ffmpeg are ignored, so this is the
+      # unit suite plus every integration suite.
+      - run: cargo test
