@@ -214,7 +214,7 @@ impl Client {
             };
 
             writer.write(pt, data.network_time, data.time, data.data.clone())?;
-            metrics::media_write();
+            metrics::media_write(data.data.len());
         }
         Ok(())
     }

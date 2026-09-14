@@ -51,11 +51,13 @@ impl Histogram {
 
         Durations {
             count,
+            total_us: self.total_us.load(Relaxed),
             mean_us: self.total_us.load(Relaxed).checked_div(count).unwrap_or(0),
             max_us: self.max_us.load(Relaxed),
             p50_us: percentile(&counts, count, 50),
             p95_us: percentile(&counts, count, 95),
             p99_us: percentile(&counts, count, 99),
+            buckets: counts,
         }
     }
 }
@@ -151,10 +153,11 @@ atomics!(
     ROOMS_SKIPPED,
     SENT_PACKETS,
     SENT_BYTES,
-    RELAY_SAVED_PACKETS,
+    RELAY_SAVED_FRAMES,
     RELAY_SAVED_BYTES,
     MEDIA_DATAS,
     MEDIA_WRITES,
+    MEDIA_WRITE_BYTES,
     CLIENT_TICK_ERRORS,
     CLIENTS_DISCONNECTED,
     PROMOTIONS,
@@ -194,11 +197,15 @@ pub fn sent(bytes: usize) {
     SENT_BYTES.fetch_add(bytes as u64, Relaxed);
 }
 
-/// Bytes a leaf did not receive because its relay is carrying them instead.
+/// A frame a leaf did not receive because its relay is carrying it instead.
 /// Only the frames the leaf would have matched count, so the caller applies the
 /// same mid and rid test the fanout does.
+///
+/// Frames and payload bytes, to compare against `media_write` rather than
+/// against the wire figures, which carry headers and every other kind of
+/// traffic.
 pub fn relay_saved(bytes: usize) {
-    RELAY_SAVED_PACKETS.fetch_add(1, Relaxed);
+    RELAY_SAVED_FRAMES.fetch_add(1, Relaxed);
     RELAY_SAVED_BYTES.fetch_add(bytes as u64, Relaxed);
 }
 
@@ -206,8 +213,13 @@ pub fn media_data() {
     MEDIA_DATAS.fetch_add(1, Relaxed);
 }
 
-pub fn media_write() {
+/// Counted where the frame is handed to str0m, so this is what the server meant
+/// to send. What leaves the socket can be less when the loop cannot keep up,
+/// which is why the relay saving is measured against this and not against
+/// `sent_bytes`.
+pub fn media_write(bytes: usize) {
     MEDIA_WRITES.fetch_add(1, Relaxed);
+    MEDIA_WRITE_BYTES.fetch_add(bytes as u64, Relaxed);
 }
 
 pub fn client_tick_error() {
@@ -246,14 +258,21 @@ pub fn gauges(gauges: Gauges) {
     CONNECTED_LEAVES.store(gauges.connected_leaves, Relaxed);
 }
 
+/// Every field is cumulative, the percentiles included. A caller that wants a
+/// window subtracts two readings, which for the percentiles means subtracting
+/// `buckets` and reading the result rather than the figures beside it.
 #[derive(Serialize)]
 pub struct Durations {
     pub count: u64,
+    pub total_us: u64,
     pub mean_us: u64,
     pub max_us: u64,
     pub p50_us: u64,
     pub p95_us: u64,
     pub p99_us: u64,
+    /// Sample counts per power of two microseconds, so bucket `i` holds
+    /// durations under `2^i`.
+    pub buckets: Vec<u64>,
 }
 
 /// Cumulative since start. Two reads and a subtraction give any window, and a
@@ -271,10 +290,11 @@ pub struct Snapshot {
 
     pub sent_packets: u64,
     pub sent_bytes: u64,
-    pub relay_saved_packets: u64,
+    pub relay_saved_frames: u64,
     pub relay_saved_bytes: u64,
     pub media_datas: u64,
     pub media_writes: u64,
+    pub media_write_bytes: u64,
 
     pub client_tick_errors: u64,
     pub clients_disconnected: u64,
@@ -309,10 +329,11 @@ pub fn snapshot() -> Snapshot {
 
         sent_packets: SENT_PACKETS.load(Relaxed),
         sent_bytes: SENT_BYTES.load(Relaxed),
-        relay_saved_packets: RELAY_SAVED_PACKETS.load(Relaxed),
+        relay_saved_frames: RELAY_SAVED_FRAMES.load(Relaxed),
         relay_saved_bytes: RELAY_SAVED_BYTES.load(Relaxed),
         media_datas: MEDIA_DATAS.load(Relaxed),
         media_writes: MEDIA_WRITES.load(Relaxed),
+        media_write_bytes: MEDIA_WRITE_BYTES.load(Relaxed),
 
         client_tick_errors: CLIENT_TICK_ERRORS.load(Relaxed),
         clients_disconnected: CLIENTS_DISCONNECTED.load(Relaxed),
