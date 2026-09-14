@@ -9,6 +9,22 @@
 //! One server serves the whole binary, so the scenarios run one after another
 //! inside a single test rather than as three that a `--test-threads` above one
 //! would overlap onto the same server.
+//!
+//! Every setting comes from the environment, because `cargo test` owns the
+//! command line and rejects flags of our own. The defaults are the ones the
+//! recorded baseline was measured with, so a plain run stays comparable to it:
+//!
+//! ```text
+//! LOAD_SCENARIOS=viewers,relay,rooms
+//! LOAD_VIEWERS=50,100,200,400,500,600,800
+//! LOAD_RELAY_VIEWERS=50,100,200,400
+//! LOAD_ROOMS=1,4,20
+//! LOAD_ROOM_VIEWERS=400
+//! LOAD_RELAY_SHARE=2          one viewer in this many advertises relay upload
+//! LOAD_LAYERS=l:300,m:800,h:2500
+//! LOAD_SETTLE=5
+//! LOAD_WINDOW=10
+//! ```
 
 mod common;
 
@@ -18,9 +34,6 @@ use common::{CreatedRoom, Detached, RelayCapacity, Server, is_connected};
 use serde_json::Value;
 
 const CONNECT: Duration = Duration::from_secs(15);
-/// Long enough for the connect burst to drain out of the averages.
-const SETTLE: Duration = Duration::from_secs(5);
-const WINDOW: Duration = Duration::from_secs(10);
 /// A step gives up on stragglers rather than on the whole run, and reports the
 /// count the server actually holds.
 const ALL_CONNECTED: Duration = Duration::from_secs(60);
@@ -31,32 +44,159 @@ const PLENTY_OF_UPLOAD: u32 = 20_000;
 #[tokio::test]
 #[ignore = "load run"]
 async fn baseline() {
+    let run = Run::from_env();
     let server = Server::default();
     let client = reqwest::Client::new();
 
-    viewers_in_one_room(&server, &client).await;
-    viewers_with_relay(&server, &client).await;
-    viewers_across_rooms(&server, &client).await;
+    if run.wants("viewers") {
+        viewers_in_one_room(&run, &server, &client).await;
+    }
+
+    if run.wants("relay") {
+        viewers_with_relay(&run, &server, &client).await;
+    }
+
+    if run.wants("rooms") {
+        viewers_across_rooms(&run, &server, &client).await;
+    }
+}
+
+/// What the run was told to do. Printed above every table, so a pasted result
+/// says what produced it.
+struct Run {
+    scenarios: Vec<String>,
+    viewers: Vec<usize>,
+    relay_viewers: Vec<usize>,
+    rooms: Vec<usize>,
+    room_viewers: usize,
+    relay_share: usize,
+    layers: Vec<(String, u32)>,
+    settle: Duration,
+    window: Duration,
+}
+
+impl Run {
+    fn from_env() -> Self {
+        let run = Run {
+            scenarios: words("LOAD_SCENARIOS", "viewers,relay,rooms"),
+            viewers: numbers("LOAD_VIEWERS", "50,100,200,400,500,600,800"),
+            relay_viewers: numbers("LOAD_RELAY_VIEWERS", "50,100,200,400"),
+            rooms: numbers("LOAD_ROOMS", "1,4,20"),
+            room_viewers: numbers("LOAD_ROOM_VIEWERS", "400")[0],
+            relay_share: numbers("LOAD_RELAY_SHARE", "2")[0],
+            layers: layers("LOAD_LAYERS", "l:300,m:800,h:2500"),
+            settle: Duration::from_secs(numbers("LOAD_SETTLE", "5")[0] as u64),
+            window: Duration::from_secs(numbers("LOAD_WINDOW", "10")[0] as u64),
+        };
+
+        // Rooms of different sizes would not be comparable with each other, so
+        // an uneven split is a mistake rather than something to round away.
+        for rooms in &run.rooms {
+            assert!(
+                run.room_viewers.is_multiple_of(*rooms),
+                "LOAD_ROOM_VIEWERS {} does not divide into {rooms} rooms",
+                run.room_viewers
+            );
+        }
+
+        assert!(run.relay_share > 0, "LOAD_RELAY_SHARE must be at least 1");
+
+        run
+    }
+
+    fn wants(&self, scenario: &str) -> bool {
+        self.scenarios.iter().any(|s| s == scenario)
+    }
+
+    fn layer_rates(&self) -> Vec<(&str, u32)> {
+        self.layers
+            .iter()
+            .map(|(rid, kbps)| (rid.as_str(), *kbps))
+            .collect()
+    }
+
+    fn rids(&self) -> Vec<&str> {
+        self.layers.iter().map(|(rid, _)| rid.as_str()).collect()
+    }
+
+    fn describe(&self) -> String {
+        let layers: Vec<String> = self
+            .layers
+            .iter()
+            .map(|(rid, kbps)| format!("{rid}:{kbps}"))
+            .collect();
+
+        format!(
+            "layers={} settle={}s window={}s",
+            layers.join(","),
+            self.settle.as_secs(),
+            self.window.as_secs()
+        )
+    }
+}
+
+fn setting(name: &str, fallback: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| fallback.to_string())
+}
+
+fn words(name: &str, fallback: &str) -> Vec<String> {
+    setting(name, fallback)
+        .split(',')
+        .map(|word| word.trim().to_string())
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
+fn numbers(name: &str, fallback: &str) -> Vec<usize> {
+    let values: Vec<usize> = words(name, fallback)
+        .iter()
+        .map(|word| {
+            word.parse()
+                .unwrap_or_else(|_| panic!("{name} holds {word}, which is not a number"))
+        })
+        .collect();
+
+    assert!(!values.is_empty(), "{name} is empty");
+
+    values
+}
+
+/// `rid:kbps` pairs, in the order the publisher declares them.
+fn layers(name: &str, fallback: &str) -> Vec<(String, u32)> {
+    words(name, fallback)
+        .iter()
+        .map(|pair| {
+            let (rid, kbps) = pair
+                .split_once(':')
+                .unwrap_or_else(|| panic!("{name} holds {pair}, which is not rid:kbps"));
+
+            let kbps = kbps
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} holds {kbps}, which is not a number"));
+
+            (rid.to_string(), kbps)
+        })
+        .collect()
 }
 
 /// What one viewer costs, which every other run is compared against. The
 /// generator's own CPU is printed beside the server's: if it is far larger, the
 /// run measured this machine rather than the server.
-async fn viewers_in_one_room(server: &Server, client: &reqwest::Client) {
-    let (publisher, room) = publish(server, client).await;
+async fn viewers_in_one_room(run: &Run, server: &Server, client: &reqwest::Client) {
+    let (publisher, room) = publish(run, server, client).await;
 
-    header("viewers in one room");
+    header(run, "viewers in one room");
 
     let mut viewers = Viewers::new();
     let mut added = 0;
 
-    for target in [50, 100, 200, 400, 500, 600, 800] {
+    for target in run.viewers.clone() {
         viewers
-            .add(server, client, &room.room_id, target - added, false)
+            .add(run, server, client, &room.room_id, target - added, false)
             .await;
         added = target;
 
-        viewers.measure(server, client, target).await;
+        viewers.measure(run, server, client, target).await;
     }
 
     teardown(server, client, viewers, vec![publisher], &[room]).await;
@@ -65,21 +205,21 @@ async fn viewers_in_one_room(server: &Server, client: &reqwest::Client) {
 /// The same sweep with every other viewer advertising the upload a relay needs.
 /// One relay carries one leaf, so the saving cannot pass half whatever the
 /// viewers advertise.
-async fn viewers_with_relay(server: &Server, client: &reqwest::Client) {
-    let (publisher, room) = publish(server, client).await;
+async fn viewers_with_relay(run: &Run, server: &Server, client: &reqwest::Client) {
+    let (publisher, room) = publish(run, server, client).await;
 
-    header("viewers with relay");
+    header(run, "viewers with relay");
 
     let mut viewers = Viewers::new();
     let mut added = 0;
 
-    for target in [50, 100, 200, 400] {
+    for target in run.relay_viewers.clone() {
         viewers
-            .add(server, client, &room.room_id, target - added, true)
+            .add(run, server, client, &room.room_id, target - added, true)
             .await;
         added = target;
 
-        viewers.measure(server, client, target).await;
+        viewers.measure(run, server, client, target).await;
     }
 
     teardown(server, client, viewers, vec![publisher], &[room]).await;
@@ -88,26 +228,33 @@ async fn viewers_with_relay(server: &Server, client: &reqwest::Client) {
 /// One viewer count split across more rooms. Room work is a small share of the
 /// loop, so this says how much of the cost is the walk itself rather than what
 /// each room holds.
-async fn viewers_across_rooms(server: &Server, client: &reqwest::Client) {
-    header("400 viewers across rooms");
+async fn viewers_across_rooms(run: &Run, server: &Server, client: &reqwest::Client) {
+    header(run, &format!("{} viewers across rooms", run.room_viewers));
 
-    for rooms in [1, 4, 20] {
+    for rooms in run.rooms.clone() {
         let mut publishers: Vec<Detached> = Vec::new();
         let mut created = Vec::new();
         let mut viewers = Viewers::new();
 
         for _ in 0..rooms {
-            let (publisher, room) = publish(server, client).await;
+            let (publisher, room) = publish(run, server, client).await;
             publishers.push(publisher);
 
             viewers
-                .add(server, client, &room.room_id, 400 / rooms, false)
+                .add(
+                    run,
+                    server,
+                    client,
+                    &room.room_id,
+                    run.room_viewers / rooms,
+                    false,
+                )
                 .await;
 
             created.push(room);
         }
 
-        viewers.measure(server, client, rooms).await;
+        viewers.measure(run, server, client, rooms).await;
 
         teardown(server, client, viewers, publishers, &created).await;
     }
@@ -141,26 +288,26 @@ async fn teardown(
     }
 }
 
-async fn publish(server: &Server, client: &reqwest::Client) -> (Detached, CreatedRoom) {
+async fn publish(run: &Run, server: &Server, client: &reqwest::Client) -> (Detached, CreatedRoom) {
     let room = server.create_room(client).await;
 
     let mut publisher = server
-        .connect_publisher(client, &room.stream_key, &["l", "m", "h"])
+        .connect_publisher(client, &room.stream_key, &run.rids())
         .await;
     assert!(
         publisher.run_until(CONNECT, is_connected),
         "publisher connect"
     );
-    publisher.start_media(&[("l", 300), ("m", 800), ("h", 2500)]);
+    publisher.start_media(&run.layer_rates());
 
     server.set_live(client, &room.room_id).await;
 
     (publisher.detach(), room)
 }
 
-fn header(title: &str) {
+fn header(run: &Run, title: &str) {
     println!();
-    println!("{title}");
+    println!("{title}  {}", run.describe());
     println!(
         "{:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>6} {:>6}",
         "step",
@@ -204,6 +351,7 @@ impl Viewers {
     /// fill several rooms in turn.
     async fn add(
         &mut self,
+        run: &Run,
         server: &Server,
         client: &reqwest::Client,
         room_id: &str,
@@ -217,7 +365,7 @@ impl Viewers {
                 Ok(mut viewer) => {
                     // Every other viewer offers to relay, which is the most
                     // pairs the server can form out of them.
-                    if relay && self.asked.is_multiple_of(2) {
+                    if relay && self.asked.is_multiple_of(run.relay_share) {
                         viewer.advertise_relay_capacity(RelayCapacity {
                             upload_kbps: PLENTY_OF_UPLOAD,
                             rtt_ms: 5,
@@ -251,11 +399,11 @@ impl Viewers {
         }
     }
 
-    async fn measure(&self, server: &Server, client: &reqwest::Client, step: usize) {
-        tokio::time::sleep(SETTLE).await;
+    async fn measure(&self, run: &Run, server: &Server, client: &reqwest::Client, step: usize) {
+        tokio::time::sleep(run.settle).await;
 
         let before = Sample::take(server, client).await;
-        tokio::time::sleep(WINDOW).await;
+        tokio::time::sleep(run.window).await;
         let after = Sample::take(server, client).await;
 
         after.report(&before, step, self.refused);
