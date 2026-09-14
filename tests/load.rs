@@ -162,7 +162,7 @@ fn header(title: &str) {
     println!();
     println!("{title}");
     println!(
-        "{:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>6} {:>7} {:>8} {:>6} {:>8} {:>6}",
+        "{:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>6} {:>6}",
         "step",
         "live",
         "refus",
@@ -174,9 +174,11 @@ fn header(title: &str) {
         "tick_us",
         "fan_us",
         "rd/lap",
-        "pkt/s",
+        "in/s",
+        "rx/s",
+        "drop/s",
+        "tx/s",
         "MB/s",
-        "drops/s",
         "save%"
     );
 }
@@ -306,8 +308,11 @@ impl Sample {
         let saved = delta("relay_saved_bytes");
         let saving = 100.0 * saved / (written + saved).max(1.0);
 
+        let dropped = (self.drops - before.drops) as f64 / seconds;
+        let received = per_second("socket_reads");
+
         println!(
-            "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>7.0} {:>8.0} {:>6.1} {:>8.0} {saving:>6.1}",
+            "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>6.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {saving:>6.1}",
             count(&self.metrics, "viewers"),
             per_second("laps"),
             late.percentile(99),
@@ -315,9 +320,11 @@ impl Sample {
             tick.mean(),
             fanout.mean(),
             reads_per_lap,
+            received + dropped,
+            received,
+            dropped,
             per_second("sent_packets"),
             per_second("sent_bytes") / 1_000_000.0,
-            (self.drops - before.drops) as f64 / seconds,
         );
     }
 }
