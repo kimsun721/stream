@@ -31,7 +31,11 @@ pub struct Server {
     pub host: String,
     pub sdp_port: u16,
     pub control_port: u16,
+    pub media_port: u16,
     pub api_key: String,
+    /// The spawned process, so a load run can read its CPU time and its socket
+    /// drop count apart from the generator's own.
+    pub pid: u32,
 }
 
 /// One server per test binary. Rooms carry random ids, so tests never collide
@@ -46,7 +50,9 @@ impl Default for Server {
             host: server.host.clone(),
             sdp_port: server.sdp_port,
             control_port: server.control_port,
+            media_port: server.media_port,
             api_key: server.api_key.clone(),
+            pid: server.pid,
         }
     }
 }
@@ -95,6 +101,8 @@ fn spawn_server() -> Server {
     // with it rather than with whichever test happened to start it.
     let spawn_dir = dir.clone();
     let spawn_key = api_key.clone();
+    let (pid_tx, pid_rx) = std::sync::mpsc::channel();
+
     thread::spawn(move || {
         let mut command = Command::new(env!("CARGO_BIN_EXE_stream"));
         command
@@ -111,6 +119,7 @@ fn spawn_server() -> Server {
         }
 
         let mut child = command.spawn().expect("spawn server");
+        pid_tx.send(child.id()).ok();
         let _ = child.wait();
     });
 
@@ -118,7 +127,9 @@ fn spawn_server() -> Server {
         host: "127.0.0.1".to_string(),
         sdp_port,
         control_port,
+        media_port,
         api_key,
+        pid: pid_rx.recv().expect("server pid"),
     };
 
     wait_until_listening(control_port);
@@ -254,6 +265,19 @@ impl Server {
             .as_str()
             .expect("stream key is text")
             .to_string()
+    }
+
+    /// Drops every client in the room with it, which is the only way to hand
+    /// them back without waiting out an ICE timeout each.
+    pub async fn delete_room(&self, client: &reqwest::Client, room_id: &str) {
+        client
+            .delete(self.control_url(&format!("/rooms/{room_id}")))
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .expect("DELETE room")
+            .error_for_status()
+            .expect("DELETE room status");
     }
 
     pub async fn create_live_room(&self, client: &reqwest::Client) -> CreatedRoom {
@@ -401,6 +425,10 @@ pub struct Peer {
     media_mid: Option<Mid>,
     media: Option<MediaSource>,
     relay: Option<RelayClient>,
+    auto_p2p: bool,
+    /// str0m gave up on this peer. Under load some do, and a load run wants the
+    /// count rather than a panic in the middle of its output.
+    dead: bool,
 }
 
 impl Peer {
@@ -413,6 +441,8 @@ impl Peer {
             media_mid: None,
             media: None,
             relay: None,
+            auto_p2p: false,
+            dead: false,
         }
     }
 
@@ -422,13 +452,21 @@ impl Peer {
         let give_up_at = Instant::now() + deadline;
         let mut buf = vec![0u8; 2000];
 
-        while Instant::now() < give_up_at {
+        while !self.dead && Instant::now() < give_up_at {
             let mut offers = Vec::new();
             let mut replies = Vec::new();
             let mut stopped = false;
 
             let timeout = loop {
-                match self.rtc.poll_output().expect("poll_output") {
+                let output = match self.rtc.poll_output() {
+                    Ok(output) => output,
+                    Err(_) => {
+                        self.dead = true;
+                        return false;
+                    }
+                };
+
+                match output {
                     Output::Timeout(at) => break at,
                     Output::Transmit(t) => {
                         self.socket
@@ -443,9 +481,12 @@ impl Peer {
                                     offers.push(offer);
                                 } else if let Ok(value) =
                                     serde_json::from_slice::<Value>(&data.data)
-                                    && let Some(reply) = relay_reply(&value, self.relay.as_ref())
                                 {
-                                    replies.push(reply);
+                                    replies.extend(relay_reply(
+                                        &value,
+                                        self.relay.as_ref(),
+                                        self.auto_p2p,
+                                    ));
                                 }
                             }
                             _ => (),
@@ -523,10 +564,19 @@ impl Peer {
                 Err(e) => panic!("recv_from: {e}"),
             };
 
-            self.rtc.handle_input(input).expect("handle input");
+            if self.rtc.handle_input(input).is_err() {
+                self.dead = true;
+                return false;
+            }
         }
 
         false
+    }
+
+    /// Declares the peer link up as soon as this peer has answered a peer to
+    /// peer offer, which is what makes the server stop feeding it.
+    pub fn accept_p2p_links(&mut self) {
+        self.auto_p2p = true;
     }
 
     /// Reports the samples the server needs before it will consider promoting
@@ -585,14 +635,18 @@ impl Peer {
             .expect("write");
     }
 
+    pub fn is_dead(&self) -> bool {
+        self.dead
+    }
+
     /// Drives the peer on its own thread so it stays connected while the test
-    /// works with another one. Stops when dropped.
+    /// works with another one. Stops when dropped, or when str0m gives up on it.
     pub fn detach(mut self) -> Detached {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
 
         let handle = thread::spawn(move || {
-            while !flag.load(Ordering::Relaxed) {
+            while !flag.load(Ordering::Relaxed) && !self.dead {
                 self.run_until(Duration::from_millis(200), |_| false);
             }
         });
@@ -623,15 +677,32 @@ const OPAQUE_SDP: &str = "v=0\r\n";
 
 /// The half of the relay protocol every client answers the same way. Whether a
 /// peer is ever asked depends on what the server decided about it.
-fn relay_reply(message: &Value, relay: Option<&RelayClient>) -> Option<Value> {
-    match message.get("type")?.as_str()? {
-        "probe_available_upload" => Some(json!({
-            "type": "available_upload",
-            "available_upload_kbps": relay?.capacity.upload_kbps,
-        })),
-        "request_offer" => Some(json!({ "type": "p2p_offer", "sdp": OPAQUE_SDP })),
-        "p2p_offer" => Some(json!({ "type": "p2p_answer", "sdp": OPAQUE_SDP })),
-        _ => None,
+///
+/// `auto_p2p` also reports the link up the moment the leaf has answered, which
+/// is what makes the server stop feeding it. A test that asserts on the moment
+/// that happens sends the message itself instead.
+fn relay_reply(message: &Value, relay: Option<&RelayClient>, auto_p2p: bool) -> Vec<Value> {
+    let Some(tag) = message.get("type").and_then(|t| t.as_str()) else {
+        return Vec::new();
+    };
+
+    match tag {
+        "probe_available_upload" => relay
+            .map(|relay| {
+                json!({
+                    "type": "available_upload",
+                    "available_upload_kbps": relay.capacity.upload_kbps,
+                })
+            })
+            .into_iter()
+            .collect(),
+        "request_offer" => vec![json!({ "type": "p2p_offer", "sdp": OPAQUE_SDP })],
+        "p2p_offer" if auto_p2p => vec![
+            json!({ "type": "p2p_answer", "sdp": OPAQUE_SDP }),
+            json!({ "type": "p2p_connected" }),
+        ],
+        "p2p_offer" => vec![json!({ "type": "p2p_answer", "sdp": OPAQUE_SDP })],
+        _ => Vec::new(),
     }
 }
 
