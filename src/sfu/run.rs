@@ -107,7 +107,7 @@ pub fn run(
 
             let client_tick = metrics::time(Phase::ClientTick);
 
-            for (idx, client) in room.clients.iter_mut().enumerate() {
+            for client in room.clients.values_mut() {
                 match client.tick(
                     &socket,
                     &mut new_tracks,
@@ -135,11 +135,11 @@ pub fn run(
                             }
                             _ => (),
                         }
-                        to_remove.push(idx);
+                        to_remove.push(client.id);
                     }
                     Err(e) => {
                         metrics::client_tick_error();
-                        to_remove.push(idx);
+                        to_remove.push(client.id);
                         error!("client tick failed: {}", e);
                     }
                 };
@@ -169,7 +169,7 @@ pub fn run(
             if should_reevaluate {
                 for client in room
                     .clients
-                    .iter_mut()
+                    .values_mut()
                     .filter(|c| matches!(c.role, ClientRole::Viewer))
                 {
                     let mut is_auto_layer = false;
@@ -190,12 +190,12 @@ pub fn run(
                 }
             }
 
-            for idx in to_remove.iter().rev() {
-                room.clients.remove(*idx);
+            for id in to_remove.iter() {
+                room.clients.remove(id);
             }
 
             for leaf_id in fallback_leafs {
-                if let Some(leaf) = room.clients.iter_mut().find(|c| c.id == leaf_id)
+                if let Some(leaf) = room.clients.get_mut(&leaf_id)
                     && let Ok(leaf_keyframe_requests) = leaf.demote_leaf()
                 {
                     for request in leaf_keyframe_requests {
@@ -208,7 +208,7 @@ pub fn run(
 
             for c in room
                 .clients
-                .iter_mut()
+                .values_mut()
                 .filter(|c| c.role == ClientRole::Viewer)
             {
                 if matches!(
@@ -231,7 +231,7 @@ pub fn run(
 
             if let Some(streamer) = room
                 .clients
-                .iter_mut()
+                .values_mut()
                 .find(|c| c.role == ClientRole::Streamer)
                 && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
             {
@@ -241,7 +241,7 @@ pub fn run(
             for offer in p2p_sdps {
                 let (target_id, payload) = offer;
 
-                if let Some(target) = room.clients.iter_mut().find(|c| c.id == target_id)
+                if let Some(target) = room.clients.get_mut(&target_id)
                     && let Some(mut channel) = target.cid.and_then(|id| target.rtc.channel(id))
                 {
                     let Ok(json) = serde_json::to_string(&payload) else {
@@ -256,7 +256,7 @@ pub fn run(
             }
 
             for relay_id in disconnected_relays {
-                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+                if let Some(relay) = room.clients.get_mut(&relay_id)
                     && let Err(e) = relay.demote_relay()
                 {
                     error!("demote relay failed error={e}")
@@ -265,7 +265,7 @@ pub fn run(
 
             let relay_policy = metrics::time(Phase::RelayPolicy);
 
-            for c in room.clients.iter_mut().filter(|c| {
+            for c in room.clients.values_mut().filter(|c| {
                 matches!(c.role, ClientRole::Viewer)
                     && !c.perf.is_empty()
                     && c.relay_status.is_none()
@@ -293,7 +293,7 @@ pub fn run(
 
             let relay_ids: Vec<ClientId> = room
                 .clients
-                .iter()
+                .values()
                 .filter_map(|c| {
                     let Some(UploadProbeResult::Probed {
                         available_upload_kbps,
@@ -319,7 +319,7 @@ pub fn run(
             }
 
             for relay_id in connected_relays {
-                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+                if let Some(relay) = room.clients.get_mut(&relay_id)
                     && let Some(RelayStatus::Relay {
                         p2p_connected_at, ..
                     }) = &mut relay.relay_status
@@ -330,7 +330,7 @@ pub fn run(
 
             let mut leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
                 .clients
-                .iter()
+                .values()
                 .filter_map(|c| {
                     let Some(RelayStatus::Relay {
                         leaf,
@@ -373,7 +373,7 @@ pub fn run(
                 })
                 .collect();
 
-            for client in room.clients.iter() {
+            for client in room.clients.values() {
                 if let Some(RelayStatus::Leaf {
                     relay,
                     link_state: LinkState::Connecting { at },
@@ -439,7 +439,7 @@ pub fn run(
 
         let now = Instant::now();
         for room in rooms.values_mut() {
-            for client in room.clients.iter_mut() {
+            for client in room.clients.values_mut() {
                 client.handle_input(Input::Timeout(now));
             }
         }
@@ -460,7 +460,7 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
     for room in rooms.values() {
         gauges.clients += room.clients.len() as u64;
 
-        for client in &room.clients {
+        for client in room.clients.values() {
             if client.role == ClientRole::Viewer {
                 gauges.viewers += 1;
             }
@@ -481,9 +481,9 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
 
 fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
     let client = rooms
-        .iter_mut()
-        .flat_map(|(_, room)| room.clients.iter_mut())
-        .find(|c| c.rtc.accepts(&input));
+        .values_mut()
+        .flat_map(|room| room.clients.values_mut())
+        .find(|client| client.rtc.accepts(&input));
 
     if let Some(client) = client {
         client.handle_input(input);

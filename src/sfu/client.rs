@@ -32,7 +32,7 @@ impl Client {
             return;
         }
         if let Err(e) = self.rtc.handle_input(input) {
-            warn!("Client ({:?}) disconnected: {:?}", self.id, e);
+            warn!("Client ({:?}) disconnected: {:?}", self, e);
             self.rtc.disconnect();
         }
     }

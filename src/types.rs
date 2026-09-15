@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt,
+    ops::{Deref, DerefMut},
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -55,7 +56,29 @@ pub struct Client {
     pub session_id: Uuid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Display)]
+#[derive(Debug)]
+pub struct Clients(pub HashMap<ClientId, Client>);
+
+impl Deref for Clients {
+    type Target = HashMap<ClientId, Client>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Clients {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Clients {
+    pub fn new() -> Clients {
+        Clients(HashMap::new())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Display, Hash, Eq)]
 pub struct ClientId(u64);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -196,7 +219,7 @@ pub enum RoomState {
 #[derive(Debug)]
 pub struct Room {
     pub streamer_id: Option<ClientId>,
-    pub clients: Vec<Client>,
+    pub clients: Clients,
     pub state: RoomState,
     pub hashed_stream_key: [u8; 32],
 }

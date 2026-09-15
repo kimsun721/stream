@@ -12,11 +12,11 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::metrics;
 use crate::types::{
     Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
     Rooms, StreamKey, TrackOut, TrackOutState,
 };
+use crate::{metrics, types::Clients};
 
 impl Rooms {
     pub fn new() -> Self {
@@ -48,7 +48,7 @@ impl Rooms {
             room_id.clone(),
             Room {
                 streamer_id: None,
-                clients: vec![],
+                clients: Clients::new(),
                 state: RoomState::Idle,
                 hashed_stream_key,
             },
@@ -136,7 +136,7 @@ impl Room {
     pub fn promote(&mut self, relay_id: ClientId) {
         let Some(leaf_id) = self
             .clients
-            .iter()
+            .values()
             .find(|c| {
                 matches!(c.role, ClientRole::Viewer) && c.relay_status.is_none() && c.id != relay_id
             })
@@ -147,8 +147,8 @@ impl Room {
 
         let Some(relay) = self
             .clients
-            .iter_mut()
-            .find(|c| c.id == relay_id && c.relay_status.is_none())
+            .get_mut(&relay_id)
+            .filter(|c| c.relay_status.is_none())
         else {
             return;
         };
@@ -164,7 +164,7 @@ impl Room {
         });
         relay.relay_outgoing_kbps = None;
 
-        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+        let Some(leaf) = self.clients.get_mut(&leaf_id) else {
             return;
         };
 
@@ -179,7 +179,7 @@ impl Room {
     }
 
     pub fn demote(&mut self, relay_id: ClientId, leaf_id: ClientId) {
-        let Some(relay) = self.clients.iter_mut().find(|c| c.id == relay_id) else {
+        let Some(relay) = self.clients.get_mut(&relay_id) else {
             return;
         };
 
@@ -189,14 +189,14 @@ impl Room {
             error!("demote relay failed error={e}");
         };
 
-        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+        let Some(leaf) = self.clients.get_mut(&leaf_id) else {
             return;
         };
 
         if let Ok(keyframe_requests) = leaf.demote_leaf()
             && let Some(streamer) = self
                 .clients
-                .iter_mut()
+                .values_mut()
                 .find(|c| c.role == ClientRole::Streamer)
             && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
         {
@@ -206,7 +206,7 @@ impl Room {
 
     fn view_count(&self) -> usize {
         self.clients
-            .iter()
+            .values()
             .filter(|c| c.role == ClientRole::Viewer)
             .count()
     }
@@ -228,14 +228,14 @@ impl Room {
             ClientRole::Streamer => {
                 if self
                     .clients
-                    .iter()
+                    .values()
                     .any(|c| matches!(c.role, ClientRole::Streamer))
                 {
                     warn!("Streamer already connected in room {:?}", &self);
                     reply.send(Some(StatusCode::CONFLICT)).ok();
                 } else {
                     self.streamer_id = Some(client.id);
-                    self.clients.push(client);
+                    self.clients.insert(client.id, client);
                     self.state = RoomState::Preview;
 
                     reply.send(None).ok();
@@ -249,7 +249,7 @@ impl Room {
                 RoomState::Live => {
                     let tracks: Vec<_> = self
                         .clients
-                        .iter()
+                        .values()
                         .filter(|c| c.role == ClientRole::Streamer)
                         .flat_map(|c| {
                             c.tracks_in
@@ -271,7 +271,7 @@ impl Room {
                         client.rtc.bwe().set_desired_bitrate(desired_bitrate);
                     }
 
-                    self.clients.push(client);
+                    self.clients.insert(client.id, client);
                     reply.send(None).ok();
                 }
             },
@@ -280,7 +280,7 @@ impl Room {
 
     pub fn viewers_mut(&mut self) -> impl Iterator<Item = &mut Client> {
         self.clients
-            .iter_mut()
+            .values_mut()
             .filter(|c| c.role == ClientRole::Viewer)
     }
 
@@ -291,7 +291,9 @@ impl Room {
     }
 
     pub fn streamer(&self) -> Option<&Client> {
-        self.clients.iter().find(|c| c.role == ClientRole::Streamer)
+        self.clients
+            .values()
+            .find(|c| c.role == ClientRole::Streamer)
     }
 }
 
@@ -316,7 +318,7 @@ mod tests {
     use str0m::Rtc;
     use uuid::Uuid;
 
-    use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, StreamKey};
+    use crate::types::{ClientRole, Clients, Room, RoomId, RoomState, Rooms, StreamKey};
 
     fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
         mpsc::sync_channel(1)
@@ -474,11 +476,9 @@ mod tests {
 
     #[test]
     fn add_duplicate_streamer() {
-        let clients: Vec<Client> = Vec::new();
-
         let mut room = Room {
             streamer_id: None,
-            clients,
+            clients: Clients::new(),
             state: RoomState::Live,
             hashed_stream_key: [0; 32],
         };
@@ -519,7 +519,7 @@ mod tests {
         for (state, clients_len) in cases {
             let mut room = Room {
                 streamer_id: None,
-                clients: Vec::new(),
+                clients: Clients::new(),
                 state,
                 hashed_stream_key: [0; 32],
             };
