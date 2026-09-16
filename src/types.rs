@@ -2,7 +2,6 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt,
-    ops::{Deref, DerefMut},
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -18,10 +17,10 @@ use str0m::{
     bwe::Bitrate,
     change::SdpPendingOffer,
     channel::ChannelId,
-    media::{MediaKind, Mid, Rid},
+    media::{KeyframeRequest, MediaData, MediaKind, Mid, Rid},
 };
 
-use derive_more::{Display, Eq};
+use derive_more::{Debug, Display, Eq};
 use uuid::Uuid;
 
 use crate::{
@@ -32,51 +31,41 @@ use crate::{
 const STREAM_KEY_LEN: usize = 32;
 const ROOM_ID_LEN: usize = 12;
 
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
-pub enum ClientRole {
-    Streamer,
-    Viewer,
-}
-
 #[derive(Debug)]
-pub struct Client {
-    pub id: ClientId,
+pub struct Peer {
     pub rtc: Rtc,
-    pub role: ClientRole,
     pub pending: Option<SdpPendingOffer>,
     pub cid: Option<ChannelId>,
-    pub tracks_in: Vec<TrackInEntry>,
-    pub tracks_out: Vec<TrackOut>,
-    pub relay_status: Option<RelayStatus>,
-    pub perf: PerfWindow,
-    pub available_upload: Option<UploadProbeResult>,
-    pub relay_outgoing_kbps: Option<u32>,
     pub connected_at: Instant,
-    pub last_twcc_bitrate: Option<Bitrate>,
     pub session_id: Uuid,
 }
 
 #[derive(Debug)]
-pub struct Clients(pub HashMap<ClientId, Client>);
-
-impl Deref for Clients {
-    type Target = HashMap<ClientId, Client>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+pub struct RelayState {
+    pub relay_status: Option<RelayStatus>,
+    pub perf: PerfWindow,
+    pub available_upload: Option<UploadProbeResult>,
+    pub relay_outgoing_kbps: Option<u32>,
 }
 
-impl DerefMut for Clients {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+#[derive(Debug)]
+pub struct Viewer {
+    pub id: ClientId,
+    pub peer: Peer,
+    pub tracks_out: Vec<TrackOut>,
+    pub relay_state: RelayState,
+    pub last_twcc_bitrate: Option<Bitrate>,
 }
 
-impl Clients {
-    pub fn new() -> Clients {
-        Clients(HashMap::new())
-    }
+#[derive(Debug)]
+pub struct Streamer {
+    pub id: ClientId,
+    pub peer: Peer,
+    pub tracks_in: Vec<TrackInEntry>,
 }
+
+#[derive(Debug)]
+pub struct Viewers(pub HashMap<ClientId, Viewer>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Display, Hash, Eq)]
 pub struct ClientId(u64);
@@ -85,32 +74,6 @@ pub struct ClientId(u64);
 pub struct RoomId(pub String);
 
 pub struct StreamKey(pub String);
-
-impl fmt::Debug for StreamKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("StreamKey").field(&"[REDACTED]").finish()
-    }
-}
-
-impl RoomId {
-    pub fn new() -> RoomId {
-        RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
-    }
-}
-
-impl StreamKey {
-    pub fn new() -> StreamKey {
-        StreamKey(format!("SK_{}", random_string(STREAM_KEY_LEN)))
-    }
-
-    pub fn hashed(&self) -> [u8; 32] {
-        hash_string(self.as_str())
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-}
 
 pub type PerfWindow = VecDeque<PerfSample>;
 
@@ -134,74 +97,6 @@ pub enum PushOutcome {
     NoChange,
 }
 
-impl BitrateEstimator {
-    pub fn new() -> BitrateEstimator {
-        BitrateEstimator {
-            history: VecDeque::new(),
-            accumulated_bytes: 0,
-            started_at: None,
-            is_estimate_available: false,
-        }
-    }
-
-    pub fn push(&mut self, bytes: usize, now: Instant) -> PushOutcome {
-        self.remove_expired();
-
-        if self.history.is_empty() {
-            self.started_at = Some(now);
-        }
-
-        self.history.push_back((bytes, now));
-
-        self.accumulated_bytes += bytes as u64;
-
-        if self
-            .started_at
-            .is_some_and(|at| at.elapsed() >= tuning().bitrate.estimation_interval())
-        {
-            if self.is_estimate_available {
-                PushOutcome::NoChange
-            } else {
-                self.is_estimate_available = true;
-                PushOutcome::EstimateBecameAvailable
-            }
-        } else {
-            self.is_estimate_available = false;
-            PushOutcome::NoChange
-        }
-    }
-
-    fn bitrate_estimate(&mut self) -> Option<u64> {
-        self.remove_expired();
-
-        if self.history.is_empty()
-            || self
-                .started_at
-                .is_some_and(|at| at.elapsed() < tuning().bitrate.estimation_interval())
-        {
-            None
-        } else {
-            Some(self.accumulated_bytes * 8 / tuning().bitrate.estimate_secs)
-        }
-    }
-
-    fn remove_expired(&mut self) {
-        while let Some((bytes, timestamp)) = self.history.front() {
-            if timestamp.elapsed() > tuning().bitrate.estimation_interval() {
-                self.accumulated_bytes -= *bytes as u64;
-                self.history.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        if self.history.is_empty() {
-            self.started_at = None;
-            self.accumulated_bytes = 0;
-        }
-    }
-}
-
 #[derive(Debug)]
 pub enum UploadProbeResult {
     Probing { probed_at: Instant },
@@ -218,8 +113,8 @@ pub enum RoomState {
 
 #[derive(Debug)]
 pub struct Room {
-    pub streamer_id: Option<ClientId>,
-    pub clients: Clients,
+    pub streamer: Option<Streamer>,
+    pub viewers: Viewers,
     pub state: RoomState,
     pub hashed_stream_key: [u8; 32],
 }
@@ -254,12 +149,6 @@ pub struct SimulcastLayer {
     pub bitrate_estimator: RefCell<BitrateEstimator>,
 }
 
-impl SimulcastLayer {
-    pub fn estimate_bps(&self) -> Option<u64> {
-        self.bitrate_estimator.borrow_mut().bitrate_estimate()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrackOutState {
     ToOpen,
@@ -281,56 +170,42 @@ pub enum RelayPotential {
     Qualified,
 }
 
-impl Client {
-    pub fn new(rtc: Rtc, role: ClientRole, session_id: Uuid) -> Client {
-        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
-        let next_id = ID_COUNTER.fetch_add(1, Ordering::SeqCst);
-
-        Client {
-            id: ClientId(next_id),
-            role,
-            rtc,
-            pending: None,
-            cid: None,
-            tracks_in: vec![],
-            tracks_out: vec![],
-            relay_status: None,
-            perf: VecDeque::new(),
-            available_upload: None,
-            connected_at: Instant::now(),
-            relay_outgoing_kbps: None,
-            last_twcc_bitrate: None,
-            session_id,
-        }
-    }
-}
-
-impl TrackIn {
-    pub fn default_rid(&self) -> Option<Rid> {
-        self.available_simulcast_layers
-            .iter()
-            .filter(|l| l.estimate_bps().is_some())
-            .min_by_key(|l| l.estimate_bps())
-            .or_else(|| self.available_simulcast_layers.first())
-            .map(|l| l.rid)
-    }
-    pub fn highest_estimated_bps(&self) -> Option<u64> {
-        self.available_simulcast_layers
-            .iter()
-            .filter_map(|layer| layer.estimate_bps())
-            .max()
-    }
-}
-
+/// As large as str0m's own `Output`, which is what it carries. Boxing would
+/// trade a stack move for a heap allocation per event and would not shrink the
+/// move out of str0m in the first place.
+#[allow(clippy::large_enum_variant)]
 pub enum PollResult {
+    Timeout(Instant),
+    Event(str0m::Event),
+}
+
+pub enum TickResult {
     Timeout(Instant),
     Disconnected,
 }
 
+pub struct ViewerEffects {
+    pub keyframe_requests: Vec<KeyframeRequest>,
+    pub p2p_sdps: Vec<(ClientId, S2cDcPayload)>,
+    pub connected_relays: Vec<ClientId>,
+    pub disconnected_relays: Vec<ClientId>,
+}
+
+pub struct StreamerEffects {
+    pub new_tracks: Vec<Rc<TrackIn>>,
+    pub media_datas: Vec<MediaData>,
+    pub should_reevaluate: bool,
+}
+
 pub enum SfuMessage {
-    RegisterClient {
+    RegisterViewer {
         rtc: Box<Rtc>,
-        role: ClientRole,
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<StatusCode>>,
+    },
+    RegisterStreamer {
+        rtc: Box<Rtc>,
         room_id: RoomId,
         session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
@@ -429,6 +304,153 @@ pub enum RelayStatus {
 pub enum LinkState {
     Connecting { at: Instant },
     Connected,
+}
+
+impl ClientId {
+    pub fn next() -> ClientId {
+        static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+        ClientId(ID_COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+}
+
+impl fmt::Debug for StreamKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("StreamKey").field(&"[REDACTED]").finish()
+    }
+}
+
+impl RoomId {
+    pub fn new() -> RoomId {
+        RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
+    }
+}
+
+impl StreamKey {
+    pub fn new() -> StreamKey {
+        StreamKey(format!("SK_{}", random_string(STREAM_KEY_LEN)))
+    }
+
+    pub fn hashed(&self) -> [u8; 32] {
+        hash_string(self.as_str())
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl TrackIn {
+    pub fn default_rid(&self) -> Option<Rid> {
+        self.available_simulcast_layers
+            .iter()
+            .filter(|l| l.estimate_bps().is_some())
+            .min_by_key(|l| l.estimate_bps())
+            .or_else(|| self.available_simulcast_layers.first())
+            .map(|l| l.rid)
+    }
+    pub fn highest_estimated_bps(&self) -> Option<u64> {
+        self.available_simulcast_layers
+            .iter()
+            .filter_map(|layer| layer.estimate_bps())
+            .max()
+    }
+}
+
+impl SimulcastLayer {
+    pub fn estimate_bps(&self) -> Option<u64> {
+        self.bitrate_estimator.borrow_mut().bitrate_estimate()
+    }
+}
+
+impl BitrateEstimator {
+    pub fn new() -> BitrateEstimator {
+        BitrateEstimator {
+            history: VecDeque::new(),
+            accumulated_bytes: 0,
+            started_at: None,
+            is_estimate_available: false,
+        }
+    }
+
+    pub fn push(&mut self, bytes: usize, now: Instant) -> PushOutcome {
+        self.remove_expired();
+
+        if self.history.is_empty() {
+            self.started_at = Some(now);
+        }
+
+        self.history.push_back((bytes, now));
+
+        self.accumulated_bytes += bytes as u64;
+
+        if self
+            .started_at
+            .is_some_and(|at| at.elapsed() >= tuning().bitrate.estimation_interval())
+        {
+            if self.is_estimate_available {
+                PushOutcome::NoChange
+            } else {
+                self.is_estimate_available = true;
+                PushOutcome::EstimateBecameAvailable
+            }
+        } else {
+            self.is_estimate_available = false;
+            PushOutcome::NoChange
+        }
+    }
+
+    fn bitrate_estimate(&mut self) -> Option<u64> {
+        self.remove_expired();
+
+        if self.history.is_empty()
+            || self
+                .started_at
+                .is_some_and(|at| at.elapsed() < tuning().bitrate.estimation_interval())
+        {
+            None
+        } else {
+            Some(self.accumulated_bytes * 8 / tuning().bitrate.estimate_secs)
+        }
+    }
+
+    fn remove_expired(&mut self) {
+        while let Some((bytes, timestamp)) = self.history.front() {
+            if timestamp.elapsed() > tuning().bitrate.estimation_interval() {
+                self.accumulated_bytes -= *bytes as u64;
+                self.history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        if self.history.is_empty() {
+            self.started_at = None;
+            self.accumulated_bytes = 0;
+        }
+    }
+}
+
+impl Peer {
+    pub fn new(rtc: Rtc, session_id: Uuid) -> Peer {
+        Peer {
+            rtc,
+            pending: None,
+            cid: None,
+            connected_at: Instant::now(),
+            session_id,
+        }
+    }
+}
+
+impl RelayState {
+    pub fn new() -> RelayState {
+        RelayState {
+            relay_status: None,
+            perf: VecDeque::new(),
+            available_upload: None,
+            relay_outgoing_kbps: None,
+        }
+    }
 }
 
 #[cfg(test)]

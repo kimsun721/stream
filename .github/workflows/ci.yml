@@ -23,10 +23,7 @@ jobs:
 
       - run: cargo fmt --check
 
-      # too_many_arguments is allowed until the client storage rework splits
-      # those signatures up. Everything else fails the build rather than
-      # accumulating.
-      - run: cargo clippy --all-targets -- -D warnings -A clippy::too_many_arguments
+      - run: cargo clippy --all-targets -- -D warnings
 
       # The load run and the tests that need ffmpeg are ignored, so this is the
       # unit suite plus every integration suite.

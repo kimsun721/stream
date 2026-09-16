@@ -1,15 +1,16 @@
 use std::{
-    cell::RefCell,
     collections::HashMap,
     net::UdpSocket,
-    rc::Rc,
-    time::{Duration, Instant},
+    ops::{Deref, DerefMut},
+    time::Instant,
 };
 
+use uuid::Uuid;
+
 use str0m::{
-    Event, IceConnectionState, Input, Output,
+    Event, IceConnectionState, Rtc,
     bwe::{Bitrate, BweKind},
-    change::{SdpAnswer, SdpOffer},
+    change::SdpAnswer,
     channel::ChannelData,
     media::{Direction, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, Mid, Rid},
 };
@@ -20,149 +21,172 @@ use crate::{
     metrics,
     sfu::error::{ClientError, ClientResult},
     types::{
-        AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
-        LayerMode, LinkState, PerfSample, PollResult, PushOutcome, RelayPotential, RelayStatus,
-        S2cDcPayload, SimulcastLayer, TrackIn, TrackInEntry, TrackOut, TrackOutState,
-        UploadProbeResult,
+        AvailableSimulcastLayer, C2sDcPayload, ClientId, LayerMode, LinkState, Peer, PollResult,
+        RelayState, RelayStatus, S2cDcPayload, TickResult, TrackOut, TrackOutState,
+        UploadProbeResult, Viewer, ViewerEffects, Viewers,
     },
 };
 
-impl Client {
-    pub fn handle_input(&mut self, input: Input) {
-        if !self.rtc.is_alive() {
-            return;
-        }
-        if let Err(e) = self.rtc.handle_input(input) {
-            warn!("Client ({:?}) disconnected: {:?}", self, e);
-            self.rtc.disconnect();
+impl Viewers {
+    pub fn new() -> Viewers {
+        Viewers(HashMap::new())
+    }
+}
+
+impl Viewer {
+    pub fn new(rtc: Rtc, session_id: Uuid) -> Viewer {
+        Viewer {
+            id: ClientId::next(),
+            peer: Peer::new(rtc, session_id),
+            relay_state: RelayState::new(),
+            tracks_out: Vec::new(),
+            last_twcc_bitrate: None,
         }
     }
 
-    pub fn poll_output(
-        self: &mut Client,
+    pub fn tick(
+        &mut self,
+        effects: &mut ViewerEffects,
         socket: &UdpSocket,
-        new_tracks: &mut Vec<Rc<TrackIn>>,
-        media_datas: &mut Vec<MediaData>,
-        keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
-        connected_relays: &mut Vec<ClientId>,
-        disconnected_relays: &mut Vec<ClientId>,
-        should_reevaluate: &mut bool,
-    ) -> ClientResult<PollResult> {
-        let timeout = loop {
-            match self.rtc.poll_output()? {
-                Output::Timeout(v) => break v,
-                Output::Transmit(v) => {
-                    socket.send_to(&v.contents, v.destination)?;
-                    metrics::sent(v.contents.len());
-                }
+    ) -> ClientResult<TickResult> {
+        self.renegotiate()?;
 
-                Output::Event(e) => match e {
-                    Event::IceConnectionStateChange(v) => {
-                        if v == IceConnectionState::Disconnected {
-                            self.rtc.disconnect();
-                            return Ok(PollResult::Disconnected);
-                        }
+        loop {
+            match self.peer.poll(socket)? {
+                PollResult::Timeout(at) => return Ok(TickResult::Timeout(at)),
+                PollResult::Event(event) => match event {
+                    Event::IceConnectionStateChange(IceConnectionState::Disconnected) => {
+                        self.peer.rtc.disconnect();
+                        return Ok(TickResult::Disconnected);
                     }
-                    Event::MediaAdded(m) => {
-                        if self.role == ClientRole::Streamer {
-                            let mut layers: Vec<SimulcastLayer> = Vec::new();
 
-                            let rids: Vec<Rid> = m
-                                .simulcast
-                                .map(|simulcast| simulcast.recv.iter().map(|l| l.rid).collect())
-                                .unwrap_or_default();
-
-                            for rid in rids {
-                                layers.push(SimulcastLayer {
-                                    rid,
-                                    bitrate_estimator: RefCell::new(BitrateEstimator::new()),
-                                });
-                            }
-
-                            let track_in = self.handle_media_added(m.mid, m.kind, layers);
-                            new_tracks.push(track_in);
-                        }
-                    }
-                    Event::MediaData(data) => {
-                        metrics::media_data();
-
-                        if self.role == ClientRole::Streamer
-                            && let Some(rid) = data.rid
-                            && let Some(track_in) =
-                                self.tracks_in.iter_mut().find(|t| t.id.mid == data.mid)
-                            && let Some(simulcast_layer) = track_in
-                                .id
-                                .available_simulcast_layers
-                                .iter()
-                                .find(|l| l.rid == rid)
-                        {
-                            let push_outcome = simulcast_layer
-                                .bitrate_estimator
-                                .borrow_mut()
-                                .push(data.data.len(), Instant::now());
-
-                            if matches!(push_outcome, PushOutcome::EstimateBecameAvailable) {
-                                *should_reevaluate = true;
-                            }
-                        }
-
-                        media_datas.push(data);
-                    }
-                    Event::ChannelOpen(cid, _label) => self.cid = Some(cid),
-                    Event::ChannelData(data) => self.handle_channel_data(
-                        data,
-                        keyframe_requests,
-                        p2p_sdps,
-                        connected_relays,
-                        disconnected_relays,
-                    )?,
+                    Event::ChannelData(data) => self.handle_channel_data(data, effects)?,
 
                     Event::KeyframeRequest(request) => {
                         if let Some(translated) = self.translate_keyframe_request(request) {
-                            keyframe_requests.push(translated);
+                            effects.keyframe_requests.push(translated);
                         }
                     }
+
                     Event::EgressBitrateEstimate(kind) => {
-                        self.handle_egress_bitrate_estimate(kind, keyframe_requests)?
+                        self.handle_egress_bitrate_estimate(kind, &mut effects.keyframe_requests)?
                     }
                     _ => {}
                 },
-            };
-        };
-
-        Ok(PollResult::Timeout(timeout))
+            }
+        }
     }
 
-    pub(crate) fn reevaluate_auto_layers(
-        &mut self,
-        keyframe_requests: &mut Vec<KeyframeRequest>,
-    ) -> ClientResult<()> {
-        let mut target_layers: Vec<_> = Vec::new();
-
-        let Some(twcc_bitrate) = self.last_twcc_bitrate.map(|b| u128::from(b.as_u64())) else {
+    pub fn renegotiate(&mut self) -> ClientResult<()> {
+        if self.peer.pending.is_some() || self.peer.cid.is_none() {
             return Ok(());
-        };
+        }
 
-        for track_out in self
-            .tracks_out
-            .iter()
-            .filter(|t| matches!(t.layer_mode, LayerMode::Auto))
-        {
-            let TrackOutState::Open(mid) = track_out.state else {
-                continue;
-            };
+        let mut change = self.peer.rtc.sdp_api();
 
-            if let Some(rid) = target_rid_for_bitrate(track_out, twcc_bitrate) {
-                target_layers.push((mid, rid));
+        for track_out in self.tracks_out.iter_mut() {
+            if track_out.state == TrackOutState::ToOpen
+                && let Some(track_in) = track_out.track_in.upgrade()
+            {
+                let stream_id = track_in.origin.to_string();
+                let mid = change.add_media(
+                    track_in.kind,
+                    Direction::SendOnly,
+                    Some(stream_id),
+                    None,
+                    None,
+                );
+
+                track_out.state = TrackOutState::Negotiating(mid);
             }
         }
 
-        for (mid, rid) in target_layers {
-            self.set_layer(mid, rid, keyframe_requests)?;
-        }
+        if change.has_changes() {
+            let (offer, pending) = change.apply().ok_or(ClientError::ApplyFailed)?;
 
+            let mut channel = self
+                .peer
+                .cid
+                .and_then(|id| self.peer.rtc.channel(id))
+                .ok_or(ClientError::ChannelNotFound)?;
+
+            let json = serde_json::to_string(&offer)?;
+
+            channel.write(false, json.as_bytes())?;
+
+            self.peer.pending = Some(pending);
+        }
         Ok(())
+    }
+
+    fn handle_channel_data(
+        &mut self,
+        data: ChannelData,
+        effects: &mut ViewerEffects,
+    ) -> ClientResult<()> {
+        let ViewerEffects {
+            keyframe_requests,
+            p2p_sdps,
+            connected_relays,
+            disconnected_relays,
+        } = effects;
+
+        let payload: C2sDcPayload = match serde_json::from_slice(&data.data) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(
+                    error = ?e,
+                    channel_data = ?&String::from_utf8_lossy(&data.data),
+                    "failed to deserialize channel data"
+                );
+                return Ok(());
+            }
+        };
+
+        match payload {
+            C2sDcPayload::Offer { sdp } => self.peer.handle_offer(&sdp),
+            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp, keyframe_requests),
+            C2sDcPayload::SetLayer { mid, rid } => {
+                let mid = Mid::from(mid.as_str());
+                let rid = Rid::from(rid.as_str());
+
+                if self.tracks_out.iter().any(|t| {
+                    t.state == TrackOutState::Open(mid) && matches!(t.layer_mode, LayerMode::Manual)
+                }) {
+                    self.set_layer(mid, rid, keyframe_requests)
+                } else {
+                    Ok(())
+                }
+            }
+            C2sDcPayload::SetLayerMode { mid, layer_mode } => {
+                self.set_layer_mode(Mid::from(mid.as_str()), layer_mode, keyframe_requests)
+            }
+            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => {
+                self.relay_state.perf_report(rtt_ms, loss_pct)
+            }
+            C2sDcPayload::P2pOffer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
+            }
+            C2sDcPayload::P2pAnswer { sdp } => {
+                self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
+            }
+            C2sDcPayload::P2pConnected => {
+                if let Ok(Some(relay_id)) = self.handle_p2p_connected() {
+                    connected_relays.push(relay_id);
+                };
+
+                Ok(())
+            }
+            C2sDcPayload::P2pDisconnected => {
+                self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
+            }
+            C2sDcPayload::AvailableUpload {
+                available_upload_kbps,
+            } => self
+                .relay_state
+                .handle_available_upload(available_upload_kbps),
+            C2sDcPayload::RelayOutgoing { kbps } => self.relay_state.handle_relay_outgoing(kbps),
+        }
     }
 
     fn matching_viewer_mid(&self, mid: Mid, rid: Option<Rid>) -> Option<Mid> {
@@ -206,7 +230,7 @@ impl Client {
                 continue;
             };
 
-            let Some(writer) = self.rtc.writer(mid) else {
+            let Some(writer) = self.peer.rtc.writer(mid) else {
                 continue;
             };
 
@@ -231,100 +255,10 @@ impl Client {
         }
     }
 
-    pub fn handle_keyframe_requests(
-        &mut self,
-        keyframe_requests: Vec<KeyframeRequest>,
-    ) -> ClientResult<()> {
-        for req in keyframe_requests {
-            if let Some(track_entry) = self.tracks_in.iter_mut().find(|t| t.id.mid == req.mid) {
-                let should_request = track_entry
-                    .last_keyframe_requested_at
-                    .get(&req.rid)
-                    .is_none_or(|at| at.elapsed() >= Duration::from_millis(1000));
-
-                if should_request && let Some(mut writer) = self.rtc.writer(req.mid) {
-                    writer.request_keyframe(req.rid, req.kind)?;
-                    track_entry
-                        .last_keyframe_requested_at
-                        .insert(req.rid, Instant::now());
-                };
-            };
-        }
-
-        Ok(())
-    }
-
-    pub fn renegotiate(&mut self) -> ClientResult<()> {
-        if self.pending.is_some() || self.cid.is_none() {
-            return Ok(());
-        }
-
-        let mut change = self.rtc.sdp_api();
-
-        for track_out in self.tracks_out.iter_mut() {
-            if track_out.state == TrackOutState::ToOpen
-                && let Some(track_in) = track_out.track_in.upgrade()
-            {
-                let stream_id = track_in.origin.to_string();
-                let mid = change.add_media(
-                    track_in.kind,
-                    Direction::SendOnly,
-                    Some(stream_id),
-                    None,
-                    None,
-                );
-
-                track_out.state = TrackOutState::Negotiating(mid);
-            }
-        }
-
-        if change.has_changes() {
-            let (offer, pending) = change.apply().ok_or(ClientError::ApplyFailed)?;
-
-            let mut channel = self
-                .cid
-                .and_then(|id| self.rtc.channel(id))
-                .ok_or(ClientError::ChannelNotFound)?;
-
-            let json = serde_json::to_string(&offer)?;
-
-            channel.write(false, json.as_bytes())?;
-
-            self.pending = Some(pending);
-        }
-        Ok(())
-    }
-
-    pub fn tick(
-        &mut self,
-        socket: &UdpSocket,
-        new_tracks: &mut Vec<Rc<TrackIn>>,
-        media_datas: &mut Vec<MediaData>,
-        keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
-        connected_relays: &mut Vec<ClientId>,
-        disconnected_relays: &mut Vec<ClientId>,
-        should_reevaluate: &mut bool,
-    ) -> ClientResult<PollResult> {
-        self.renegotiate()?;
-        let result = self.poll_output(
-            socket,
-            new_tracks,
-            media_datas,
-            keyframe_requests,
-            p2p_sdps,
-            connected_relays,
-            disconnected_relays,
-            should_reevaluate,
-        )?;
-
-        Ok(result)
-    }
-
     pub fn request_sdp_offer(&mut self) -> ClientResult<()> {
         let payload = S2cDcPayload::RequestOffer {};
 
-        self.send_payload_via_dc(payload)?;
+        self.peer.send_payload_via_dc(payload)?;
 
         Ok(())
     }
@@ -358,118 +292,76 @@ impl Client {
         None
     }
 
-    pub fn relay_potential(&self) -> RelayPotential {
-        let cutoff = tuning().relay.available_upload_cutoff_kbps;
-
-        match self.available_upload {
-            Some(UploadProbeResult::Probed {
-                available_upload_kbps,
-            }) => {
-                if available_upload_kbps > cutoff {
-                    RelayPotential::Qualified
-                } else {
-                    RelayPotential::Never
-                }
-            }
-            _ => RelayPotential::Unknown,
+    fn handle_p2p_connected(&mut self) -> ClientResult<Option<ClientId>> {
+        if let Some(RelayStatus::Leaf { link_state, relay }) = &mut self.relay_state.relay_status {
+            *link_state = LinkState::Connected;
+            Ok(Some(*relay))
+        } else {
+            Ok(None)
         }
     }
 
-    fn handle_media_added(
-        &mut self,
-        mid: Mid,
-        kind: MediaKind,
-        simulcast_layers: Vec<SimulcastLayer>,
-    ) -> Rc<TrackIn> {
-        let track_in = Rc::new(TrackIn {
-            origin: self.id,
-            mid,
-            kind,
-            available_simulcast_layers: simulcast_layers,
-        });
+    pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
+        self.relay_state.relay_status = None;
 
-        let track_in_entry = TrackInEntry {
-            id: track_in.clone(),
-            last_keyframe_requested_at: HashMap::new(),
-        };
+        let keyframe_requests: Vec<_> = self
+            .tracks_out
+            .iter()
+            .filter_map(|to| {
+                let track_in = to.track_in.upgrade()?;
 
-        self.tracks_in.push(track_in_entry);
-        track_in
-    }
-
-    fn handle_channel_data(
-        &mut self,
-        data: ChannelData,
-        keyframe_requests: &mut Vec<KeyframeRequest>,
-        p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
-        connected_relays: &mut Vec<ClientId>,
-        disconnected_relays: &mut Vec<ClientId>,
-    ) -> ClientResult<()> {
-        let payload: C2sDcPayload = match serde_json::from_slice(&data.data) {
-            Ok(payload) => payload,
-            Err(e) => {
-                warn!(
-                    error = ?e,
-                    channel_data = ?&String::from_utf8_lossy(&data.data),
-                    "failed to deserialize channel data"
-                );
-                return Ok(());
-            }
-        };
-
-        match payload {
-            C2sDcPayload::Offer { sdp } => self.handle_offer(&sdp),
-            C2sDcPayload::Answer { sdp } => self.handle_answer(&sdp, keyframe_requests),
-            C2sDcPayload::SetLayer { mid, rid } => {
-                let mid = Mid::from(mid.as_str());
-                let rid = Rid::from(rid.as_str());
-
-                if self.tracks_out.iter().any(|t| {
-                    t.state == TrackOutState::Open(mid) && matches!(t.layer_mode, LayerMode::Manual)
-                }) {
-                    self.set_layer(mid, rid, keyframe_requests)
-                } else {
-                    Ok(())
+                if track_in.kind == MediaKind::Audio {
+                    return None;
                 }
-            }
-            C2sDcPayload::SetLayerMode { mid, layer_mode } => {
-                self.set_layer_mode(Mid::from(mid.as_str()), layer_mode, keyframe_requests)
-            }
-            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
-            C2sDcPayload::P2pOffer { sdp } => {
-                self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
-            }
-            C2sDcPayload::P2pAnswer { sdp } => {
-                self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
-            }
-            C2sDcPayload::P2pConnected => {
-                if let Ok(Some(relay_id)) = self.handle_p2p_connected() {
-                    connected_relays.push(relay_id);
-                };
 
-                Ok(())
-            }
-            C2sDcPayload::P2pDisconnected => {
-                self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
-            }
-            C2sDcPayload::AvailableUpload {
-                available_upload_kbps,
-            } => self.handle_available_upload(available_upload_kbps),
-            C2sDcPayload::RelayOutgoing { kbps } => self.handle_relay_outgoing(kbps),
-        }
+                Some(KeyframeRequest {
+                    mid: track_in.mid,
+                    rid: to.chosen_rid,
+                    kind: KeyframeRequestKind::Fir,
+                })
+            })
+            .collect();
+
+        if let Some(mut channel) = self.peer.cid.and_then(|id| self.peer.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
+            channel.write(false, json.as_bytes())?;
+        };
+
+        Ok(keyframe_requests)
     }
 
-    fn handle_offer(&mut self, offer: &str) -> ClientResult<()> {
-        let offer = SdpOffer::from_sdp_string(offer)?;
+    pub fn demote_relay(&mut self) -> ClientResult<()> {
+        self.relay_state.relay_status = None;
 
-        let answer = self.rtc.sdp_api().accept_offer(offer)?;
+        self.relay_state.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
 
-        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
-            let json = serde_json::to_string(&answer)?;
+        self.relay_state.relay_outgoing_kbps = None;
+
+        if let Some(mut channel) = self.peer.cid.and_then(|id| self.peer.rtc.channel(id)) {
+            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
             channel.write(false, json.as_bytes())?;
         };
 
         Ok(())
+    }
+
+    pub fn probe_available_upload(&mut self) {
+        if let Some(mut channel) = self.peer.cid.and_then(|id| self.peer.rtc.channel(id)) {
+            let payload = S2cDcPayload::ProbeAvailableUpload;
+            let Ok(json) = serde_json::to_string(&payload) else {
+                error!("serde_json to_string failed: client_id={}", self.id);
+                return;
+            };
+
+            if let Err(e) = channel.write(false, json.as_bytes()) {
+                error!("send probe_upload via dc failed: {e}");
+                return;
+            };
+
+            self.relay_state.available_upload = Some(UploadProbeResult::Probing {
+                probed_at: (Instant::now()),
+            });
+        }
     }
 
     fn handle_answer(
@@ -483,8 +375,8 @@ impl Client {
 
         let mut bwe_target_layer: Option<(Mid, Rid)> = None;
 
-        if let Some(pending) = self.pending.take() {
-            self.rtc.sdp_api().accept_answer(pending, answer)?;
+        if let Some(pending) = self.peer.pending.take() {
+            self.peer.rtc.sdp_api().accept_answer(pending, answer)?;
 
             for track_out in &mut self.tracks_out {
                 let TrackOutState::Negotiating(mid) = track_out.state else {
@@ -525,7 +417,7 @@ impl Client {
         }
 
         for payload in payloads {
-            if let Err(e) = self.send_payload_via_dc(payload) {
+            if let Err(e) = self.peer.send_payload_via_dc(payload) {
                 error!("send_payload_via_dc failed error: {e}");
             };
         }
@@ -542,7 +434,7 @@ impl Client {
         sdp: S2cDcPayload,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<()> {
-        match self.relay_status {
+        match self.relay_state.relay_status {
             Some(RelayStatus::Relay { leaf, .. }) => {
                 p2p_sdps.push((leaf, sdp));
             }
@@ -557,45 +449,18 @@ impl Client {
         Ok(())
     }
 
-    fn handle_p2p_connected(&mut self) -> ClientResult<Option<ClientId>> {
-        if let Some(RelayStatus::Leaf { link_state, relay }) = &mut self.relay_status {
-            *link_state = LinkState::Connected;
-            Ok(Some(*relay))
-        } else {
-            Ok(None)
-        }
-    }
-
     fn handle_p2p_disconnected(
         &mut self,
         keyframe_requests: &mut Vec<KeyframeRequest>,
         disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
-        if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_status
+        if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_state.relay_status
             && matches!(link_state, LinkState::Connected)
         {
             disconnected_relays.push(*relay);
             for kf in self.demote_leaf()? {
                 keyframe_requests.push(kf);
             }
-        }
-
-        Ok(())
-    }
-
-    fn handle_available_upload(&mut self, available_upload_kbps: u32) -> ClientResult<()> {
-        if let Some(UploadProbeResult::Probing { .. }) = self.available_upload {
-            self.available_upload = Some(UploadProbeResult::Probed {
-                available_upload_kbps,
-            });
-        }
-
-        Ok(())
-    }
-
-    fn handle_relay_outgoing(&mut self, kbps: u32) -> ClientResult<()> {
-        if let Some(RelayStatus::Relay { .. }) = self.relay_status {
-            self.relay_outgoing_kbps = Some(kbps);
         }
 
         Ok(())
@@ -619,50 +484,6 @@ impl Client {
             }
             BweKind::Remb(..) => (),
             _ => (),
-        };
-
-        Ok(())
-    }
-
-    pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
-        self.relay_status = None;
-
-        let keyframe_requests: Vec<_> = self
-            .tracks_out
-            .iter()
-            .filter_map(|to| {
-                let track_in = to.track_in.upgrade()?;
-
-                if track_in.kind == MediaKind::Audio {
-                    return None;
-                }
-
-                Some(KeyframeRequest {
-                    mid: track_in.mid,
-                    rid: to.chosen_rid,
-                    kind: KeyframeRequestKind::Fir,
-                })
-            })
-            .collect();
-
-        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
-            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
-            channel.write(false, json.as_bytes())?;
-        };
-
-        Ok(keyframe_requests)
-    }
-
-    pub fn demote_relay(&mut self) -> ClientResult<()> {
-        self.relay_status = None;
-
-        self.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
-
-        self.relay_outgoing_kbps = None;
-
-        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
-            let json = serde_json::to_string(&S2cDcPayload::Demote)?;
-            channel.write(false, json.as_bytes())?;
         };
 
         Ok(())
@@ -723,7 +544,7 @@ impl Client {
             mid: mid.to_string(),
         };
 
-        if let Err(e) = self.send_payload_via_dc(payload) {
+        if let Err(e) = self.peer.send_payload_via_dc(payload) {
             error!("send_payload_via_dc failed error: {e}");
         };
 
@@ -762,77 +583,48 @@ impl Client {
         Ok(())
     }
 
-    pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
-        let now = Instant::now();
+    pub(crate) fn reevaluate_auto_layers(
+        &mut self,
+        keyframe_requests: &mut Vec<KeyframeRequest>,
+    ) -> ClientResult<()> {
+        let mut target_layers: Vec<_> = Vec::new();
 
-        self.perf.push_back(PerfSample {
-            rtt_ms,
-            loss_pct,
-            timestamp: now,
-        });
+        let Some(twcc_bitrate) = self.last_twcc_bitrate.map(|b| u128::from(b.as_u64())) else {
+            return Ok(());
+        };
 
-        while self.perf.front().is_some_and(|p| {
-            now.duration_since(p.timestamp) > tuning().perf.window_max_age()
-                || self.perf.len() > tuning().perf.window_max_len
-        }) {
-            self.perf.pop_front();
+        for track_out in self
+            .tracks_out
+            .iter()
+            .filter(|t| matches!(t.layer_mode, LayerMode::Auto))
+        {
+            let TrackOutState::Open(mid) = track_out.state else {
+                continue;
+            };
+
+            if let Some(rid) = target_rid_for_bitrate(track_out, twcc_bitrate) {
+                target_layers.push((mid, rid));
+            }
+        }
+
+        for (mid, rid) in target_layers {
+            self.set_layer(mid, rid, keyframe_requests)?;
         }
 
         Ok(())
     }
+}
 
-    pub fn probe_available_upload(&mut self) {
-        if let Some(mut channel) = self.cid.and_then(|id| self.rtc.channel(id)) {
-            let payload = S2cDcPayload::ProbeAvailableUpload;
-            let Ok(json) = serde_json::to_string(&payload) else {
-                error!("serde_json to_string failed: client_id={}", self.id);
-                return;
-            };
-
-            if let Err(e) = channel.write(false, json.as_bytes()) {
-                error!("send probe_upload via dc failed: {e}");
-                return;
-            };
-
-            self.available_upload = Some(UploadProbeResult::Probing {
-                probed_at: (Instant::now()),
-            });
-        }
+impl Deref for Viewers {
+    type Target = HashMap<ClientId, Viewer>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
+}
 
-    pub fn is_perf_healthy(&self) -> bool {
-        if self.perf.is_empty() {
-            return false;
-        }
-
-        let mut rtt_ms_avg = 0;
-        let mut loss_pct_avg = 0.0;
-        let len = self.perf.len() as u32;
-
-        for p in self.perf.iter() {
-            rtt_ms_avg += p.rtt_ms;
-            loss_pct_avg += p.loss_pct;
-        }
-
-        rtt_ms_avg /= len;
-        loss_pct_avg /= len as f32;
-
-        rtt_ms_avg < tuning().perf.rtt_ms_cutoff
-            && loss_pct_avg < tuning().perf.loss_pct_cutoff
-            && len > tuning().perf.min_samples_len
-    }
-
-    fn send_payload_via_dc(&mut self, payload: S2cDcPayload) -> ClientResult<()> {
-        let mut channel = self
-            .cid
-            .and_then(|id| self.rtc.channel(id))
-            .ok_or(ClientError::ChannelNotFound)?;
-
-        let json = serde_json::to_string(&payload)?;
-
-        channel.write(false, json.as_bytes())?;
-
-        Ok(())
+impl DerefMut for Viewers {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -899,8 +691,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::types::{
-        BitrateEstimator, Client, ClientRole, LayerMode, SimulcastLayer, TrackIn, TrackOut,
-        TrackOutState,
+        BitrateEstimator, LayerMode, SimulcastLayer, TrackIn, TrackOut, TrackOutState, Viewer,
     };
 
     fn simulcast_layer(rid: Rid, estimated_bps: u64) -> SimulcastLayer {
@@ -910,8 +701,8 @@ mod tests {
         }
     }
 
-    fn viewer_with_track_out() -> (Client, Rc<TrackIn>) {
-        let mut client = Client::new(Rtc::new(Instant::now()), ClientRole::Viewer, Uuid::new_v4());
+    fn viewer_with_track_out() -> (Viewer, Rc<TrackIn>) {
+        let mut client = Viewer::new(Rtc::new(Instant::now()), Uuid::new_v4());
 
         let streamer_mid = Mid::from("streamer-video");
         let viewer_mid = Mid::from("viewer-video");
