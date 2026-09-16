@@ -137,9 +137,10 @@ impl Room {
         let Some(leaf_id) = self
             .clients
             .values()
-            .find(|c| {
+            .filter(|c| {
                 matches!(c.role, ClientRole::Viewer) && c.relay_status.is_none() && c.id != relay_id
             })
+            .min_by_key(|c| c.relay_potential())
             .map(|c| c.id)
         else {
             return;

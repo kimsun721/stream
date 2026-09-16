@@ -13,8 +13,8 @@ use crate::{
     metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
-        SfuMessage, TrackIn, TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayPotential, RelayStatus,
+        RoomState, Rooms, SfuMessage, TrackIn, TrackOut, TrackOutState, UploadProbeResult,
     },
 };
 
@@ -295,14 +295,7 @@ pub fn run(
                 .clients
                 .values()
                 .filter_map(|c| {
-                    let Some(UploadProbeResult::Probed {
-                        available_upload_kbps,
-                    }) = c.available_upload
-                    else {
-                        return None;
-                    };
-
-                    if available_upload_kbps > tuning().relay.available_upload_cutoff_kbps
+                    if c.relay_potential() == RelayPotential::Qualified
                         && c.relay_status.is_none()
                         && c.connected_at.elapsed() >= tuning().relay.min_connection_age()
                         && c.is_perf_healthy()

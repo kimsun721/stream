@@ -274,6 +274,13 @@ pub enum LayerMode {
     Auto,
 }
 
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub enum RelayPotential {
+    Never,
+    Unknown,
+    Qualified,
+}
+
 impl Client {
     pub fn new(rtc: Rtc, role: ClientRole, session_id: Uuid) -> Client {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);

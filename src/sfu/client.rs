@@ -21,8 +21,9 @@ use crate::{
     sfu::error::{ClientError, ClientResult},
     types::{
         AvailableSimulcastLayer, BitrateEstimator, C2sDcPayload, Client, ClientId, ClientRole,
-        LayerMode, LinkState, PerfSample, PollResult, PushOutcome, RelayStatus, S2cDcPayload,
-        SimulcastLayer, TrackIn, TrackInEntry, TrackOut, TrackOutState, UploadProbeResult,
+        LayerMode, LinkState, PerfSample, PollResult, PushOutcome, RelayPotential, RelayStatus,
+        S2cDcPayload, SimulcastLayer, TrackIn, TrackInEntry, TrackOut, TrackOutState,
+        UploadProbeResult,
     },
 };
 
@@ -355,6 +356,23 @@ impl Client {
         }
 
         None
+    }
+
+    pub fn relay_potential(&self) -> RelayPotential {
+        let cutoff = tuning().relay.available_upload_cutoff_kbps;
+
+        match self.available_upload {
+            Some(UploadProbeResult::Probed {
+                available_upload_kbps,
+            }) => {
+                if available_upload_kbps > cutoff {
+                    RelayPotential::Qualified
+                } else {
+                    RelayPotential::Never
+                }
+            }
+            _ => RelayPotential::Unknown,
+        }
     }
 
     fn handle_media_added(
