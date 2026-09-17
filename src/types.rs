@@ -306,6 +306,12 @@ pub enum LinkState {
     Connected,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum ClientType {
+    Viewer,
+    Streamer,
+}
+
 impl ClientId {
     pub fn next() -> ClientId {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);

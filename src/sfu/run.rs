@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{SocketAddr, UdpSocket},
     rc::Rc,
     sync::mpsc::Receiver,
@@ -13,8 +14,9 @@ use crate::{
     metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms, SfuMessage,
-        StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult, ViewerEffects,
+        ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomId, RoomState,
+        Rooms, SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
+        ViewerEffects,
     },
 };
 
@@ -33,6 +35,7 @@ pub fn run(
     let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
     let mut woken_for: Option<Instant> = None;
+    let mut routes = HashMap::new();
 
     loop {
         let _lap = metrics::time(Phase::Lap);
@@ -412,7 +415,7 @@ pub fn run(
             error!("socket set_nonblocking error={e}");
         } else {
             if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, advertised_addr) {
-                route_socket_input(&mut rooms, input);
+                route_socket_input(&mut rooms, &mut routes, input);
                 socket_read_count += 1;
             }
         }
@@ -427,7 +430,7 @@ pub fn run(
 
                 match read_socket_input(&socket, &mut buf, advertised_addr) {
                     Ok(Some(input)) => {
-                        route_socket_input(&mut rooms, input);
+                        route_socket_input(&mut rooms, &mut routes, input);
                         socket_read_count += 1;
                     }
                     _ => break,
@@ -481,23 +484,59 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
     gauges
 }
 
-fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
-    let streamer = rooms
-        .values_mut()
-        .filter_map(|room| room.streamer.as_mut())
-        .find(|streamer| streamer.peer.rtc.accepts(&input));
+fn route_socket_input(
+    rooms: &mut Rooms,
+    routes: &mut HashMap<SocketAddr, (ClientType, RoomId, ClientId)>,
+    input: Input<'_>,
+) {
+    let Input::Receive(_, r) = &input else {
+        return;
+    };
 
-    if let Some(streamer) = streamer {
+    if let Some((client_type, room_id, client_id)) = routes.get(&r.source)
+        && let Some(room) = rooms.get_mut(room_id)
+    {
+        match client_type {
+            ClientType::Viewer
+                if let Some(viewer) = room.viewers.get_mut(client_id)
+                    && viewer.peer.rtc.accepts(&input) =>
+            {
+                viewer.peer.handle_input(input);
+                return;
+            }
+            ClientType::Streamer
+                if let Some(streamer) = &mut room.streamer
+                    && streamer.peer.rtc.accepts(&input) =>
+            {
+                streamer.peer.handle_input(input);
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let streamer = rooms
+        .iter_mut()
+        .filter_map(|(room_id, room)| room.streamer.as_mut().map(|s| (room_id, s)))
+        .find(|(_, streamer)| streamer.peer.rtc.accepts(&input));
+
+    if let Some((room_id, streamer)) = streamer {
+        routes.insert(
+            r.source,
+            (ClientType::Streamer, room_id.clone(), streamer.id),
+        );
         streamer.peer.handle_input(input);
+
         return;
     };
 
     let viewer = rooms
-        .values_mut()
-        .flat_map(|room| room.viewers.values_mut())
-        .find(|viewer| viewer.peer.rtc.accepts(&input));
+        .iter_mut()
+        .flat_map(|(room_id, room)| room.viewers.values_mut().map(move |v| (room_id, v)))
+        .find(|(_, viewer)| viewer.peer.rtc.accepts(&input));
 
-    if let Some(viewer) = viewer {
+    if let Some((room_id, viewer)) = viewer {
+        routes.insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
         viewer.peer.handle_input(input);
     } else {
         debug!("No client accepts UDP input");
