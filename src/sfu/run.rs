@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     net::{SocketAddr, UdpSocket},
     rc::Rc,
     sync::mpsc::Receiver,
@@ -14,8 +13,8 @@ use crate::{
     metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomId, RoomState,
-        Rooms, SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms,
+        SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
         ViewerEffects,
     },
 };
@@ -35,7 +34,6 @@ pub fn run(
     let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
     let mut woken_for: Option<Instant> = None;
-    let mut routes = HashMap::new();
 
     loop {
         let _lap = metrics::time(Phase::Lap);
@@ -92,7 +90,7 @@ pub fn run(
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
-        for room in rooms.values_mut() {
+        for (room_id, room) in rooms.rooms.iter_mut() {
             if matches!(room.state, RoomState::Idle)
                 && room.viewers.is_empty()
                 && room.streamer.is_none()
@@ -203,6 +201,7 @@ pub fn run(
                 }
             }
 
+            rooms.socket_routes.clean_routes_by_clients(&to_remove);
             for id in to_remove.iter() {
                 room.viewers.remove(id);
             }
@@ -397,6 +396,7 @@ pub fn run(
 
             if needs_init {
                 room.init();
+                rooms.socket_routes.clean_routes_by_room_id(room_id);
             }
         }
 
@@ -415,7 +415,7 @@ pub fn run(
             error!("socket set_nonblocking error={e}");
         } else {
             if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, advertised_addr) {
-                route_socket_input(&mut rooms, &mut routes, input);
+                route_socket_input(&mut rooms, input);
                 socket_read_count += 1;
             }
         }
@@ -430,7 +430,7 @@ pub fn run(
 
                 match read_socket_input(&socket, &mut buf, advertised_addr) {
                     Ok(Some(input)) => {
-                        route_socket_input(&mut rooms, &mut routes, input);
+                        route_socket_input(&mut rooms, input);
                         socket_read_count += 1;
                     }
                     _ => break,
@@ -484,17 +484,13 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
     gauges
 }
 
-fn route_socket_input(
-    rooms: &mut Rooms,
-    routes: &mut HashMap<SocketAddr, (ClientType, RoomId, ClientId)>,
-    input: Input<'_>,
-) {
+fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
     let Input::Receive(_, r) = &input else {
         return;
     };
 
-    if let Some((client_type, room_id, client_id)) = routes.get(&r.source)
-        && let Some(room) = rooms.get_mut(room_id)
+    if let Some((client_type, room_id, client_id)) = rooms.socket_routes.0.get(&r.source)
+        && let Some(room) = rooms.rooms.get_mut(room_id)
     {
         match client_type {
             ClientType::Viewer
@@ -502,6 +498,7 @@ fn route_socket_input(
                     && viewer.peer.rtc.accepts(&input) =>
             {
                 viewer.peer.handle_input(input);
+
                 return;
             }
             ClientType::Streamer
@@ -509,6 +506,7 @@ fn route_socket_input(
                     && streamer.peer.rtc.accepts(&input) =>
             {
                 streamer.peer.handle_input(input);
+
                 return;
             }
             _ => {}
@@ -516,12 +514,13 @@ fn route_socket_input(
     }
 
     let streamer = rooms
+        .rooms
         .iter_mut()
         .filter_map(|(room_id, room)| room.streamer.as_mut().map(|s| (room_id, s)))
         .find(|(_, streamer)| streamer.peer.rtc.accepts(&input));
 
     if let Some((room_id, streamer)) = streamer {
-        routes.insert(
+        rooms.socket_routes.0.insert(
             r.source,
             (ClientType::Streamer, room_id.clone(), streamer.id),
         );
@@ -531,12 +530,16 @@ fn route_socket_input(
     };
 
     let viewer = rooms
+        .rooms
         .iter_mut()
         .flat_map(|(room_id, room)| room.viewers.values_mut().map(move |v| (room_id, v)))
         .find(|(_, viewer)| viewer.peer.rtc.accepts(&input));
 
     if let Some((room_id, viewer)) = viewer {
-        routes.insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
+        rooms
+            .socket_routes
+            .0
+            .insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
         viewer.peer.handle_input(input);
     } else {
         debug!("No client accepts UDP input");

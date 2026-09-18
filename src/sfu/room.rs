@@ -13,14 +13,17 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::types::{
-    ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, StreamKey,
-    Streamer, TrackOut, TrackOutState, Viewers,
+    ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
+    StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
 };
 use crate::{metrics, types::Viewer};
 
 impl Rooms {
     pub fn new() -> Self {
-        Rooms(HashMap::new())
+        Rooms {
+            rooms: HashMap::new(),
+            socket_routes: SocketRoutes::new(),
+        }
     }
 
     pub fn register_viewer(
@@ -84,10 +87,11 @@ impl Rooms {
         state: RoomState,
         reply: SyncSender<Option<()>>,
     ) {
-        match self.get_mut(&room_id) {
+        match self.rooms.get_mut(&room_id) {
             Some(room) => {
                 if matches!(state, RoomState::Idle) {
                     room.init();
+                    self.socket_routes.clean_routes_by_room_id(&room_id);
                 }
                 room.set_state(state);
                 reply.send(Some(())).ok()
@@ -97,8 +101,11 @@ impl Rooms {
     }
 
     pub fn delete(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.remove(&room_id) {
-            Some(_) => reply.send(Some(())).ok(),
+        match self.rooms.remove(&room_id) {
+            Some(_) => {
+                self.socket_routes.clean_routes_by_room_id(&room_id);
+                reply.send(Some(())).ok()
+            }
             None => reply.send(None).ok(),
         };
     }
@@ -121,11 +128,12 @@ impl Rooms {
         session_id: Uuid,
         reply: SyncSender<Option<()>>,
     ) {
-        if let Some(room) = self.get_mut(&room_id)
+        if let Some(room) = self.rooms.get_mut(&room_id)
             && let Some(streamer) = &room.streamer
             && streamer.peer.session_id == session_id
         {
             room.init();
+            self.socket_routes.clean_routes_by_room_id(&room_id);
             reply.send(Some(())).ok();
         } else {
             reply.send(None).ok();
@@ -283,13 +291,13 @@ impl Room {
 impl Deref for Rooms {
     type Target = HashMap<RoomId, Room>;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.rooms
     }
 }
 
 impl DerefMut for Rooms {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.rooms
     }
 }
 

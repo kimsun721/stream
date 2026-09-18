@@ -2,6 +2,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     fmt,
+    net::SocketAddr,
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -119,7 +120,10 @@ pub struct Room {
     pub hashed_stream_key: [u8; 32],
 }
 
-pub struct Rooms(pub HashMap<RoomId, Room>);
+pub struct Rooms {
+    pub rooms: HashMap<RoomId, Room>,
+    pub socket_routes: SocketRoutes,
+}
 
 #[derive(Debug)]
 pub struct TrackIn {
@@ -312,6 +316,9 @@ pub enum ClientType {
     Streamer,
 }
 
+#[derive(Debug)]
+pub struct SocketRoutes(pub HashMap<SocketAddr, (ClientType, RoomId, ClientId)>);
+
 impl ClientId {
     pub fn next() -> ClientId {
         static ID_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -456,6 +463,20 @@ impl RelayState {
             available_upload: None,
             relay_outgoing_kbps: None,
         }
+    }
+}
+
+impl SocketRoutes {
+    pub fn new() -> SocketRoutes {
+        SocketRoutes(HashMap::new())
+    }
+
+    pub fn clean_routes_by_room_id(&mut self, target_id: &RoomId) {
+        self.0.retain(|_, (_, room_id, _)| room_id != target_id);
+    }
+
+    pub fn clean_routes_by_clients(&mut self, client_ids: &[ClientId]) {
+        self.0.retain(|_, (_, _, id)| !client_ids.contains(id));
     }
 }
 
