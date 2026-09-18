@@ -400,7 +400,7 @@ pub fn run(
             }
         }
 
-        metrics::gauges(count_gauges(&rooms));
+        metrics::gauges(0, count_gauges(&rooms));
 
         woken_for = Some(timeout);
 

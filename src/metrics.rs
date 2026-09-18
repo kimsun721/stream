@@ -238,10 +238,35 @@ pub fn demoted() {
     DEMOTIONS.fetch_add(1, Relaxed);
 }
 
-atomics!(ROOMS, CLIENTS, VIEWERS, RELAYS, CONNECTED_LEAVES);
+/// Enough slots that no media loop has to share one. Gauges are overwritten
+/// rather than added to, so two loops writing the same slot would hide each
+/// other rather than sum.
+const MAX_SHARDS: usize = 64;
 
-/// What the loop currently holds, as opposed to what it has done. Written once
-/// a lap because no other thread can walk `Rooms`.
+struct ShardGauges {
+    rooms: AtomicU64,
+    clients: AtomicU64,
+    viewers: AtomicU64,
+    relays: AtomicU64,
+    connected_leaves: AtomicU64,
+}
+
+impl ShardGauges {
+    const fn new() -> Self {
+        ShardGauges {
+            rooms: AtomicU64::new(0),
+            clients: AtomicU64::new(0),
+            viewers: AtomicU64::new(0),
+            relays: AtomicU64::new(0),
+            connected_leaves: AtomicU64::new(0),
+        }
+    }
+}
+
+static SHARDS: [ShardGauges; MAX_SHARDS] = [const { ShardGauges::new() }; MAX_SHARDS];
+
+/// What one media loop currently holds, as opposed to what it has done. Written
+/// once a lap because no other thread can walk its `Rooms`.
 pub struct Gauges {
     pub rooms: u64,
     pub clients: u64,
@@ -250,12 +275,21 @@ pub struct Gauges {
     pub connected_leaves: u64,
 }
 
-pub fn gauges(gauges: Gauges) {
-    ROOMS.store(gauges.rooms, Relaxed);
-    CLIENTS.store(gauges.clients, Relaxed);
-    VIEWERS.store(gauges.viewers, Relaxed);
-    RELAYS.store(gauges.relays, Relaxed);
-    CONNECTED_LEAVES.store(gauges.connected_leaves, Relaxed);
+/// Panics above `MAX_SHARDS`, which is louder than two loops quietly reporting
+/// over each other.
+pub fn gauges(shard: usize, gauges: Gauges) {
+    let slot = &SHARDS[shard];
+
+    slot.rooms.store(gauges.rooms, Relaxed);
+    slot.clients.store(gauges.clients, Relaxed);
+    slot.viewers.store(gauges.viewers, Relaxed);
+    slot.relays.store(gauges.relays, Relaxed);
+    slot.connected_leaves
+        .store(gauges.connected_leaves, Relaxed);
+}
+
+fn total(field: fn(&ShardGauges) -> &AtomicU64) -> u64 {
+    SHARDS.iter().map(|slot| field(slot).load(Relaxed)).sum()
 }
 
 /// Every field is cumulative, the percentiles included. A caller that wants a
@@ -340,11 +374,11 @@ pub fn snapshot() -> Snapshot {
         promotions: PROMOTIONS.load(Relaxed),
         demotions: DEMOTIONS.load(Relaxed),
 
-        rooms: ROOMS.load(Relaxed),
-        clients: CLIENTS.load(Relaxed),
-        viewers: VIEWERS.load(Relaxed),
-        relays: RELAYS.load(Relaxed),
-        connected_leaves: CONNECTED_LEAVES.load(Relaxed),
+        rooms: total(|slot| &slot.rooms),
+        clients: total(|slot| &slot.clients),
+        viewers: total(|slot| &slot.viewers),
+        relays: total(|slot| &slot.relays),
+        connected_leaves: total(|slot| &slot.connected_leaves),
 
         lap: PHASES[Phase::Lap as usize].snapshot(),
         lap_lateness: LAP_LATENESS.snapshot(),
