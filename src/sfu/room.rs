@@ -12,31 +12,48 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::metrics;
 use crate::types::{
-    Client, ClientId, ClientRole, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState,
-    Rooms, StreamKey, TrackOut, TrackOutState,
+    ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
+    StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
 };
+use crate::{metrics, types::Viewer};
 
 impl Rooms {
     pub fn new() -> Self {
-        Rooms(HashMap::new())
+        Rooms {
+            rooms: HashMap::new(),
+            socket_routes: SocketRoutes::new(),
+        }
     }
 
-    pub fn register_client(
+    pub fn register_viewer(
         &mut self,
         rtc: Rtc,
-        role: ClientRole,
         room_id: RoomId,
         session_id: Uuid,
         reply: SyncSender<Option<StatusCode>>,
     ) {
         if let Some(room) = self.get_mut(&room_id) {
-            room.add_client(rtc, role, session_id, reply);
+            room.add_viewer(rtc, session_id, reply);
         } else {
             warn!("Room does not exist : {:?}", room_id);
             reply.send(Some(StatusCode::NOT_FOUND)).ok();
         };
+    }
+
+    pub fn register_streamer(
+        &mut self,
+        rtc: Rtc,
+        room_id: RoomId,
+        session_id: Uuid,
+        reply: SyncSender<Option<StatusCode>>,
+    ) {
+        if let Some(room) = self.get_mut(&room_id) {
+            room.add_streamer(rtc, session_id, reply);
+        } else {
+            warn!("Room does not exist : {:?}", room_id);
+            reply.send(Some(StatusCode::NOT_FOUND)).ok();
+        }
     }
 
     pub fn create(&mut self, reply: SyncSender<(RoomId, StreamKey)>) {
@@ -47,8 +64,8 @@ impl Rooms {
         self.insert(
             room_id.clone(),
             Room {
-                streamer_id: None,
-                clients: vec![],
+                streamer: None,
+                viewers: Viewers::new(),
                 state: RoomState::Idle,
                 hashed_stream_key,
             },
@@ -70,10 +87,11 @@ impl Rooms {
         state: RoomState,
         reply: SyncSender<Option<()>>,
     ) {
-        match self.get_mut(&room_id) {
+        match self.rooms.get_mut(&room_id) {
             Some(room) => {
                 if matches!(state, RoomState::Idle) {
                     room.init();
+                    self.socket_routes.clean_routes_by_room_id(&room_id);
                 }
                 room.set_state(state);
                 reply.send(Some(())).ok()
@@ -83,8 +101,11 @@ impl Rooms {
     }
 
     pub fn delete(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
-        match self.remove(&room_id) {
-            Some(_) => reply.send(Some(())).ok(),
+        match self.rooms.remove(&room_id) {
+            Some(_) => {
+                self.socket_routes.clean_routes_by_room_id(&room_id);
+                reply.send(Some(())).ok()
+            }
             None => reply.send(None).ok(),
         };
     }
@@ -107,11 +128,12 @@ impl Rooms {
         session_id: Uuid,
         reply: SyncSender<Option<()>>,
     ) {
-        if let Some(room) = self.get_mut(&room_id)
-            && let Some(streamer) = room.streamer()
-            && streamer.session_id == session_id
+        if let Some(room) = self.rooms.get_mut(&room_id)
+            && let Some(streamer) = &room.streamer
+            && streamer.peer.session_id == session_id
         {
             room.init();
+            self.socket_routes.clean_routes_by_room_id(&room_id);
             reply.send(Some(())).ok();
         } else {
             reply.send(None).ok();
@@ -135,20 +157,19 @@ impl Rooms {
 impl Room {
     pub fn promote(&mut self, relay_id: ClientId) {
         let Some(leaf_id) = self
-            .clients
-            .iter()
-            .find(|c| {
-                matches!(c.role, ClientRole::Viewer) && c.relay_status.is_none() && c.id != relay_id
-            })
+            .viewers
+            .values()
+            .filter(|c| c.relay_state.relay_status.is_none() && c.id != relay_id)
+            .min_by_key(|c| c.relay_state.relay_potential())
             .map(|c| c.id)
         else {
             return;
         };
 
         let Some(relay) = self
-            .clients
-            .iter_mut()
-            .find(|c| c.id == relay_id && c.relay_status.is_none())
+            .viewers
+            .get_mut(&relay_id)
+            .filter(|c| c.relay_state.relay_status.is_none())
         else {
             return;
         };
@@ -158,17 +179,17 @@ impl Room {
             return;
         };
 
-        relay.relay_status = Some(RelayStatus::Relay {
+        relay.relay_state.relay_status = Some(RelayStatus::Relay {
             leaf: leaf_id,
             p2p_connected_at: None,
         });
-        relay.relay_outgoing_kbps = None;
+        relay.relay_state.relay_outgoing_kbps = None;
 
-        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+        let Some(leaf) = self.viewers.get_mut(&leaf_id) else {
             return;
         };
 
-        leaf.relay_status = Some(RelayStatus::Leaf {
+        leaf.relay_state.relay_status = Some(RelayStatus::Leaf {
             relay: relay_id,
             link_state: LinkState::Connecting { at: Instant::now() },
         });
@@ -179,7 +200,7 @@ impl Room {
     }
 
     pub fn demote(&mut self, relay_id: ClientId, leaf_id: ClientId) {
-        let Some(relay) = self.clients.iter_mut().find(|c| c.id == relay_id) else {
+        let Some(relay) = self.viewers.get_mut(&relay_id) else {
             return;
         };
 
@@ -189,15 +210,12 @@ impl Room {
             error!("demote relay failed error={e}");
         };
 
-        let Some(leaf) = self.clients.iter_mut().find(|c| c.id == leaf_id) else {
+        let Some(leaf) = self.viewers.get_mut(&leaf_id) else {
             return;
         };
 
         if let Ok(keyframe_requests) = leaf.demote_leaf()
-            && let Some(streamer) = self
-                .clients
-                .iter_mut()
-                .find(|c| c.role == ClientRole::Streamer)
+            && let Some(streamer) = &mut self.streamer
             && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
         {
             error!("demote keyframe requests failed: {e}");
@@ -205,106 +223,81 @@ impl Room {
     }
 
     fn view_count(&self) -> usize {
-        self.clients
-            .iter()
-            .filter(|c| c.role == ClientRole::Viewer)
-            .count()
+        self.viewers.len()
     }
 
     fn set_state(&mut self, state: RoomState) {
         self.state = state;
     }
 
-    fn add_client(
-        &mut self,
-        rtc: Rtc,
-        role: ClientRole,
-        session_id: Uuid,
-        reply: SyncSender<Option<StatusCode>>,
-    ) {
-        let mut client = Client::new(rtc, role, session_id);
+    fn add_viewer(&mut self, rtc: Rtc, session_id: Uuid, reply: SyncSender<Option<StatusCode>>) {
+        let mut viewer = Viewer::new(rtc, session_id);
 
-        match role {
-            ClientRole::Streamer => {
-                if self
-                    .clients
-                    .iter()
-                    .any(|c| matches!(c.role, ClientRole::Streamer))
-                {
-                    warn!("Streamer already connected in room {:?}", &self);
-                    reply.send(Some(StatusCode::CONFLICT)).ok();
-                } else {
-                    self.streamer_id = Some(client.id);
-                    self.clients.push(client);
-                    self.state = RoomState::Preview;
-
-                    reply.send(None).ok();
-                }
+        match self.state {
+            RoomState::Idle | RoomState::Preview => {
+                warn!("Client connected to an {:?} room", self.state);
+                reply.send(Some(StatusCode::NOT_FOUND)).ok();
             }
-            ClientRole::Viewer => match self.state {
-                RoomState::Idle | RoomState::Preview => {
-                    warn!("Client connected to an {:?} room", self.state);
-                    reply.send(Some(StatusCode::NOT_FOUND)).ok();
+            RoomState::Live => {
+                let tracks: Vec<_> = self
+                    .streamer
+                    .as_ref()
+                    .into_iter()
+                    .flat_map(|s| {
+                        s.tracks_in
+                            .iter()
+                            .map(|t| (Rc::downgrade(&t.id), t.id.default_rid()))
+                    })
+                    .collect();
+
+                for (track_in, default_rid) in tracks {
+                    viewer.tracks_out.push(TrackOut {
+                        track_in,
+                        state: TrackOutState::ToOpen,
+                        layer_mode: LayerMode::Auto,
+                        chosen_rid: default_rid,
+                    });
                 }
-                RoomState::Live => {
-                    let tracks: Vec<_> = self
-                        .clients
-                        .iter()
-                        .filter(|c| c.role == ClientRole::Streamer)
-                        .flat_map(|c| {
-                            c.tracks_in
-                                .iter()
-                                .map(|t| (Rc::downgrade(&t.id), t.id.default_rid()))
-                        })
-                        .collect();
 
-                    for (track_in, default_rid) in tracks {
-                        client.tracks_out.push(TrackOut {
-                            track_in,
-                            state: TrackOutState::ToOpen,
-                            layer_mode: LayerMode::Auto,
-                            chosen_rid: default_rid,
-                        });
-                    }
-
-                    if let Some(desired_bitrate) = client.calc_desired_bitrate() {
-                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
-                    }
-
-                    self.clients.push(client);
-                    reply.send(None).ok();
+                if let Some(desired_bitrate) = viewer.calc_desired_bitrate() {
+                    viewer.peer.rtc.bwe().set_desired_bitrate(desired_bitrate);
                 }
-            },
-        };
+
+                self.viewers.insert(viewer.id, viewer);
+                reply.send(None).ok();
+            }
+        }
     }
 
-    pub fn viewers_mut(&mut self) -> impl Iterator<Item = &mut Client> {
-        self.clients
-            .iter_mut()
-            .filter(|c| c.role == ClientRole::Viewer)
+    fn add_streamer(&mut self, rtc: Rtc, session_id: Uuid, reply: SyncSender<Option<StatusCode>>) {
+        if self.streamer.is_none() {
+            self.state = RoomState::Preview;
+
+            self.streamer = Some(Streamer::new(rtc, session_id));
+            reply.send(None).ok();
+        } else {
+            warn!("Streamer already connected in room {:?}", &self);
+            reply.send(Some(StatusCode::CONFLICT)).ok();
+        }
     }
 
     pub fn init(&mut self) {
-        self.clients.clear();
+        self.viewers.clear();
         self.state = RoomState::Idle;
-        self.streamer_id = None;
-    }
-
-    pub fn streamer(&self) -> Option<&Client> {
-        self.clients.iter().find(|c| c.role == ClientRole::Streamer)
+        self.streamer = None;
     }
 }
 
 impl Deref for Rooms {
     type Target = HashMap<RoomId, Room>;
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.rooms
     }
 }
 
 impl DerefMut for Rooms {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+        &mut self.rooms
     }
 }
 
@@ -316,7 +309,7 @@ mod tests {
     use str0m::Rtc;
     use uuid::Uuid;
 
-    use crate::types::{Client, ClientRole, Room, RoomId, RoomState, Rooms, StreamKey};
+    use crate::types::{Room, RoomId, RoomState, Rooms, StreamKey, Viewers};
 
     fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
         mpsc::sync_channel(1)
@@ -420,13 +413,7 @@ mod tests {
         let (room_id, _) = create_room(&mut rooms);
 
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(
-            rtc(),
-            ClientRole::Streamer,
-            room_id.clone(),
-            Uuid::new_v4(),
-            tx,
-        );
+        rooms.register_streamer(rtc(), room_id.clone(), Uuid::new_v4(), tx);
         assert!(matches!(
             rooms.get(&room_id).unwrap().state,
             RoomState::Preview
@@ -437,13 +424,7 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), Some(()));
 
         let (tx, _rx) = reply::<StatusCode>();
-        rooms.register_client(
-            rtc(),
-            ClientRole::Viewer,
-            room_id.clone(),
-            Uuid::new_v4(),
-            tx,
-        );
+        rooms.register_viewer(rtc(), room_id.clone(), Uuid::new_v4(), tx);
 
         let (tx, rx) = reply();
         rooms.get_room(room_id, tx);
@@ -474,38 +455,19 @@ mod tests {
 
     #[test]
     fn add_duplicate_streamer() {
-        let clients: Vec<Client> = Vec::new();
-
         let mut room = Room {
-            streamer_id: None,
-            clients,
+            streamer: None,
+            viewers: Viewers::new(),
             state: RoomState::Live,
             hashed_stream_key: [0; 32],
         };
 
-        let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(
-            Rtc::new(Instant::now()),
-            ClientRole::Streamer,
-            Uuid::new_v4(),
-            tx,
-        );
-        let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(
-            Rtc::new(Instant::now()),
-            ClientRole::Streamer,
-            Uuid::new_v4(),
-            tx,
-        );
-        let (tx, _rx) = reply::<StatusCode>();
-        room.add_client(
-            Rtc::new(Instant::now()),
-            ClientRole::Streamer,
-            Uuid::new_v4(),
-            tx,
-        );
+        for _ in 0..3 {
+            let (tx, _rx) = reply::<StatusCode>();
+            room.add_streamer(Rtc::new(Instant::now()), Uuid::new_v4(), tx);
+        }
 
-        assert_eq!(room.clients.len(), 1);
+        assert!(room.streamer.is_some());
     }
 
     #[test]
@@ -516,26 +478,21 @@ mod tests {
             (RoomState::Preview, 0),
         ];
 
-        for (state, clients_len) in cases {
+        for (state, viewers_len) in cases {
             let mut room = Room {
-                streamer_id: None,
-                clients: Vec::new(),
+                streamer: None,
+                viewers: Viewers::new(),
                 state,
                 hashed_stream_key: [0; 32],
             };
 
             let (tx, _rx) = reply::<StatusCode>();
-            room.add_client(
-                Rtc::new(Instant::now()),
-                ClientRole::Viewer,
-                Uuid::new_v4(),
-                tx,
-            );
+            room.add_viewer(Rtc::new(Instant::now()), Uuid::new_v4(), tx);
 
             assert_eq!(
-                room.clients.len(),
-                clients_len,
-                "add_client unit test for RoomState: {state:?} case"
+                room.viewers.len(),
+                viewers_len,
+                "add_viewer unit test for RoomState: {state:?} case"
             );
         }
     }

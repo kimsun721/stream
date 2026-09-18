@@ -1,6 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::mpsc::{self, SyncSender},
+    sync::mpsc::{self, Receiver, SyncSender},
     time::Instant,
 };
 
@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::{
     config::{WebConfig, tuning},
     metrics,
-    types::{ClientRole, RoomId, RoomState, SfuMessage, StreamKey},
+    types::{RoomId, RoomState, SfuMessage, StreamKey},
     utils::string::hash_string,
 };
 
@@ -380,13 +380,18 @@ async fn sdp_offer(
         sdp,
         room_id,
     } = payload;
-    let role = ClientRole::Viewer;
 
-    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
-
+    let (rtc, answer) = viewer_rtc_from_offer(sdp, state.addr)?;
     let session_id = Uuid::new_v4();
+    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+    let msg = SfuMessage::RegisterViewer {
+        rtc: Box::from(rtc),
+        room_id: RoomId(room_id),
+        session_id,
+        reply: tx,
+    };
 
-    register_client(rtc, role, RoomId(room_id), state.tx, session_id)?;
+    register_client(msg, rx, state.tx)?;
 
     let value = serde_json::to_value(&answer).map_err(|e| {
         error!("json to value failed: {}", e);
@@ -402,20 +407,25 @@ async fn whip_sdp_offer(
     TypedHeader(content_type): TypedHeader<ContentType>,
     sdp: String,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let role = ClientRole::Streamer;
-
     let mime: Mime = content_type.into();
 
     if mime.essence_str() != "application/sdp" {
         return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
     };
 
-    let (rtc, answer) = create_rtc_from_offer(sdp, role, state.addr)?;
-
+    let (rtc, answer) = streamer_rtc_from_offer(sdp, state.addr)?;
     let session_id = Uuid::new_v4();
     let location = format!("/whip/sessions/{}", session_id);
+    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
 
-    register_client(rtc, role, room_id, state.tx, session_id)?;
+    let msg = SfuMessage::RegisterStreamer {
+        rtc: Box::from(rtc),
+        room_id,
+        session_id,
+        reply: tx,
+    };
+
+    register_client(msg, rx, state.tx)?;
 
     Ok((
         StatusCode::CREATED,
@@ -454,26 +464,28 @@ async fn whip_terminate_session(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
-fn create_rtc_from_offer(
-    sdp: String,
-    role: ClientRole,
+fn viewer_rtc_from_offer(sdp: String, addr: SocketAddr) -> Result<(Rtc, SdpAnswer), StatusCode> {
+    let mut rtc = Rtc::builder()
+        .enable_bwe(Some(Bitrate::mbps(tuning().bitrate.initial_mbps)))
+        .build(Instant::now());
+
+    rtc.bwe()
+        .set_desired_bitrate(Bitrate::mbps(tuning().bitrate.desired_mbps));
+
+    accept_offer(rtc, addr, sdp)
+}
+
+fn streamer_rtc_from_offer(sdp: String, addr: SocketAddr) -> Result<(Rtc, SdpAnswer), StatusCode> {
+    let rtc = Rtc::builder().build(Instant::now());
+
+    accept_offer(rtc, addr, sdp)
+}
+
+fn accept_offer(
+    mut rtc: Rtc,
     addr: SocketAddr,
+    sdp: String,
 ) -> Result<(Rtc, SdpAnswer), StatusCode> {
-    let mut rtc = {
-        let mut builder = Rtc::builder();
-
-        if role == ClientRole::Viewer {
-            builder = builder.enable_bwe(Some(Bitrate::mbps(tuning().bitrate.initial_mbps)));
-        }
-
-        builder.build(Instant::now())
-    };
-
-    if role == ClientRole::Viewer {
-        rtc.bwe()
-            .set_desired_bitrate(Bitrate::mbps(tuning().bitrate.desired_mbps));
-    }
-
     rtc.add_local_candidate(Candidate::host(addr, "udp").map_err(|e| {
         error!("add local candidate failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
@@ -490,22 +502,10 @@ fn create_rtc_from_offer(
 }
 
 fn register_client(
-    rtc: Rtc,
-    role: ClientRole,
-    room_id: RoomId,
+    msg: SfuMessage,
+    rx: Receiver<Option<StatusCode>>,
     sfu_tx: SyncSender<SfuMessage>,
-    session_id: Uuid,
 ) -> Result<(), StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
-
-    let msg = SfuMessage::RegisterClient {
-        rtc: Box::from(rtc),
-        role,
-        room_id,
-        session_id,
-        reply: tx,
-    };
-
     sfu_tx.send(msg).map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR

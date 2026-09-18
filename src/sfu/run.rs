@@ -13,8 +13,9 @@ use crate::{
     metrics::{self, Gauges, Phase},
     sfu::{error::SfuResult, socket::read_socket_input},
     types::{
-        ClientId, ClientRole, LayerMode, LinkState, PollResult, RelayStatus, RoomState, Rooms,
-        SfuMessage, TrackIn, TrackOut, TrackOutState, UploadProbeResult,
+        ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms,
+        SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
+        ViewerEffects,
     },
 };
 
@@ -49,13 +50,18 @@ pub fn run(
             handled += 1;
 
             match message {
-                SfuMessage::RegisterClient {
+                SfuMessage::RegisterViewer {
                     rtc,
-                    role,
                     room_id,
                     session_id,
                     reply,
-                } => rooms.register_client(*rtc, role, room_id, session_id, reply),
+                } => rooms.register_viewer(*rtc, room_id, session_id, reply),
+                SfuMessage::RegisterStreamer {
+                    rtc,
+                    room_id,
+                    session_id,
+                    reply,
+                } => rooms.register_streamer(*rtc, room_id, session_id, reply),
                 SfuMessage::CreateRoom { reply } => rooms.create(reply),
                 SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
                 SfuMessage::UpdateRoomState {
@@ -84,62 +90,71 @@ pub fn run(
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
-        for room in rooms.values_mut() {
-            if matches!(room.state, RoomState::Idle) && room.clients.is_empty() {
+        for (room_id, room) in rooms.rooms.iter_mut() {
+            if matches!(room.state, RoomState::Idle)
+                && room.viewers.is_empty()
+                && room.streamer.is_none()
+            {
                 metrics::room_skipped();
                 continue;
             };
 
             metrics::room_visited();
             let _room = metrics::time(Phase::RoomIteration);
+            let client_tick = metrics::time(Phase::ClientTick);
 
             let mut to_remove = Vec::new();
-            let mut new_tracks: Vec<Rc<TrackIn>> = Vec::new();
-            let mut media_datas = Vec::new();
-            let mut keyframe_requests = Vec::new();
-            let mut p2p_sdps = Vec::new();
-            let mut connected_relays = Vec::new();
-            let mut disconnected_relays = Vec::new();
-            let mut should_reevaluate = false;
-
             let mut fallback_leafs = Vec::new();
             let mut needs_init = false;
 
-            let client_tick = metrics::time(Phase::ClientTick);
+            let mut viewer_effects = ViewerEffects {
+                keyframe_requests: Vec::new(),
+                p2p_sdps: Vec::new(),
+                connected_relays: Vec::new(),
+                disconnected_relays: Vec::new(),
+            };
 
-            for (idx, client) in room.clients.iter_mut().enumerate() {
-                match client.tick(
-                    &socket,
-                    &mut new_tracks,
-                    &mut media_datas,
-                    &mut keyframe_requests,
-                    &mut p2p_sdps,
-                    &mut connected_relays,
-                    &mut disconnected_relays,
-                    &mut should_reevaluate,
-                ) {
-                    Ok(PollResult::Timeout(v)) => timeout = timeout.min(v),
-                    Ok(PollResult::Disconnected) => {
+            let mut streamer_effects = StreamerEffects {
+                new_tracks: Vec::new(),
+                media_datas: Vec::new(),
+                should_reevaluate: false,
+            };
+
+            if let Some(streamer) = room.streamer.as_mut() {
+                match streamer.tick(&mut streamer_effects, &socket) {
+                    Ok(TickResult::Timeout(v)) => timeout = timeout.min(v),
+                    Ok(TickResult::Disconnected) => {
+                        metrics::client_disconnected();
+                        needs_init = true;
+                    }
+                    Err(e) => {
+                        metrics::client_tick_error();
+                        needs_init = true;
+                        error!("client tick failed: {}", e);
+                    }
+                }
+            }
+
+            for viewer in room.viewers.values_mut() {
+                match viewer.tick(&mut viewer_effects, &socket) {
+                    Ok(TickResult::Timeout(v)) => timeout = timeout.min(v),
+                    Ok(TickResult::Disconnected) => {
                         metrics::client_disconnected();
 
-                        if client.role == ClientRole::Streamer {
-                            needs_init = true;
-                        }
-
-                        match &client.relay_status {
+                        match &viewer.relay_state.relay_status {
                             Some(RelayStatus::Relay { leaf, .. }) => {
                                 fallback_leafs.push(*leaf);
                             }
                             Some(RelayStatus::Leaf { relay, .. }) => {
-                                disconnected_relays.push(*relay);
+                                viewer_effects.disconnected_relays.push(*relay);
                             }
                             _ => (),
                         }
-                        to_remove.push(idx);
+                        to_remove.push(viewer.id);
                     }
                     Err(e) => {
                         metrics::client_tick_error();
-                        to_remove.push(idx);
+                        to_remove.push(viewer.id);
                         error!("client tick failed: {}", e);
                     }
                 };
@@ -147,8 +162,8 @@ pub fn run(
 
             drop(client_tick);
 
-            for track in &new_tracks {
-                for client in room.viewers_mut() {
+            for track in &streamer_effects.new_tracks {
+                for client in room.viewers.values_mut() {
                     client.tracks_out.push(TrackOut {
                         track_in: Rc::downgrade(track),
                         state: TrackOutState::ToOpen,
@@ -158,20 +173,16 @@ pub fn run(
                 }
             }
 
-            if !new_tracks.is_empty() {
-                for client in room.viewers_mut() {
+            if !streamer_effects.new_tracks.is_empty() {
+                for client in room.viewers.values_mut() {
                     if let Some(desired_bitrate) = client.calc_desired_bitrate() {
-                        client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                        client.peer.rtc.bwe().set_desired_bitrate(desired_bitrate);
                     }
                 }
             }
 
-            if should_reevaluate {
-                for client in room
-                    .clients
-                    .iter_mut()
-                    .filter(|c| matches!(c.role, ClientRole::Viewer))
-                {
+            if streamer_effects.should_reevaluate {
+                for client in room.viewers.values_mut() {
                     let mut is_auto_layer = false;
                     for track_out in client.tracks_out.iter() {
                         if matches!(track_out.layer_mode, LayerMode::Auto) {
@@ -182,67 +193,62 @@ pub fn run(
 
                     if is_auto_layer {
                         if let Some(desired_bitrate) = client.calc_desired_bitrate() {
-                            client.rtc.bwe().set_desired_bitrate(desired_bitrate);
+                            client.peer.rtc.bwe().set_desired_bitrate(desired_bitrate);
                         }
 
-                        client.reevaluate_auto_layers(&mut keyframe_requests)?;
+                        client.reevaluate_auto_layers(&mut viewer_effects.keyframe_requests)?;
                     }
                 }
             }
 
-            for idx in to_remove.iter().rev() {
-                room.clients.remove(*idx);
+            rooms.socket_routes.clean_routes_by_clients(&to_remove);
+            for id in to_remove.iter() {
+                room.viewers.remove(id);
             }
 
             for leaf_id in fallback_leafs {
-                if let Some(leaf) = room.clients.iter_mut().find(|c| c.id == leaf_id)
+                if let Some(leaf) = room.viewers.get_mut(&leaf_id)
                     && let Ok(leaf_keyframe_requests) = leaf.demote_leaf()
                 {
                     for request in leaf_keyframe_requests {
-                        keyframe_requests.push(request);
+                        viewer_effects.keyframe_requests.push(request);
                     }
                 };
             }
 
             let media_fanout = metrics::time(Phase::MediaFanout);
 
-            for c in room
-                .clients
-                .iter_mut()
-                .filter(|c| c.role == ClientRole::Viewer)
-            {
+            for c in room.viewers.values_mut() {
                 if matches!(
-                    c.relay_status,
+                    c.relay_state.relay_status,
                     Some(RelayStatus::Leaf {
                         link_state: LinkState::Connected,
                         ..
                     })
                 ) {
-                    c.count_relay_saved(&media_datas);
+                    c.count_relay_saved(&streamer_effects.media_datas);
                     continue;
                 }
 
-                if let Err(e) = c.handle_media_datas(&media_datas) {
+                if let Err(e) = c.handle_media_datas(&streamer_effects.media_datas) {
                     error!("handle_media_datas failed: {}", e);
                 };
             }
 
             drop(media_fanout);
 
-            if let Some(streamer) = room
-                .clients
-                .iter_mut()
-                .find(|c| c.role == ClientRole::Streamer)
-                && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
+            if let Some(streamer) = room.streamer.as_mut()
+                && let Err(e) = streamer.handle_keyframe_requests(viewer_effects.keyframe_requests)
             {
                 error!("handle_keyframe_requests failed: {}", e);
             };
 
-            for offer in p2p_sdps {
+            for offer in viewer_effects.p2p_sdps {
                 let (target_id, payload) = offer;
 
-                if let Some(target) = room.clients.iter_mut().find(|c| c.id == target_id)
-                    && let Some(mut channel) = target.cid.and_then(|id| target.rtc.channel(id))
+                if let Some(target) = room.viewers.get_mut(&target_id)
+                    && let Some(mut channel) =
+                        target.peer.cid.and_then(|id| target.peer.rtc.channel(id))
                 {
                     let Ok(json) = serde_json::to_string(&payload) else {
                         error!("serde_json to_string failed: relay_id={target_id}");
@@ -255,8 +261,8 @@ pub fn run(
                 }
             }
 
-            for relay_id in disconnected_relays {
-                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+            for relay_id in viewer_effects.disconnected_relays {
+                if let Some(relay) = room.viewers.get_mut(&relay_id)
                     && let Err(e) = relay.demote_relay()
                 {
                     error!("demote relay failed error={e}")
@@ -265,26 +271,29 @@ pub fn run(
 
             let relay_policy = metrics::time(Phase::RelayPolicy);
 
-            for c in room.clients.iter_mut().filter(|c| {
-                matches!(c.role, ClientRole::Viewer)
-                    && !c.perf.is_empty()
-                    && c.relay_status.is_none()
-            }) {
-                match c.available_upload {
+            for c in room
+                .viewers
+                .values_mut()
+                .filter(|c| !c.relay_state.perf.is_empty() && c.relay_state.relay_status.is_none())
+            {
+                match c.relay_state.available_upload {
                     Some(UploadProbeResult::Failed { at }) => {
-                        if at.elapsed() > tuning().relay.probe_interval() && c.is_perf_healthy() {
+                        if at.elapsed() > tuning().relay.probe_interval()
+                            && c.relay_state.is_perf_healthy()
+                        {
                             c.probe_available_upload()
                         }
                     }
                     None => {
-                        if c.is_perf_healthy() {
+                        if c.relay_state.is_perf_healthy() {
                             c.probe_available_upload();
                         }
                     }
                     Some(UploadProbeResult::Probing { probed_at })
                         if probed_at.elapsed() > tuning().relay.probe_timeout() =>
                     {
-                        c.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
+                        c.relay_state.available_upload =
+                            Some(UploadProbeResult::Failed { at: Instant::now() });
                     }
 
                     _ => (),
@@ -292,20 +301,13 @@ pub fn run(
             }
 
             let relay_ids: Vec<ClientId> = room
-                .clients
-                .iter()
+                .viewers
+                .values()
                 .filter_map(|c| {
-                    let Some(UploadProbeResult::Probed {
-                        available_upload_kbps,
-                    }) = c.available_upload
-                    else {
-                        return None;
-                    };
-
-                    if available_upload_kbps > tuning().relay.available_upload_cutoff_kbps
-                        && c.relay_status.is_none()
-                        && c.connected_at.elapsed() >= tuning().relay.min_connection_age()
-                        && c.is_perf_healthy()
+                    if c.relay_state.relay_potential() == RelayPotential::Qualified
+                        && c.relay_state.relay_status.is_none()
+                        && c.peer.connected_at.elapsed() >= tuning().relay.min_connection_age()
+                        && c.relay_state.is_perf_healthy()
                     {
                         return Some(c.id);
                     };
@@ -318,29 +320,29 @@ pub fn run(
                 room.promote(relay_id);
             }
 
-            for relay_id in connected_relays {
-                if let Some(relay) = room.clients.iter_mut().find(|c| c.id == relay_id)
+            for relay_id in viewer_effects.connected_relays {
+                if let Some(relay) = room.viewers.get_mut(&relay_id)
                     && let Some(RelayStatus::Relay {
                         p2p_connected_at, ..
-                    }) = &mut relay.relay_status
+                    }) = &mut relay.relay_state.relay_status
                 {
                     *p2p_connected_at = Some(Instant::now());
                 };
             }
 
             let mut leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
-                .clients
-                .iter()
+                .viewers
+                .values()
                 .filter_map(|c| {
                     let Some(RelayStatus::Relay {
                         leaf,
                         p2p_connected_at,
-                    }) = c.relay_status
+                    }) = c.relay_state.relay_status
                     else {
                         return None;
                     };
 
-                    let relay_outgoing_kbps = c.relay_outgoing_kbps? as u64;
+                    let relay_outgoing_kbps = c.relay_state.relay_outgoing_kbps? as u64;
 
                     let relay_outgoing_cutoff_kbps = c
                         .tracks_out
@@ -365,7 +367,9 @@ pub fn run(
                         return None;
                     };
 
-                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
+                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps
+                        || !c.relay_state.is_perf_healthy()
+                    {
                         return Some((c.id, leaf));
                     };
 
@@ -373,11 +377,11 @@ pub fn run(
                 })
                 .collect();
 
-            for client in room.clients.iter() {
+            for client in room.viewers.values() {
                 if let Some(RelayStatus::Leaf {
                     relay,
                     link_state: LinkState::Connecting { at },
-                }) = client.relay_status
+                }) = client.relay_state.relay_status
                     && at.elapsed() >= P2P_CONNECT_TIMEOUT
                 {
                     leaf_relay_ids_to_demote.push((relay, client.id));
@@ -392,6 +396,7 @@ pub fn run(
 
             if needs_init {
                 room.init();
+                rooms.socket_routes.clean_routes_by_room_id(room_id);
             }
         }
 
@@ -439,8 +444,11 @@ pub fn run(
 
         let now = Instant::now();
         for room in rooms.values_mut() {
-            for client in room.clients.iter_mut() {
-                client.handle_input(Input::Timeout(now));
+            if let Some(streamer) = &mut room.streamer {
+                streamer.peer.handle_input(Input::Timeout(now));
+            }
+            for viewer in room.viewers.values_mut() {
+                viewer.peer.handle_input(Input::Timeout(now));
             }
         }
     }
@@ -458,14 +466,11 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
     };
 
     for room in rooms.values() {
-        gauges.clients += room.clients.len() as u64;
+        gauges.clients += (room.viewers.len() + usize::from(room.streamer.is_some())) as u64;
+        gauges.viewers += room.viewers.len() as u64;
 
-        for client in &room.clients {
-            if client.role == ClientRole::Viewer {
-                gauges.viewers += 1;
-            }
-
-            match client.relay_status {
+        for client in room.viewers.values() {
+            match client.relay_state.relay_status {
                 Some(RelayStatus::Relay { .. }) => gauges.relays += 1,
                 Some(RelayStatus::Leaf {
                     link_state: LinkState::Connected,
@@ -480,13 +485,62 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
 }
 
 fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
-    let client = rooms
-        .iter_mut()
-        .flat_map(|(_, room)| room.clients.iter_mut())
-        .find(|c| c.rtc.accepts(&input));
+    let Input::Receive(_, r) = &input else {
+        return;
+    };
 
-    if let Some(client) = client {
-        client.handle_input(input);
+    if let Some((client_type, room_id, client_id)) = rooms.socket_routes.0.get(&r.source)
+        && let Some(room) = rooms.rooms.get_mut(room_id)
+    {
+        match client_type {
+            ClientType::Viewer
+                if let Some(viewer) = room.viewers.get_mut(client_id)
+                    && viewer.peer.rtc.accepts(&input) =>
+            {
+                viewer.peer.handle_input(input);
+
+                return;
+            }
+            ClientType::Streamer
+                if let Some(streamer) = &mut room.streamer
+                    && streamer.peer.rtc.accepts(&input) =>
+            {
+                streamer.peer.handle_input(input);
+
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let streamer = rooms
+        .rooms
+        .iter_mut()
+        .filter_map(|(room_id, room)| room.streamer.as_mut().map(|s| (room_id, s)))
+        .find(|(_, streamer)| streamer.peer.rtc.accepts(&input));
+
+    if let Some((room_id, streamer)) = streamer {
+        rooms.socket_routes.0.insert(
+            r.source,
+            (ClientType::Streamer, room_id.clone(), streamer.id),
+        );
+        streamer.peer.handle_input(input);
+
+        return;
+    };
+
+    let viewer = rooms
+        .rooms
+        .iter_mut()
+        .flat_map(|(room_id, room)| room.viewers.values_mut().map(move |v| (room_id, v)))
+        .find(|(_, viewer)| viewer.peer.rtc.accepts(&input));
+
+    if let Some((room_id, viewer)) = viewer {
+        rooms
+            .socket_routes
+            .0
+            .insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
+        viewer.peer.handle_input(input);
     } else {
         debug!("No client accepts UDP input");
     };
