@@ -243,6 +243,10 @@ pub enum SfuMessage {
         room_id: RoomId,
         reply: SyncSender<Option<StreamKey>>,
     },
+    Datagram {
+        data: Vec<u8>,
+        source: SocketAddr,
+    },
 }
 
 #[derive(Deserialize)]

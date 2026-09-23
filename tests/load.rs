@@ -440,9 +440,11 @@ impl Sample {
             ticks_to_cores(self.generator_ticks - before.generator_ticks, seconds);
         let server_cores = ticks_to_cores(self.server_ticks - before.server_ticks, seconds);
 
-        // How close the drain runs to its own cap, which decides whether the
-        // socket is read faster than it fills.
-        let reads_per_lap = delta("socket_reads") / delta("laps").max(1.0);
+        // A datagram is lost either in the kernel, before the mux reads it, or
+        // in the mux, when the media loop's channel is full. Both count as
+        // dropped, so `in/s` stays arrived and `rx/s` stays what the loop got.
+        let queued = delta("socket_reads") - delta("channel_drops");
+        let reads_per_lap = queued / delta("laps").max(1.0);
 
         let late = Windowed::between(&before.metrics, &self.metrics, "lap_lateness");
         let room = Windowed::between(&before.metrics, &self.metrics, "room_iteration");
@@ -456,8 +458,8 @@ impl Sample {
         let saved = delta("relay_saved_bytes");
         let saving = 100.0 * saved / (written + saved).max(1.0);
 
-        let dropped = (self.drops - before.drops) as f64 / seconds;
-        let received = per_second("socket_reads");
+        let dropped = ((self.drops - before.drops) as f64 + delta("channel_drops")) / seconds;
+        let received = queued / seconds;
 
         println!(
             "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>6.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {saving:>6.1}",

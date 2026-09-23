@@ -32,8 +32,6 @@ pub enum SocketError {
     Net(#[from] str0m::error::NetError),
 }
 
-pub type SocketResult<T> = Result<T, SocketError>;
-
 #[derive(Debug, Error)]
 pub enum SfuError {
     #[error("client: {0}")]
@@ -41,6 +39,9 @@ pub enum SfuError {
 
     #[error("socket: {0}")]
     Socket(#[from] SocketError),
+
+    #[error("channel disconnected")]
+    ChannelDisconnected,
 }
 
 pub type SfuResult<T> = Result<T, SfuError>;

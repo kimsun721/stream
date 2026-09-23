@@ -1,17 +1,20 @@
 use std::{
     net::{SocketAddr, UdpSocket},
     rc::Rc,
-    sync::mpsc::Receiver,
+    sync::mpsc::{Receiver, RecvTimeoutError},
     time::{Duration, Instant},
 };
 
-use str0m::Input;
+use str0m::{
+    Input,
+    net::{Protocol, Receive},
+};
 use tracing::{debug, error};
 
 use crate::{
     config::tuning,
     metrics::{self, Gauges, Phase},
-    sfu::{error::SfuResult, socket::read_socket_input},
+    sfu::error::{SfuError::ChannelDisconnected, SfuResult},
     types::{
         ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms,
         SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
@@ -19,7 +22,7 @@ use crate::{
     },
 };
 
-const MAX_SOCKET_READ_COUNT: u64 = 100;
+const MAX_CHANNEL_RECV_COUNT: u64 = 500;
 const P2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `advertised_addr` is the address handed to clients in ICE candidates, which
@@ -31,7 +34,6 @@ pub fn run(
     socket: UdpSocket,
     advertised_addr: SocketAddr,
 ) -> SfuResult<()> {
-    let mut buf: Vec<u8> = vec![0; 2000];
     let mut rooms = Rooms::new();
     let mut woken_for: Option<Instant> = None;
 
@@ -44,49 +46,21 @@ pub fn run(
         }
 
         let mut handled = 0;
-        let control_drain = metrics::time(Phase::ControlDrain);
+        let channel_drain = metrics::time(Phase::ChannelDrain);
 
         while let Ok(message) = rx.try_recv() {
+            handle_sfu_message(&mut rooms, message, advertised_addr);
+
             handled += 1;
 
-            match message {
-                SfuMessage::RegisterViewer {
-                    rtc,
-                    room_id,
-                    session_id,
-                    reply,
-                } => rooms.register_viewer(*rtc, room_id, session_id, reply),
-                SfuMessage::RegisterStreamer {
-                    rtc,
-                    room_id,
-                    session_id,
-                    reply,
-                } => rooms.register_streamer(*rtc, room_id, session_id, reply),
-                SfuMessage::CreateRoom { reply } => rooms.create(reply),
-                SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
-                SfuMessage::UpdateRoomState {
-                    room_id,
-                    state,
-                    reply,
-                } => rooms.update_state(room_id, state, reply),
-                SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
-                SfuMessage::ResolveStreamKey {
-                    hashed_stream_key,
-                    reply,
-                } => rooms.resolve_stream_key(hashed_stream_key, reply),
-                SfuMessage::TerminateSession {
-                    room_id,
-                    session_id,
-                    reply,
-                } => rooms.terminate_session(room_id, session_id, reply),
-                SfuMessage::ReissueStreamKey { room_id, reply } => {
-                    rooms.reissue_stream_key(room_id, reply)
-                }
-            };
+            if handled >= MAX_CHANNEL_RECV_COUNT {
+                metrics::channel_drain_full();
+                break;
+            }
         }
 
-        drop(control_drain);
-        metrics::control_messages(handled);
+        drop(channel_drain);
+        metrics::channel_messages(handled);
 
         let mut timeout = Instant::now() + Duration::from_millis(100);
 
@@ -405,41 +379,16 @@ pub fn run(
         woken_for = Some(timeout);
 
         let timeout_duration = (timeout - Instant::now()).max(Duration::from_millis(1));
-        let mut socket_read_count = 0;
 
-        socket
-            .set_read_timeout(Some(timeout_duration))
-            .expect("setting socket read timeout");
-
-        if let Err(e) = socket.set_nonblocking(false) {
-            error!("socket set_nonblocking error={e}");
-        } else {
-            if let Ok(Some(input)) = read_socket_input(&socket, &mut buf, advertised_addr) {
-                route_socket_input(&mut rooms, input);
-                socket_read_count += 1;
+        match rx.recv_timeout(timeout_duration) {
+            Ok(msg) => {
+                handle_sfu_message(&mut rooms, msg, advertised_addr);
+                metrics::channel_messages(1);
             }
-        }
-
-        if let Err(e) = socket.set_nonblocking(true) {
-            error!("socket set_nonblocking error={e}");
-        } else {
-            loop {
-                if socket_read_count > MAX_SOCKET_READ_COUNT {
-                    break;
-                }
-
-                match read_socket_input(&socket, &mut buf, advertised_addr) {
-                    Ok(Some(input)) => {
-                        route_socket_input(&mut rooms, input);
-                        socket_read_count += 1;
-                    }
-                    _ => break,
-                }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(ChannelDisconnected);
             }
-        };
-
-        if socket_read_count > MAX_SOCKET_READ_COUNT {
-            metrics::socket_drain_full();
+            _ => {}
         }
 
         let now = Instant::now();
@@ -450,6 +399,58 @@ pub fn run(
             for viewer in room.viewers.values_mut() {
                 viewer.peer.handle_input(Input::Timeout(now));
             }
+        }
+    }
+}
+
+fn handle_sfu_message(rooms: &mut Rooms, message: SfuMessage, destination: SocketAddr) {
+    match message {
+        SfuMessage::RegisterViewer {
+            rtc,
+            room_id,
+            session_id,
+            reply,
+        } => rooms.register_viewer(*rtc, room_id, session_id, reply),
+        SfuMessage::RegisterStreamer {
+            rtc,
+            room_id,
+            session_id,
+            reply,
+        } => rooms.register_streamer(*rtc, room_id, session_id, reply),
+        SfuMessage::CreateRoom { reply } => rooms.create(reply),
+        SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
+        SfuMessage::UpdateRoomState {
+            room_id,
+            state,
+            reply,
+        } => rooms.update_state(room_id, state, reply),
+        SfuMessage::DeleteRoom { room_id, reply } => rooms.delete(room_id, reply),
+        SfuMessage::ResolveStreamKey {
+            hashed_stream_key,
+            reply,
+        } => rooms.resolve_stream_key(hashed_stream_key, reply),
+        SfuMessage::TerminateSession {
+            room_id,
+            session_id,
+            reply,
+        } => rooms.terminate_session(room_id, session_id, reply),
+        SfuMessage::ReissueStreamKey { room_id, reply } => rooms.reissue_stream_key(room_id, reply),
+        SfuMessage::Datagram { data, source } => {
+            let Ok(contents) = data.as_slice().try_into() else {
+                return;
+            };
+
+            let input = Input::Receive(
+                Instant::now(),
+                Receive {
+                    proto: Protocol::Udp,
+                    source,
+                    destination,
+                    contents,
+                },
+            );
+
+            route_socket_input(rooms, input);
         }
     }
 }
