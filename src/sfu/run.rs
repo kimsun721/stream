@@ -9,7 +9,7 @@ use str0m::{
     Input,
     net::{Protocol, Receive},
 };
-use tracing::{debug, error};
+use tracing::error;
 
 use crate::{
     config::tuning,
@@ -30,6 +30,7 @@ const P2P_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// container can receive, but str0m matches an incoming datagram to a local
 /// candidate by its destination, and `0.0.0.0` matches none of them.
 pub fn run(
+    shard: usize,
     rx: Receiver<SfuMessage>,
     socket: UdpSocket,
     advertised_addr: SocketAddr,
@@ -374,7 +375,7 @@ pub fn run(
             }
         }
 
-        metrics::gauges(0, count_gauges(&rooms));
+        metrics::gauges(shard, count_gauges(&rooms));
 
         woken_for = Some(timeout);
 
@@ -417,7 +418,7 @@ fn handle_sfu_message(rooms: &mut Rooms, message: SfuMessage, destination: Socke
             session_id,
             reply,
         } => rooms.register_streamer(*rtc, room_id, session_id, reply),
-        SfuMessage::CreateRoom { reply } => rooms.create(reply),
+        SfuMessage::CreateRoom { room_id, reply } => rooms.create(room_id, reply),
         SfuMessage::GetRoom { room_id, reply } => rooms.get_room(room_id, reply),
         SfuMessage::UpdateRoomState {
             room_id,
@@ -542,7 +543,5 @@ fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
             .0
             .insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
         viewer.peer.handle_input(input);
-    } else {
-        debug!("No client accepts UDP input");
-    };
+    }
 }

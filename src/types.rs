@@ -215,6 +215,7 @@ pub enum SfuMessage {
         reply: SyncSender<Option<StatusCode>>,
     },
     CreateRoom {
+        room_id: RoomId,
         reply: SyncSender<(RoomId, StreamKey)>,
     },
     DeleteRoom {
@@ -337,8 +338,8 @@ impl fmt::Debug for StreamKey {
 }
 
 impl RoomId {
-    pub fn new() -> RoomId {
-        RoomId(format!("RM_{}", random_string(ROOM_ID_LEN)))
+    pub fn new(shard_id: usize) -> RoomId {
+        RoomId(format!("RM_{}_{}", shard_id, random_string(ROOM_ID_LEN)))
     }
 }
 

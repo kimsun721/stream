@@ -7,11 +7,16 @@
 //! are read for reporting alone.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
+
+use crate::config::tuning;
 
 /// One bucket per power of two microseconds, so bucket `i` holds durations
 /// under `2^i`. 24 of them reach 8 seconds, well past anything the loop should
@@ -243,11 +248,6 @@ pub fn demoted() {
     DEMOTIONS.fetch_add(1, Relaxed);
 }
 
-/// Enough slots that no media loop has to share one. Gauges are overwritten
-/// rather than added to, so two loops writing the same slot would hide each
-/// other rather than sum.
-const MAX_SHARDS: usize = 64;
-
 struct ShardGauges {
     rooms: AtomicU64,
     clients: AtomicU64,
@@ -268,7 +268,18 @@ impl ShardGauges {
     }
 }
 
-static SHARDS: [ShardGauges; MAX_SHARDS] = [const { ShardGauges::new() }; MAX_SHARDS];
+/// One slot per media loop, sized from the configured loop count. Gauges are
+/// overwritten rather than added to, so two loops sharing a slot would hide
+/// each other rather than sum.
+static SHARDS: OnceLock<Box<[ShardGauges]>> = OnceLock::new();
+
+fn shards() -> &'static [ShardGauges] {
+    SHARDS.get_or_init(|| {
+        (0..tuning().server.total_shards.get())
+            .map(|_| ShardGauges::new())
+            .collect()
+    })
+}
 
 /// What one media loop currently holds, as opposed to what it has done. Written
 /// once a lap because no other thread can walk its `Rooms`.
@@ -280,10 +291,8 @@ pub struct Gauges {
     pub connected_leaves: u64,
 }
 
-/// Panics above `MAX_SHARDS`, which is louder than two loops quietly reporting
-/// over each other.
 pub fn gauges(shard: usize, gauges: Gauges) {
-    let slot = &SHARDS[shard];
+    let slot = &shards()[shard];
 
     slot.rooms.store(gauges.rooms, Relaxed);
     slot.clients.store(gauges.clients, Relaxed);
@@ -294,7 +303,7 @@ pub fn gauges(shard: usize, gauges: Gauges) {
 }
 
 fn total(field: fn(&ShardGauges) -> &AtomicU64) -> u64 {
-    SHARDS.iter().map(|slot| field(slot).load(Relaxed)).sum()
+    shards().iter().map(|slot| field(slot).load(Relaxed)).sum()
 }
 
 /// Every field is cumulative, the percentiles included. A caller that wants a

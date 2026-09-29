@@ -1,4 +1,4 @@
-use std::{fs, net::IpAddr, sync::OnceLock, time::Duration};
+use std::{fs, net::IpAddr, num::NonZeroUsize, sync::OnceLock, time::Duration};
 
 use axum_server::tls_rustls::RustlsConfig;
 use serde::Deserialize;
@@ -56,6 +56,7 @@ pub struct ServerConfig {
     pub https_sdp_server_port: u16,
     pub http_rest_server_port: u16,
     pub tls: Option<TlsConfig>,
+    pub total_shards: NonZeroUsize,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -189,12 +190,15 @@ impl Default for BitrateConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
+        let total_shards = std::thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+
         ServerConfig {
             public_ip: None,
             media_port: 40000,
             https_sdp_server_port: 8443,
             http_rest_server_port: 8080,
             tls: None,
+            total_shards,
         }
     }
 }

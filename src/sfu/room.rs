@@ -56,8 +56,7 @@ impl Rooms {
         }
     }
 
-    pub fn create(&mut self, reply: SyncSender<(RoomId, StreamKey)>) {
-        let room_id = RoomId::new();
+    pub fn create(&mut self, room_id: RoomId, reply: SyncSender<(RoomId, StreamKey)>) {
         let stream_key = StreamKey::new();
         let hashed_stream_key = stream_key.hashed();
 
@@ -321,7 +320,7 @@ mod tests {
 
     fn create_room(rooms: &mut Rooms) -> (RoomId, StreamKey) {
         let (tx, rx) = mpsc::sync_channel(1);
-        rooms.create(tx);
+        rooms.create(RoomId::new(0), tx);
         rx.recv().unwrap()
     }
 

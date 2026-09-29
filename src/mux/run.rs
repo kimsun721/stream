@@ -1,7 +1,7 @@
 use std::{
     io::ErrorKind,
     net::UdpSocket,
-    sync::mpsc::{SyncSender, TrySendError},
+    sync::{Arc, mpsc::TrySendError},
 };
 
 use tracing::error;
@@ -9,10 +9,11 @@ use tracing::error;
 use crate::{
     metrics,
     mux::error::{MuxError::ChannelDisconnected, MuxResult},
+    shards::types::Shards,
     types::SfuMessage,
 };
 
-pub fn run(tx: SyncSender<SfuMessage>, socket: UdpSocket) -> MuxResult<()> {
+pub fn run(shards: Arc<Shards>, socket: UdpSocket) -> MuxResult<()> {
     let mut buf: Vec<u8> = vec![0; 2000];
 
     socket.set_nonblocking(false)?;
@@ -22,12 +23,14 @@ pub fn run(tx: SyncSender<SfuMessage>, socket: UdpSocket) -> MuxResult<()> {
             Ok((n, source)) => {
                 metrics::socket_read(n);
 
-                let data = buf[..n].to_vec();
+                for tx in shards.senders() {
+                    let data = buf[..n].to_vec();
 
-                match tx.try_send(SfuMessage::Datagram { data, source }) {
-                    Ok(()) => {}
-                    Err(TrySendError::Full(_)) => metrics::channel_dropped(),
-                    Err(TrySendError::Disconnected(_)) => return Err(ChannelDisconnected),
+                    match tx.try_send(SfuMessage::Datagram { data, source }) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => metrics::channel_dropped(),
+                        Err(TrySendError::Disconnected(_)) => return Err(ChannelDisconnected),
+                    }
                 }
             }
 
