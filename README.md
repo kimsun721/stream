@@ -1,5 +1,7 @@
 # Stream
 
+English | [한국어](README.ko.md)
+
 A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP, from OBS or a browser. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
 
 ## Measured
@@ -142,3 +144,5 @@ The integration suites start the real server and drive it over HTTP and UDP with
 - [x] Rooms spread across media loops
 - [ ] Place clients rather than rooms, so one room can span loops
 - [ ] Persist rooms and stream keys across restarts
+- [ ] WHEP for viewers
+- [ ] TURN, for clients and relay pairs that cannot reach each other directly
