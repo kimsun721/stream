@@ -78,6 +78,7 @@ was measured with, so a plain run stays comparable to it.
 | `LOAD_LAYERS` | `l:300,m:800,h:2500` | The publisher's layers, in kbps |
 | `LOAD_SETTLE` | `5` | Seconds before a step starts measuring |
 | `LOAD_WINDOW` | `10` | Seconds a step measures over |
+| `LOAD_SHARDS` | `4` | Media loops the server runs. Every test binary reads it, but only a load run has reason to move it |
 
 An uneven room split is refused rather than rounded away, since rooms of
 different sizes cannot be compared with each other.
@@ -106,13 +107,13 @@ takes to time out, and measure them too.
 | `live` | Viewers the server actually holds. A gap against `step` means connects are failing |
 | `refus` | Connects refused at the HTTP layer |
 | `gen_cor` | Cores the load generator itself burned |
-| `srv_cor` | Cores the server burned, the mux included. The media loop alone cannot pass 1.0 |
-| `laps/s` | Media loop iterations per second |
-| `late_p99` | How far past the deadline str0m asked for the loop woke, in microseconds |
+| `srv_cor` | Cores the server burned, the mux included. One media loop cannot pass 1.0, so the ceiling is the loop count |
+| `laps/s` | Media loop iterations per second, summed over every loop. A loop without rooms still wakes about ten times a second |
+| `late_p99` | How far past the deadline str0m asked for a loop woke, in microseconds, over every loop |
 | `room_us` | Mean time for one room iteration |
 | `tick_us` | Of that, polling the room's clients |
 | `fan_us` | Of that, writing the publisher's frames to viewers |
-| `rd/lap` | Datagrams the media loop took per lap |
+| `rd/lap` | Datagrams the media loops took per lap |
 | `in/s` | Datagrams that arrived |
 | `rx/s` | Of those, the ones that reached the media loop |
 | `drop/s` | Of those, the ones lost on the way, in the kernel or in a full channel |
@@ -133,7 +134,7 @@ The figures worth deriving:
 
 | Question | Figure |
 | --- | --- |
-| What does the room pass cost | `room_us` times rooms times `laps/s`, against `srv_cor` |
+| What does the room pass cost | With one loop, `room_us` times rooms times `laps/s`, against `srv_cor`. With several, a room is walked only by its own loop, so this overstates it |
 | What does one viewer cost | `room_us / live` |
 | Is the media loop keeping up | `rx/s` against `in/s` |
 | How much traffic do relays remove | `save%`, but only on rows where `drop/s` is zero |

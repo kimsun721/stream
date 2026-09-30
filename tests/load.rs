@@ -24,6 +24,7 @@
 //! LOAD_LAYERS=l:300,m:800,h:2500
 //! LOAD_SETTLE=5
 //! LOAD_WINDOW=10
+//! LOAD_SHARDS=4               media loops the server runs
 //! ```
 
 mod common;
@@ -73,6 +74,7 @@ struct Run {
     layers: Vec<(String, u32)>,
     settle: Duration,
     window: Duration,
+    shards: usize,
 }
 
 impl Run {
@@ -87,6 +89,7 @@ impl Run {
             layers: layers("LOAD_LAYERS", "l:300,m:800,h:2500"),
             settle: Duration::from_secs(numbers("LOAD_SETTLE", "5")[0] as u64),
             window: Duration::from_secs(numbers("LOAD_WINDOW", "10")[0] as u64),
+            shards: common::shards(),
         };
 
         // Rooms of different sizes would not be comparable with each other, so
@@ -127,10 +130,11 @@ impl Run {
             .collect();
 
         format!(
-            "layers={} settle={}s window={}s",
+            "layers={} settle={}s window={}s shards={}",
             layers.join(","),
             self.settle.as_secs(),
-            self.window.as_secs()
+            self.window.as_secs(),
+            self.shards
         )
     }
 }
