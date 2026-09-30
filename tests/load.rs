@@ -46,6 +46,7 @@ const PLENTY_OF_UPLOAD: u32 = 20_000;
 #[ignore = "load run"]
 async fn baseline() {
     let run = Run::from_env();
+    raise_open_file_limit();
     let server = Server::default();
     let client = reqwest::Client::new();
 
@@ -59,6 +60,25 @@ async fn baseline() {
 
     if run.wants("rooms") {
         viewers_across_rooms(&run, &server, &client).await;
+    }
+}
+
+/// Every viewer holds a socket, and a desktop session usually starts a process
+/// at 1024 descriptors, which a large step passes. The hard limit is as far as
+/// a process may raise itself without privileges, and the server spawned after
+/// this inherits it.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            limit.rlim_cur = limit.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
     }
 }
 
