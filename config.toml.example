@@ -15,9 +15,14 @@ media_port = 40000
 https_sdp_server_port = 8443
 # Room CRUD, called only by a trusted backend. Never expose it publicly.
 http_rest_server_port = 8080
+# Media loops, each owning its share of the rooms on a thread of its own.
+# Absent uses the core count.
+# total_shards = 4
 
-# Absent serves plain HTTP on both ports, which is correct when a reverse
-# proxy terminates TLS. Present requires both paths.
+# Absent serves plain HTTP, which is correct when a reverse proxy terminates
+# TLS. Present serves TLS on the SDP and WHIP port and requires both paths. The
+# control port stays plain HTTP either way, since only a backend on a private
+# network should reach it.
 # [server.tls]
 # cert_path = "certs/cer.pem"
 # key_path = "certs/key.pem"
@@ -46,8 +51,13 @@ probe_interval_secs = 120
 min_connection_age_secs = 300
 # Probed upload a candidate must clear to be promoted.
 available_upload_cutoff_kbps = 13000
-# Measured outbound rate a relay must sustain, or it is demoted.
-outgoing_cutoff_kbps = 7000
+# A relay must keep forwarding at the bitrate of the layers its leaf takes, or
+# it is demoted. This floors that figure while layer estimates are still low.
+min_outgoing_kbps = 300
+# How far below that figure a relay may run before it is demoted.
+traffic_headroom_percent = 30
+# Time a relay gets after its peer link comes up before its rate is judged.
+min_p2p_connection_age_secs = 4
 
 # Bandwidth estimation and simulcast layer selection for viewers.
 [bitrate]
