@@ -24,6 +24,7 @@
 //! LOAD_LAYERS=l:300,m:800,h:2500
 //! LOAD_SETTLE=5
 //! LOAD_WINDOW=10
+//! LOAD_SHARDS=4               media loops the server runs
 //! ```
 
 mod common;
@@ -45,6 +46,7 @@ const PLENTY_OF_UPLOAD: u32 = 20_000;
 #[ignore = "load run"]
 async fn baseline() {
     let run = Run::from_env();
+    raise_open_file_limit();
     let server = Server::default();
     let client = reqwest::Client::new();
 
@@ -61,6 +63,25 @@ async fn baseline() {
     }
 }
 
+/// Every viewer holds a socket, and a desktop session usually starts a process
+/// at 1024 descriptors, which a large step passes. The hard limit is as far as
+/// a process may raise itself without privileges, and the server spawned after
+/// this inherits it.
+fn raise_open_file_limit() {
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) == 0 && limit.rlim_cur < limit.rlim_max
+        {
+            limit.rlim_cur = limit.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &limit);
+        }
+    }
+}
+
 /// What the run was told to do. Printed above every table, so a pasted result
 /// says what produced it.
 struct Run {
@@ -73,6 +94,7 @@ struct Run {
     layers: Vec<(String, u32)>,
     settle: Duration,
     window: Duration,
+    shards: usize,
 }
 
 impl Run {
@@ -87,6 +109,7 @@ impl Run {
             layers: layers("LOAD_LAYERS", "l:300,m:800,h:2500"),
             settle: Duration::from_secs(numbers("LOAD_SETTLE", "5")[0] as u64),
             window: Duration::from_secs(numbers("LOAD_WINDOW", "10")[0] as u64),
+            shards: common::shards(),
         };
 
         // Rooms of different sizes would not be comparable with each other, so
@@ -127,10 +150,11 @@ impl Run {
             .collect();
 
         format!(
-            "layers={} settle={}s window={}s",
+            "layers={} settle={}s window={}s shards={}",
             layers.join(","),
             self.settle.as_secs(),
-            self.window.as_secs()
+            self.window.as_secs(),
+            self.shards
         )
     }
 }
@@ -440,9 +464,11 @@ impl Sample {
             ticks_to_cores(self.generator_ticks - before.generator_ticks, seconds);
         let server_cores = ticks_to_cores(self.server_ticks - before.server_ticks, seconds);
 
-        // How close the drain runs to its own cap, which decides whether the
-        // socket is read faster than it fills.
-        let reads_per_lap = delta("socket_reads") / delta("laps").max(1.0);
+        // A datagram is lost either in the kernel, before the mux reads it, or
+        // in the mux, when the media loop's channel is full. Both count as
+        // dropped, so `in/s` stays arrived and `rx/s` stays what the loop got.
+        let queued = delta("socket_reads") - delta("channel_drops");
+        let reads_per_lap = queued / delta("laps").max(1.0);
 
         let late = Windowed::between(&before.metrics, &self.metrics, "lap_lateness");
         let room = Windowed::between(&before.metrics, &self.metrics, "room_iteration");
@@ -456,8 +482,8 @@ impl Sample {
         let saved = delta("relay_saved_bytes");
         let saving = 100.0 * saved / (written + saved).max(1.0);
 
-        let dropped = (self.drops - before.drops) as f64 / seconds;
-        let received = per_second("socket_reads");
+        let dropped = ((self.drops - before.drops) as f64 + delta("channel_drops")) / seconds;
+        let received = queued / seconds;
 
         println!(
             "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>6.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {saving:>6.1}",

@@ -3,15 +3,20 @@
 //! measurement points move only by an explicit edit to a call site, which the
 //! history then records.
 //!
-//! The media loop is the only writer, so every ordering is `Relaxed`. Nothing
-//! here synchronizes anything; the values are read for reporting alone.
+//! Every ordering is `Relaxed`. Nothing here synchronizes anything; the values
+//! are read for reporting alone.
 
 use std::{
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
+
+use crate::config::tuning;
 
 /// One bucket per power of two microseconds, so bucket `i` holds durations
 /// under `2^i`. 24 of them reach 8 seconds, well past anything the loop should
@@ -87,9 +92,8 @@ fn percentile(counts: &[u64], total: u64, percent: u64) -> u64 {
 
 #[derive(Clone, Copy)]
 pub enum Phase {
-    /// Draining the control channel, which blocks the media loop for as long as
-    /// the web threads keep it fed.
-    ControlDrain,
+    /// Draining the channel, control messages and datagrams alike.
+    ChannelDrain,
     /// A whole lap, socket wait included. Falls as load rises, because the wait
     /// is what disappears first.
     Lap,
@@ -145,10 +149,11 @@ macro_rules! atomics {
 
 atomics!(
     LAPS,
-    CONTROL_MESSAGES,
+    CHANNEL_MESSAGES,
+    CHANNEL_DRAIN_FULL,
+    CHANNEL_DROPS,
     SOCKET_READS,
     SOCKET_READ_BYTES,
-    SOCKET_DRAIN_FULL,
     ROOMS_VISITED,
     ROOMS_SKIPPED,
     SENT_PACKETS,
@@ -168,20 +173,25 @@ pub fn lap() {
     LAPS.fetch_add(1, Relaxed);
 }
 
-pub fn control_messages(count: u64) {
-    CONTROL_MESSAGES.fetch_add(count, Relaxed);
+pub fn channel_messages(count: u64) {
+    CHANNEL_MESSAGES.fetch_add(count, Relaxed);
+}
+
+/// The drain stopped at its own cap rather than at an empty channel.
+pub fn channel_drain_full() {
+    CHANNEL_DRAIN_FULL.fetch_add(1, Relaxed);
+}
+
+/// A datagram the mux read but could not queue, because the media loop had
+/// fallen behind. The kernel's own drops happen before the mux and are not
+/// counted here.
+pub fn channel_dropped() {
+    CHANNEL_DROPS.fetch_add(1, Relaxed);
 }
 
 pub fn socket_read(bytes: usize) {
     SOCKET_READS.fetch_add(1, Relaxed);
     SOCKET_READ_BYTES.fetch_add(bytes as u64, Relaxed);
-}
-
-/// The drain stopped at its own cap rather than at an empty socket. Whether
-/// datagrams were still queued is not observable from here, so this only says
-/// the loop could not finish what it started.
-pub fn socket_drain_full() {
-    SOCKET_DRAIN_FULL.fetch_add(1, Relaxed);
 }
 
 pub fn room_visited() {
@@ -238,10 +248,41 @@ pub fn demoted() {
     DEMOTIONS.fetch_add(1, Relaxed);
 }
 
-atomics!(ROOMS, CLIENTS, VIEWERS, RELAYS, CONNECTED_LEAVES);
+struct ShardGauges {
+    rooms: AtomicU64,
+    clients: AtomicU64,
+    viewers: AtomicU64,
+    relays: AtomicU64,
+    connected_leaves: AtomicU64,
+}
 
-/// What the loop currently holds, as opposed to what it has done. Written once
-/// a lap because no other thread can walk `Rooms`.
+impl ShardGauges {
+    const fn new() -> Self {
+        ShardGauges {
+            rooms: AtomicU64::new(0),
+            clients: AtomicU64::new(0),
+            viewers: AtomicU64::new(0),
+            relays: AtomicU64::new(0),
+            connected_leaves: AtomicU64::new(0),
+        }
+    }
+}
+
+/// One slot per media loop, sized from the configured loop count. Gauges are
+/// overwritten rather than added to, so two loops sharing a slot would hide
+/// each other rather than sum.
+static SHARDS: OnceLock<Box<[ShardGauges]>> = OnceLock::new();
+
+fn shards() -> &'static [ShardGauges] {
+    SHARDS.get_or_init(|| {
+        (0..tuning().server.total_shards.get())
+            .map(|_| ShardGauges::new())
+            .collect()
+    })
+}
+
+/// What one media loop currently holds, as opposed to what it has done. Written
+/// once a lap because no other thread can walk its `Rooms`.
 pub struct Gauges {
     pub rooms: u64,
     pub clients: u64,
@@ -250,12 +291,19 @@ pub struct Gauges {
     pub connected_leaves: u64,
 }
 
-pub fn gauges(gauges: Gauges) {
-    ROOMS.store(gauges.rooms, Relaxed);
-    CLIENTS.store(gauges.clients, Relaxed);
-    VIEWERS.store(gauges.viewers, Relaxed);
-    RELAYS.store(gauges.relays, Relaxed);
-    CONNECTED_LEAVES.store(gauges.connected_leaves, Relaxed);
+pub fn gauges(shard: usize, gauges: Gauges) {
+    let slot = &shards()[shard];
+
+    slot.rooms.store(gauges.rooms, Relaxed);
+    slot.clients.store(gauges.clients, Relaxed);
+    slot.viewers.store(gauges.viewers, Relaxed);
+    slot.relays.store(gauges.relays, Relaxed);
+    slot.connected_leaves
+        .store(gauges.connected_leaves, Relaxed);
+}
+
+fn total(field: fn(&ShardGauges) -> &AtomicU64) -> u64 {
+    shards().iter().map(|slot| field(slot).load(Relaxed)).sum()
 }
 
 /// Every field is cumulative, the percentiles included. A caller that wants a
@@ -280,10 +328,11 @@ pub struct Durations {
 #[derive(Serialize)]
 pub struct Snapshot {
     pub laps: u64,
-    pub control_messages: u64,
+    pub channel_messages: u64,
+    pub channel_drain_full: u64,
+    pub channel_drops: u64,
     pub socket_reads: u64,
     pub socket_read_bytes: u64,
-    pub socket_drain_full: u64,
 
     pub rooms_visited: u64,
     pub rooms_skipped: u64,
@@ -309,7 +358,7 @@ pub struct Snapshot {
 
     pub lap: Durations,
     pub lap_lateness: Durations,
-    pub control_drain: Durations,
+    pub channel_drain: Durations,
     pub room_iteration: Durations,
     pub client_tick: Durations,
     pub media_fanout: Durations,
@@ -319,10 +368,11 @@ pub struct Snapshot {
 pub fn snapshot() -> Snapshot {
     Snapshot {
         laps: LAPS.load(Relaxed),
-        control_messages: CONTROL_MESSAGES.load(Relaxed),
+        channel_messages: CHANNEL_MESSAGES.load(Relaxed),
+        channel_drain_full: CHANNEL_DRAIN_FULL.load(Relaxed),
+        channel_drops: CHANNEL_DROPS.load(Relaxed),
         socket_reads: SOCKET_READS.load(Relaxed),
         socket_read_bytes: SOCKET_READ_BYTES.load(Relaxed),
-        socket_drain_full: SOCKET_DRAIN_FULL.load(Relaxed),
 
         rooms_visited: ROOMS_VISITED.load(Relaxed),
         rooms_skipped: ROOMS_SKIPPED.load(Relaxed),
@@ -340,15 +390,15 @@ pub fn snapshot() -> Snapshot {
         promotions: PROMOTIONS.load(Relaxed),
         demotions: DEMOTIONS.load(Relaxed),
 
-        rooms: ROOMS.load(Relaxed),
-        clients: CLIENTS.load(Relaxed),
-        viewers: VIEWERS.load(Relaxed),
-        relays: RELAYS.load(Relaxed),
-        connected_leaves: CONNECTED_LEAVES.load(Relaxed),
+        rooms: total(|slot| &slot.rooms),
+        clients: total(|slot| &slot.clients),
+        viewers: total(|slot| &slot.viewers),
+        relays: total(|slot| &slot.relays),
+        connected_leaves: total(|slot| &slot.connected_leaves),
 
         lap: PHASES[Phase::Lap as usize].snapshot(),
         lap_lateness: LAP_LATENESS.snapshot(),
-        control_drain: PHASES[Phase::ControlDrain as usize].snapshot(),
+        channel_drain: PHASES[Phase::ChannelDrain as usize].snapshot(),
         room_iteration: PHASES[Phase::RoomIteration as usize].snapshot(),
         client_tick: PHASES[Phase::ClientTick as usize].snapshot(),
         media_fanout: PHASES[Phase::MediaFanout as usize].snapshot(),

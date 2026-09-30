@@ -57,6 +57,14 @@ impl Default for Server {
     }
 }
 
+/// Pinned above one so every suite runs across loops, and pinned at all so a
+/// runner's core count does not change what is tested. A load run may move it.
+pub fn shards() -> usize {
+    std::env::var("LOAD_SHARDS")
+        .map(|value| value.parse().expect("LOAD_SHARDS holds a number"))
+        .unwrap_or(4)
+}
+
 fn spawn_server() -> Server {
     let sdp_port = free_port();
     let control_port = free_port();
@@ -70,6 +78,7 @@ fn spawn_server() -> Server {
     // and none to zero: a test that disables a gate stops proving the gate
     // works. The value cutoffs stay at their defaults and the clients report
     // numbers on either side of them.
+    let shards = shards();
     let dir = std::env::temp_dir().join(format!("stream-it-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     std::fs::write(
@@ -80,6 +89,7 @@ fn spawn_server() -> Server {
              media_port = {media_port}\n\
              https_sdp_server_port = {sdp_port}\n\
              http_rest_server_port = {control_port}\n\
+             total_shards = {shards}\n\
              \n\
              [bitrate]\n\
              estimate_secs = 1\n\
