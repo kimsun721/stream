@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::SyncSender,
+        mpsc::{Sender, SyncSender},
     },
     time::Instant,
 };
@@ -22,10 +22,12 @@ use str0m::{
 };
 
 use derive_more::{Debug, Display, Eq};
+use tracing::error;
 use uuid::Uuid;
 
 use crate::{
     config::tuning,
+    shards::types::ShardRouteMsg,
     utils::string::{hash_string, random_string},
 };
 
@@ -322,7 +324,11 @@ pub enum ClientType {
 }
 
 #[derive(Debug)]
-pub struct SocketRoutes(pub HashMap<SocketAddr, (ClientType, RoomId, ClientId)>);
+pub struct SocketRoutes {
+    pub tx_to_mux: Sender<ShardRouteMsg>,
+    pub shard: usize,
+    pub routes: HashMap<SocketAddr, (ClientType, RoomId, ClientId)>,
+}
 
 impl ClientId {
     pub fn next() -> ClientId {
@@ -472,16 +478,65 @@ impl RelayState {
 }
 
 impl SocketRoutes {
-    pub fn new() -> SocketRoutes {
-        SocketRoutes(HashMap::new())
+    pub fn new(tx_to_mux: Sender<ShardRouteMsg>, shard: usize) -> SocketRoutes {
+        SocketRoutes {
+            tx_to_mux,
+            shard,
+            routes: HashMap::new(),
+        }
     }
 
     pub fn clean_routes_by_room_id(&mut self, target_id: &RoomId) {
-        self.0.retain(|_, (_, room_id, _)| room_id != target_id);
+        let disowned_list = self
+            .routes
+            .extract_if(|_, (_, room_id, _)| room_id == target_id)
+            .map(|r| r.0)
+            .collect();
+
+        self.send_disowned_list(disowned_list);
     }
 
     pub fn clean_routes_by_clients(&mut self, client_ids: &[ClientId]) {
-        self.0.retain(|_, (_, _, id)| !client_ids.contains(id));
+        let disowned_list = self
+            .routes
+            .extract_if(|_, (_, _, id)| client_ids.contains(id))
+            .map(|r| r.0)
+            .collect();
+
+        self.send_disowned_list(disowned_list);
+    }
+
+    pub fn add_route(
+        &mut self,
+        source: SocketAddr,
+        client_type: ClientType,
+        room_id: RoomId,
+        client_id: ClientId,
+    ) {
+        self.routes
+            .insert(source, (client_type, room_id, client_id));
+
+        self.send_owned(source);
+    }
+
+    fn send_owned(&self, source: SocketAddr) {
+        if let Err(e) = self.tx_to_mux.send(ShardRouteMsg::Owned {
+            source,
+            shard: self.shard,
+        }) {
+            error!("send shard_route to mux failed error={e}");
+        };
+    }
+
+    fn send_disowned_list(&self, disowned_list: Vec<SocketAddr>) {
+        for disowned in disowned_list {
+            if let Err(e) = self.tx_to_mux.send(ShardRouteMsg::Disowned {
+                source: disowned,
+                shard: self.shard,
+            }) {
+                error!("send Disowned to mux failed error={e}");
+            }
+        }
     }
 }
 

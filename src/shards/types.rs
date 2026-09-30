@@ -2,7 +2,7 @@ use std::{
     net::{SocketAddr, UdpSocket},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc::{SyncSender, sync_channel},
+        mpsc::{Sender, SyncSender, sync_channel},
     },
 };
 
@@ -24,6 +24,11 @@ pub struct Shards {
     pub advertised_addr: SocketAddr,
 }
 
+pub enum ShardRouteMsg {
+    Owned { source: SocketAddr, shard: usize },
+    Disowned { source: SocketAddr, shard: usize },
+}
+
 impl Shards {
     pub fn next_shard(&self) -> usize {
         self.next_shard.fetch_add(1, Ordering::Relaxed) % self.shards.len()
@@ -43,7 +48,11 @@ impl Shards {
         self.shards.iter().map(|s| &s.sender).collect()
     }
 
-    pub fn new(socket: UdpSocket, advertised_addr: SocketAddr) -> Self {
+    pub fn new(
+        socket: UdpSocket,
+        advertised_addr: SocketAddr,
+        shard_route_tx: Sender<ShardRouteMsg>,
+    ) -> Self {
         let mut shards = Shards {
             next_shard: AtomicUsize::new(0),
             shards: Vec::new(),
@@ -53,11 +62,12 @@ impl Shards {
         for i in 0..tuning().server.total_shards.get() {
             let (sfu_tx, sfu_rx) = sync_channel::<SfuMessage>(2048);
             let socket = socket.try_clone().expect("failed to clone socket");
+            let shard_route_tx = shard_route_tx.clone();
 
             shards.shards.insert(i, Shard { sender: sfu_tx });
 
             std::thread::spawn(move || {
-                if let Err(e) = sfu::run::run(i, sfu_rx, socket, advertised_addr) {
+                if let Err(e) = sfu::run::run(i, sfu_rx, socket, advertised_addr, shard_route_tx) {
                     error!("udp error : {e}");
                 };
             });

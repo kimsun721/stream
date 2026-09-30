@@ -1,7 +1,7 @@
 use std::{
     net::{SocketAddr, UdpSocket},
     rc::Rc,
-    sync::mpsc::{Receiver, RecvTimeoutError},
+    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
     time::{Duration, Instant},
 };
 
@@ -15,6 +15,7 @@ use crate::{
     config::tuning,
     metrics::{self, Gauges, Phase},
     sfu::error::{SfuError::ChannelDisconnected, SfuResult},
+    shards::types::ShardRouteMsg,
     types::{
         ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms,
         SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
@@ -34,8 +35,9 @@ pub fn run(
     rx: Receiver<SfuMessage>,
     socket: UdpSocket,
     advertised_addr: SocketAddr,
+    shard_route_tx: Sender<ShardRouteMsg>,
 ) -> SfuResult<()> {
-    let mut rooms = Rooms::new();
+    let mut rooms = Rooms::new(shard_route_tx, shard);
     let mut woken_for: Option<Instant> = None;
 
     loop {
@@ -177,6 +179,7 @@ pub fn run(
             }
 
             rooms.socket_routes.clean_routes_by_clients(&to_remove);
+
             for id in to_remove.iter() {
                 room.viewers.remove(id);
             }
@@ -491,7 +494,7 @@ fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
         return;
     };
 
-    if let Some((client_type, room_id, client_id)) = rooms.socket_routes.0.get(&r.source)
+    if let Some((client_type, room_id, client_id)) = rooms.socket_routes.routes.get(&r.source)
         && let Some(room) = rooms.rooms.get_mut(room_id)
     {
         match client_type {
@@ -522,12 +525,11 @@ fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
         .find(|(_, streamer)| streamer.peer.rtc.accepts(&input));
 
     if let Some((room_id, streamer)) = streamer {
-        rooms.socket_routes.0.insert(
-            r.source,
-            (ClientType::Streamer, room_id.clone(), streamer.id),
-        );
-        streamer.peer.handle_input(input);
+        rooms
+            .socket_routes
+            .add_route(r.source, ClientType::Streamer, room_id.clone(), streamer.id);
 
+        streamer.peer.handle_input(input);
         return;
     };
 
@@ -540,8 +542,8 @@ fn route_socket_input(rooms: &mut Rooms, input: Input<'_>) {
     if let Some((room_id, viewer)) = viewer {
         rooms
             .socket_routes
-            .0
-            .insert(r.source, (ClientType::Viewer, room_id.clone(), viewer.id));
+            .add_route(r.source, ClientType::Viewer, room_id.clone(), viewer.id);
+
         viewer.peer.handle_input(input);
     }
 }

@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     rc::Rc,
-    sync::mpsc::SyncSender,
+    sync::mpsc::{Sender, SyncSender},
     time::Instant,
 };
 
@@ -12,17 +12,20 @@ use subtle::ConstantTimeEq;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::types::{
-    ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
-    StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
-};
 use crate::{metrics, types::Viewer};
+use crate::{
+    shards::types::ShardRouteMsg,
+    types::{
+        ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
+        StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
+    },
+};
 
 impl Rooms {
-    pub fn new() -> Self {
+    pub fn new(tx_to_mux: Sender<ShardRouteMsg>, shard: usize) -> Self {
         Rooms {
             rooms: HashMap::new(),
-            socket_routes: SocketRoutes::new(),
+            socket_routes: SocketRoutes::new(tx_to_mux, shard),
         }
     }
 
@@ -302,13 +305,23 @@ impl DerefMut for Rooms {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Instant};
+    use std::{net::SocketAddr, sync::mpsc, time::Instant};
 
     use axum::http::StatusCode;
     use str0m::Rtc;
     use uuid::Uuid;
 
-    use crate::types::{Room, RoomId, RoomState, Rooms, StreamKey, Viewers};
+    use crate::{
+        shards::types::ShardRouteMsg,
+        types::{ClientId, ClientType, Room, RoomId, RoomState, Rooms, StreamKey, Viewers},
+    };
+
+    /// The receiver is handed back so the test keeps it alive; dropping it
+    /// would turn every route notice into a failed send.
+    fn rooms() -> (Rooms, mpsc::Receiver<ShardRouteMsg>) {
+        let (tx, rx) = mpsc::channel();
+        (Rooms::new(tx, 0), rx)
+    }
 
     fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
         mpsc::sync_channel(1)
@@ -330,7 +343,7 @@ mod tests {
 
     #[test]
     fn rooms_create_inserts_idle_room_with_unique_id() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (first_id, _) = create_room(&mut rooms);
         let (second_id, _) = create_room(&mut rooms);
@@ -348,7 +361,7 @@ mod tests {
 
     #[test]
     fn rooms_create_returns_key_matching_stored_hash() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (room_id, stream_key) = create_room(&mut rooms);
 
@@ -360,7 +373,7 @@ mod tests {
 
     #[test]
     fn rooms_reissue_stream_key_retires_the_old_key() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (room_id, old_key) = create_room(&mut rooms);
 
@@ -379,7 +392,7 @@ mod tests {
 
     #[test]
     fn rooms_reissue_stream_key_reports_missing_room() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (tx, rx) = reply();
         rooms.reissue_stream_key(missing_id(), tx);
@@ -388,7 +401,7 @@ mod tests {
 
     #[test]
     fn rooms_update_state_updates_existing_room_only() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (room_id, _) = create_room(&mut rooms);
 
@@ -407,7 +420,7 @@ mod tests {
 
     #[test]
     fn rooms_get_views_counts_viewers_and_reports_missing_room() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (room_id, _) = create_room(&mut rooms);
 
@@ -438,7 +451,7 @@ mod tests {
 
     #[test]
     fn rooms_delete_removes_existing_room_only() {
-        let mut rooms = Rooms::new();
+        let (mut rooms, _routes) = rooms();
 
         let (room_id, _) = create_room(&mut rooms);
 
@@ -494,5 +507,37 @@ mod tests {
                 "add_viewer unit test for RoomState: {state:?} case"
             );
         }
+    }
+
+    #[test]
+    fn rooms_delete_disowns_only_the_deleted_room_routes() {
+        let (mut rooms, routes) = rooms();
+        let (deleted, _) = create_room(&mut rooms);
+        let (kept, _) = create_room(&mut rooms);
+
+        let gone: SocketAddr = "127.0.0.1:50001".parse().unwrap();
+        let stays: SocketAddr = "127.0.0.1:50002".parse().unwrap();
+
+        rooms.socket_routes.routes.insert(
+            gone,
+            (ClientType::Viewer, deleted.clone(), ClientId::next()),
+        );
+        rooms
+            .socket_routes
+            .routes
+            .insert(stays, (ClientType::Viewer, kept, ClientId::next()));
+
+        let (tx, _rx) = reply();
+        rooms.delete(deleted, tx);
+
+        let disowned: Vec<SocketAddr> = routes
+            .try_iter()
+            .map(|notice| match notice {
+                ShardRouteMsg::Disowned { source, .. } => source,
+                ShardRouteMsg::Owned { source, .. } => panic!("{source} claimed on delete"),
+            })
+            .collect();
+
+        assert_eq!(disowned, vec![gone]);
     }
 }
