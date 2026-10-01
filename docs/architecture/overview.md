@@ -11,7 +11,7 @@ A WebRTC SFU for low-latency live streaming. One process; persistence and horizo
 | Media loops | Each owns a share of the rooms, drives str0m for their clients and forwards RTP |
 | HTTP API | Room CRUD and JSON metrics for an external backend |
 | Metrics port | Prometheus exposition, without a key. Off unless configured |
-| HTTPS API | SDP offers from viewers, WHIP from publishers |
+| HTTPS API | SDP offers from viewers, WHIP from publishers, and a minimal viewer page at `/watch` |
 | DataChannel | Per-client side band: renegotiation, simulcast layer requests, P2P relay signaling |
 
 The external backend is treated as a black box that speaks HTTP. This server makes no assumptions about its stack.

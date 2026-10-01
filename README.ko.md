@@ -29,27 +29,13 @@ cp config.toml.example config.toml
 cargo run --release
 ```
 
-방을 만듭니다.
+다른 터미널에서 실행합니다.
 
 ```sh
-curl -X POST http://localhost:8080/rooms -H "Authorization: Bearer <API_KEY>"
-# {"room_id":"RM_0_...","stream_key":"SK_..."}
+scripts/demo.sh
 ```
 
-OBS 30 이상에서 설정, 방송으로 들어가 서비스를 `WHIP`, 서버를 `http://localhost:8443/whip`, Bearer 토큰을 받은 `stream_key`로 설정하고 방송을 시작합니다. 이제 방은 `Preview` 상태입니다. 미디어는 들어오지만 아직 시청자에게 나가지 않습니다.
-
-방송을 시작합니다.
-
-```sh
-curl -X PATCH http://localhost:8080/rooms/<room_id> \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"state":"Live"}'
-```
-
-이제 시청자가 `/offer`로 SDP offer를 보내 입장할 수 있습니다.
-
-<!-- viewer page -->
+이 스크립트가 백엔드 역할을 대신합니다. 방을 만들고, OBS의 설정, 방송에 넣을 값을 출력합니다. 서비스는 `WHIP`, 서버는 `/whip` 주소, Bearer 토큰은 방의 스트림 키입니다. OBS가 송출을 시작하면 엔터로 방송을 시작하고, 시청 페이지 주소 `http://localhost:8443/watch?room=...`를 출력합니다. 이 페이지에서 스트림을 보며 simulcast 레이어를 바꿀 수 있는데, 레이어를 여러 개 보내려면 OBS 32.1 이상에서 레이어를 2개 이상으로 설정해야 합니다.
 
 `config.toml`의 모든 항목에는 기본값이 있어서 파일이 없어도 됩니다. 비밀값은 `.env`의 하나뿐이고, 나머지는 모두 설정 파일에 있습니다.
 
@@ -104,6 +90,7 @@ HTTPS `:8443`, 클라이언트가 직접 호출합니다.
 
 | 메서드 | 경로 | 인증 | 설명 |
 | --- | --- | --- | --- |
+| `GET` | `/watch?room={id}` | 없음 | 최소한의 시청 페이지 |
 | `POST` | `/offer` | 없음 | 시청자 입장. SDP offer를 보내고 SDP answer를 받음 |
 | `POST` | `/whip` | 스트림 키 | 송출. `application/sdp`로 주고받음 |
 | `DELETE` | `/whip/sessions/{id}` | 스트림 키 | 송출 세션 종료 |
