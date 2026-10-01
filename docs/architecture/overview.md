@@ -9,7 +9,8 @@ A WebRTC SFU for low-latency live streaming. One process; persistence and horizo
 | ICE / DTLS / SRTP | Connectivity and transport security (via `str0m`) |
 | mux | The only reader of the UDP socket. Hands each datagram to the media loop that owns its source address |
 | Media loops | Each owns a share of the rooms, drives str0m for their clients and forwards RTP |
-| HTTP API | Room CRUD and metrics for an external backend |
+| HTTP API | Room CRUD and JSON metrics for an external backend |
+| Metrics port | Prometheus exposition, without a key. Off unless configured |
 | HTTPS API | SDP offers from viewers, WHIP from publishers |
 | DataChannel | Per-client side band: renegotiation, simulcast layer requests, P2P relay signaling |
 

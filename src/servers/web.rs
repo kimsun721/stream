@@ -88,7 +88,7 @@ pub async fn run(shards: Arc<Shards>, config: WebConfig) -> anyhow::Result<()> {
     };
 
     let http_api = Router::new()
-        .route("/metrics", routing::get(get_metrics))
+        .route("/metrics.json", routing::get(get_metrics))
         .route("/rooms", routing::post(create_room))
         .route("/rooms/{room_id}", routing::get(get_room))
         .route("/rooms/{room_id}", routing::patch(update_room))
@@ -140,6 +140,24 @@ pub async fn run(shards: Arc<Shards>, config: WebConfig) -> anyhow::Result<()> {
             .await
             .unwrap_or_else(|e| panic!("serving rest api on {rest_addr}; error={e}"));
     });
+
+    // Unauthenticated, for a scraper on a private network. Off unless a port is
+    // configured.
+    if let Some(port) = tuning().server.metrics_port {
+        let metrics_api = Router::new().route("/metrics", routing::get(get_prometheus_metrics));
+
+        tokio::spawn(async move {
+            let metrics_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+
+            let listener = TcpListener::bind(metrics_addr)
+                .await
+                .unwrap_or_else(|e| panic!("binding {metrics_addr}; error={e}"));
+
+            axum::serve(listener, metrics_api)
+                .await
+                .unwrap_or_else(|e| panic!("serving metrics on {metrics_addr}; error={e}"));
+        });
+    }
 
     let _ = tokio::join!(https_server, http_server);
 
@@ -254,6 +272,13 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
 /// that reset them would spoil the next one.
 async fn get_metrics() -> Json<metrics::Snapshot> {
     Json(metrics::snapshot())
+}
+
+async fn get_prometheus_metrics() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, metrics::exposition::CONTENT_TYPE)],
+        metrics::exposition::render(),
+    )
 }
 
 #[derive(Serialize)]

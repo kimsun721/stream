@@ -79,6 +79,7 @@ was measured with, so a plain run stays comparable to it.
 | `LOAD_SETTLE` | `5` | Seconds before a step starts measuring |
 | `LOAD_WINDOW` | `10` | Seconds a step measures over |
 | `LOAD_SHARDS` | `4` | Media loops the server runs. Every test binary reads it, but only a load run has reason to move it |
+| `LOAD_METRICS_PORT` | a free port | Pins the server's Prometheus port, so the compose Prometheus can scrape the run. See the README's Monitoring section |
 
 An uneven room split is refused rather than rounded away, since rooms of
 different sizes cannot be compared with each other.
@@ -118,8 +119,10 @@ takes to time out, and measure them too.
 | `rx/s` | Of those, the ones that reached the media loop |
 | `drop/s` | Of those, the ones lost on the way, in the kernel or in a full channel |
 | `tx/s` | Datagrams sent, one `sendto` each |
-| `MB/s` | Outbound bytes |
+| `Mbps` | Outbound megabits per second, the unit layer bitrates are given in |
 | `save%` | Media bytes the relays carried instead of the server |
+| `wait_p99` | How long a datagram sat in a loop's channel after the mux read it, in microseconds |
+| `fwd_p50`, `fwd_p99` | From a frame's first packet reaching its loop to the frame being written for a viewer, in microseconds. Includes waiting for the rest of the frame, not the pacer after it |
 
 ### Reading a run
 

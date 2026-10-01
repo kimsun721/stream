@@ -47,27 +47,27 @@ later change as real if it moves more than that.
 
 ```text
 viewers in one room  layers=l:300,m:800,h:2500 settle=5s window=10s
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.47    0.32     635     4096     459     454      2      2    1512    1512       0   14653   15.8    0.0
-   100    100      0    0.65    0.54     714     8192     669     661      4      4    2585    2585       0   27997   30.3    0.0
-   200    200      0    0.91    0.77     560     8192    1188    1174     10      8    4689    4689       0   41347   45.0    0.0
-   400    400      0    1.09    0.85     474    16384    1391    1370     16     19    8923    8923       0   49984   54.9    0.0
-   500    500      0    1.24    0.87     285    16384    2336    2300     30     39   11030   11030       0   50551   55.5    0.0
-   600    600      0    1.35    0.85     137    32768    5061    4988     62     61   12277    8427    3850   54753   54.8    0.0
-   800    800      0    1.45    0.86      86    32768    8222    8088    112    100   14620    8599    6022   53180   47.1    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.47    0.32     635     4096     459     454      2      2    1512    1512       0   14653  126.4    0.0
+   100    100      0    0.65    0.54     714     8192     669     661      4      4    2585    2585       0   27997  242.4    0.0
+   200    200      0    0.91    0.77     560     8192    1188    1174     10      8    4689    4689       0   41347  360.0    0.0
+   400    400      0    1.09    0.85     474    16384    1391    1370     16     19    8923    8923       0   49984  439.2    0.0
+   500    500      0    1.24    0.87     285    16384    2336    2300     30     39   11030   11030       0   50551  444.0    0.0
+   600    600      0    1.35    0.85     137    32768    5061    4988     62     61   12277    8427    3850   54753  438.4    0.0
+   800    800      0    1.45    0.86      86    32768    8222    8088    112    100   14620    8599    6022   53180  376.8    0.0
 
 viewers with relay  layers=l:300,m:800,h:2500 settle=5s window=10s
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.53    0.36     895     4096     323     319      0      2    1993    1993       0   11729    8.2   38.1
-   100    100      0    0.71    0.55     958     4096     476     471      1      4    3548    3548       0   23120   15.8   47.3
-   200    200      0    0.91    0.74     758     8192     834     826      4      9    6675    6675       0   39395   24.4   47.9
-   400    400      0    1.25    0.85     356     8192    1963    1943     13     36   12726   12726       0   58267   35.6   46.9
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.53    0.36     895     4096     323     319      0      2    1993    1993       0   11729   65.6   38.1
+   100    100      0    0.71    0.55     958     4096     476     471      1      4    3548    3548       0   23120  126.4   47.3
+   200    200      0    0.91    0.74     758     8192     834     826      4      9    6675    6675       0   39395  195.2   47.9
+   400    400      0    1.25    0.85     356     8192    1963    1943     13     36   12726   12726       0   58267  284.8   46.9
 
 400 viewers across rooms  layers=l:300,m:800,h:2500 settle=5s window=10s
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-     1    400      0    1.12    0.86     387    16384    1803    1779     18     23    8925    8925       0   54162   59.5    0.0
-     4    400      0    1.13    0.87     360     8192     472     466      4     29   10281   10281       0   48938   54.0    0.0
-    20    400      0    1.17    0.88     320     8192     102     101      0     55   17590   17445     144   49220   53.8    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+     1    400      0    1.12    0.86     387    16384    1803    1779     18     23    8925    8925       0   54162  476.0    0.0
+     4    400      0    1.13    0.87     360     8192     472     466      4     29   10281   10281       0   48938  432.0    0.0
+    20    400      0    1.17    0.88     320     8192     102     101      0     55   17590   17445     144   49220  430.4    0.0
 ```
 
 ## Analysis
@@ -99,9 +99,9 @@ At 800 `rd/lap` is exactly 100 and the drain cap binds as well.
 and 10.3 at 600 and 800. Lost packets mean retransmit timers and ICE retries,
 which is more work per client, which slows the lap further.
 
-**Relay removes bandwidth, not CPU.** At 200 viewers it cuts outbound from 45.0
-to 24.4 MB/s, and the 47.9 percent it reports reconstructs a total of 46.8 MB/s
-against the 45.0 measured without it, so the counter agrees with itself. But
+**Relay removes bandwidth, not CPU.** At 200 viewers it cuts outbound from 360.0
+to 195.2 Mbps, and the 47.9 percent it reports reconstructs a total of 374.4 Mbps
+against the 360.0 measured without it, so the counter agrees with itself. But
 `srv_cor` at 400 is 0.85 either way. A leaf is still a client: it is still
 polled, still sends RTCP, still costs a tick.
 

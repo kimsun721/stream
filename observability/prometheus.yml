@@ -1,0 +1,14 @@
+# Scrapes the server's metrics port over the compose network. The port is not
+# published to the host, since it answers without a key.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: stream
+    static_configs:
+      - targets: ["stream:9464"]
+
+  # A load run's server, started on the host with LOAD_METRICS_PORT=9464.
+  - job_name: load
+    static_configs:
+      - targets: ["host.docker.internal:9464"]

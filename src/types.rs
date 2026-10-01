@@ -249,6 +249,7 @@ pub enum SfuMessage {
     Datagram {
         data: Vec<u8>,
         source: SocketAddr,
+        received_at: Instant,
     },
 }
 

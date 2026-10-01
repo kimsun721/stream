@@ -32,6 +32,7 @@ pub struct Server {
     pub sdp_port: u16,
     pub control_port: u16,
     pub media_port: u16,
+    pub metrics_port: u16,
     pub api_key: String,
     /// The spawned process, so a load run can read its CPU time and its socket
     /// drop count apart from the generator's own.
@@ -51,6 +52,7 @@ impl Default for Server {
             sdp_port: server.sdp_port,
             control_port: server.control_port,
             media_port: server.media_port,
+            metrics_port: server.metrics_port,
             api_key: server.api_key.clone(),
             pid: server.pid,
         }
@@ -69,6 +71,11 @@ fn spawn_server() -> Server {
     let sdp_port = free_port();
     let control_port = free_port();
     let media_port = free_port();
+    // A load run can pin it, so a Prometheus outside the test can find the
+    // server.
+    let metrics_port = std::env::var("LOAD_METRICS_PORT")
+        .map(|value| value.parse().expect("LOAD_METRICS_PORT holds a port"))
+        .unwrap_or_else(|_| free_port());
     let api_key = "integration-test-api-key".to_string();
 
     // The server reads config.toml from its working directory, so give it one
@@ -90,6 +97,7 @@ fn spawn_server() -> Server {
              https_sdp_server_port = {sdp_port}\n\
              http_rest_server_port = {control_port}\n\
              total_shards = {shards}\n\
+             metrics_port = {metrics_port}\n\
              \n\
              [bitrate]\n\
              estimate_secs = 1\n\
@@ -138,11 +146,13 @@ fn spawn_server() -> Server {
         sdp_port,
         control_port,
         media_port,
+        metrics_port,
         api_key,
         pid: pid_rx.recv().expect("server pid"),
     };
 
     wait_until_listening(control_port);
+    wait_until_listening(metrics_port);
 
     server
 }
@@ -187,6 +197,10 @@ impl Server {
 
     pub fn control_url(&self, path: &str) -> String {
         format!("http://{}:{}{}", self.host, self.control_port, path)
+    }
+
+    pub fn metrics_url(&self) -> String {
+        format!("http://{}:{}/metrics", self.host, self.metrics_port)
     }
 
     pub async fn create_room(&self, client: &reqwest::Client) -> CreatedRoom {

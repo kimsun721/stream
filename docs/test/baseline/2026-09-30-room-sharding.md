@@ -31,10 +31,10 @@ of it goes here.
 
 | | 1 loop | 4 loops |
 | --- | --- | --- |
-| 400 viewers, 1 room | 0.88 cores, 48.8 MB/s | 0.86 cores, 54.3 MB/s |
-| 400 viewers, 4 rooms | 0.89 cores, 42.5 MB/s | 1.87 cores, 128.7 MB/s |
-| 400 viewers, 20 rooms | 0.92 cores, 43.9 MB/s | 1.83 cores, 123.8 MB/s |
-| 1600 viewers, 4 rooms | | 3.41 cores, 173.8 MB/s |
+| 400 viewers, 1 room | 0.88 cores, 390.4 Mbps | 0.86 cores, 434.4 Mbps |
+| 400 viewers, 4 rooms | 0.89 cores, 340.0 Mbps | 1.87 cores, 1029.6 Mbps |
+| 400 viewers, 20 rooms | 0.92 cores, 351.2 Mbps | 1.83 cores, 990.4 Mbps |
+| 1600 viewers, 4 rooms | | 3.41 cores, 1390.4 Mbps |
 
 One loop still saturates at 400 viewers. Four loops saturate at 1600.
 
@@ -45,56 +45,56 @@ percent.
 
 ```text
 viewers in one room  layers=l:300,m:800,h:2500 settle=5s window=10s shards=1
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.21    0.16     659     2048     215     212      1      2    1508    1508       0   15186   16.4    0.0
-   100    100      0    0.41    0.34     676     4096     442     436      2      4    2567    2567       0   30142   32.5    0.0
-   200    200      0    0.86    0.70     650     8192     922     910      6      7    4711    4711       0   46974   50.9    0.0
-   400    400      0    1.12    0.88     304    16384    2381    2345     24     29    8921    8921       0   50152   55.3    0.0
-   500    500      0    1.23    0.89     181    16384    3928    3856     54     61   11024   11024       0   49053   53.1    0.0
-   600    600      0    1.29    0.90     130    16384    5283    5175     86    101   13123   13123       0   47206   42.1    0.0
-   800    800      0    1.41    0.90      59    32768   11018   10730    263    295   17330   17330       0   48216   36.2    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.21    0.16     659     2048     215     212      1      2    1508    1508       0   15186  131.2    0.0
+   100    100      0    0.41    0.34     676     4096     442     436      2      4    2567    2567       0   30142  260.0    0.0
+   200    200      0    0.86    0.70     650     8192     922     910      6      7    4711    4711       0   46974  407.2    0.0
+   400    400      0    1.12    0.88     304    16384    2381    2345     24     29    8921    8921       0   50152  442.4    0.0
+   500    500      0    1.23    0.89     181    16384    3928    3856     54     61   11024   11024       0   49053  424.8    0.0
+   600    600      0    1.29    0.90     130    16384    5283    5175     86    101   13123   13123       0   47206  336.8    0.0
+   800    800      0    1.41    0.90      59    32768   11018   10730    263    295   17330   17330       0   48216  289.6    0.0
 
 viewers with relay  layers=l:300,m:800,h:2500 settle=5s window=10s shards=1
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.18    0.16    1107     2048     116     114      0      2    1972    1972       0   11975    8.5   37.8
-   100    100      0    0.40    0.36    1142     2048     251     246      0      3    3522    3522       0   24160   17.0   49.8
-   200    200      0    0.90    0.72     741     4096     830     818      4      9    6664    6664       0   47688   33.7   44.6
-   400    400      0    1.25    0.89     263    16384    2781    2742     21     49   12785   12785       0   54969   29.5   55.3
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.18    0.16    1107     2048     116     114      0      2    1972    1972       0   11975   68.0   37.8
+   100    100      0    0.40    0.36    1142     2048     251     246      0      3    3522    3522       0   24160  136.0   49.8
+   200    200      0    0.90    0.72     741     4096     830     818      4      9    6664    6664       0   47688  269.6   44.6
+   400    400      0    1.25    0.89     263    16384    2781    2742     21     49   12785   12785       0   54969  236.0   55.3
 
 400 viewers across rooms  layers=l:300,m:800,h:2500 settle=5s window=10s shards=1
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-     1    400      0    1.09    0.88     304    16384    2352    2314     25     29    8930    8930       0   44005   48.8    0.0
-     4    400      0    1.01    0.89     400    16384     415     406      4     26   10239   10239       0   38422   42.5    0.0
-    20    400      0    1.09    0.92     297    16384     115     111      0     59   17459   17459       0   40105   43.9    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+     1    400      0    1.09    0.88     304    16384    2352    2314     25     29    8930    8930       0   44005  390.4    0.0
+     4    400      0    1.01    0.89     400    16384     415     406      4     26   10239   10239       0   38422  340.0    0.0
+    20    400      0    1.09    0.92     297    16384     115     111      0     59   17459   17459       0   40105  351.2    0.0
 
 viewers in one room  layers=l:300,m:800,h:2500 settle=5s window=10s shards=4
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.18    0.15     821     2048     167     165      0      2    1506    1506       0   15169   16.3    0.0
-   100    100      0    0.33    0.30     892     4096     308     304      1      3    2567    2567       0   29945   32.3    0.0
-   200    200      0    0.62    0.57     826     8192     618     609      4      6    4706    4706       0   47674   51.7    0.0
-   400    400      0    1.05    0.87     375    16384    2145    2115     19     24    8927    8927       0   60185   66.1    0.0
-   500    500      0    1.09    0.89     328    16384    2384    2342     28     34   11013   11013       0   51728   57.3    0.0
-   600    600      0    1.22    0.89     175    16384    4864    4776     67     75   13134   13134       0   52857   54.2    0.0
-   800    800      0    1.36    0.89      93    32768   10525   10262    238    187   17347   17347       0   51336   38.1    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.18    0.15     821     2048     167     165      0      2    1506    1506       0   15169  130.4    0.0
+   100    100      0    0.33    0.30     892     4096     308     304      1      3    2567    2567       0   29945  258.4    0.0
+   200    200      0    0.62    0.57     826     8192     618     609      4      6    4706    4706       0   47674  413.6    0.0
+   400    400      0    1.05    0.87     375    16384    2145    2115     19     24    8927    8927       0   60185  528.8    0.0
+   500    500      0    1.09    0.89     328    16384    2384    2342     28     34   11013   11013       0   51728  458.4    0.0
+   600    600      0    1.22    0.89     175    16384    4864    4776     67     75   13134   13134       0   52857  433.6    0.0
+   800    800      0    1.36    0.89      93    32768   10525   10262    238    187   17347   17347       0   51336  304.8    0.0
 
 viewers with relay  layers=l:300,m:800,h:2500 settle=5s window=10s shards=4
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-    50     50      0    0.17    0.15    1083     2048     117     115      0      2    1968    1968       0   12008    8.6   45.7
-   100    100      0    0.32    0.31    1205     2048     211     207      0      3    3531    3531       0   24128   17.0   49.3
-   200    200      0    0.66    0.60    1027     4096     510     502      2      6    6661    6661       0   48390   33.9   46.3
-   400    400      0    1.20    0.88     341     8192    2436    2408     14     37   12725   12725       0   65470   40.3   49.5
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+    50     50      0    0.17    0.15    1083     2048     117     115      0      2    1968    1968       0   12008   68.8   45.7
+   100    100      0    0.32    0.31    1205     2048     211     207      0      3    3531    3531       0   24128  136.0   49.3
+   200    200      0    0.66    0.60    1027     4096     510     502      2      6    6661    6661       0   48390  271.2   46.3
+   400    400      0    1.20    0.88     341     8192    2436    2408     14     37   12725   12725       0   65470  322.4   49.5
 
 400 viewers across rooms  layers=l:300,m:800,h:2500 settle=5s window=10s shards=4
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-     1    400      0    0.99    0.86     461    16384    1631    1605     16     19    8932    8932       0   48762   54.3    0.0
-     4    400      0    2.22    1.87    2896     4096     554     547      3      4   10284   10284       0  119217  128.7    0.0
-    20    400      0    1.68    1.83    4712     2048      60      59      0      4   17474   17474       0  114838  123.8    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+     1    400      0    0.99    0.86     461    16384    1631    1605     16     19    8932    8932       0   48762  434.4    0.0
+     4    400      0    2.22    1.87    2896     4096     554     547      3      4   10284   10284       0  119217 1029.6    0.0
+    20    400      0    1.68    1.83    4712     2048      60      59      0      4   17474   17474       0  114838  990.4    0.0
 
 1600 viewers across rooms  layers=l:300,m:800,h:2500 settle=5s window=10s shards=4
-  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   MB/s  save%
-     4   1600      0    4.63    3.41     516    16384    5490    5396     77     69   35598   35598       0  160670  173.8    0.0
-     8   1600      0    4.24    3.47     653    16384    2121    2081     29     57   37409   37409       0  147943  154.4    0.0
-    16   1600      0    4.18    3.50     697    16384     980     959     12     59   40981   40980       1  142804  148.0    0.0
+  step   live  refus gen_cor srv_cor  laps/s late_p99 room_us tick_us fan_us rd/lap    in/s    rx/s  drop/s    tx/s   Mbps  save%
+     4   1600      0    4.63    3.41     516    16384    5490    5396     77     69   35598   35598       0  160670 1390.4    0.0
+     8   1600      0    4.24    3.47     653    16384    2121    2081     29     57   37409   37409       0  147943 1235.2    0.0
+    16   1600      0    4.18    3.50     697    16384     980     959     12     59   40981   40980       1  142804 1184.0    0.0
 ```
 
 ## Analysis
@@ -111,8 +111,8 @@ layers the viewers can take.
 0.86 cores, the same point where a single loop saturates at 400. Four loops hold
 four times the viewers without drops.
 
-**Bytes scale less than cores.** 1600 viewers send 173.8 MB/s, 79 percent of four
-times the single loop's 55.3. The generator burns 4.6 cores beside the server's
+**Throughput scales less than cores.** 1600 viewers send 1390.4 Mbps, 79 percent
+of four times the single loop's 442.4. The generator burns 4.6 cores beside the server's
 3.4 on a machine with 8 physical cores, so the two share cores through SMT. This
 machine cannot separate that from the server's own cost.
 
