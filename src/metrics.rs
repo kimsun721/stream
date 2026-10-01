@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::config::tuning;
 
+pub mod exposition;
 
 /// One bucket per power of two microseconds, so bucket `i` holds durations
 /// under `2^i`. 24 of them reach 8 seconds, well past anything the loop should

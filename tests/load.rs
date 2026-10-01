@@ -553,13 +553,13 @@ fn udp_drops(port: u16) -> u64 {
 
 async fn metrics(server: &Server, client: &reqwest::Client) -> Value {
     client
-        .get(server.control_url("/metrics"))
+        .get(server.control_url("/metrics.json"))
         .bearer_auth(&server.api_key)
         .send()
         .await
-        .expect("GET /metrics")
+        .expect("GET /metrics.json")
         .error_for_status()
-        .expect("GET /metrics status")
+        .expect("GET /metrics.json status")
         .json()
         .await
         .expect("metrics json")

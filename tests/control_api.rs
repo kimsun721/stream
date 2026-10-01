@@ -167,3 +167,59 @@ async fn a_missing_room_is_not_found() {
         .expect("POST stream-key");
     assert_eq!(reissue.status(), StatusCode::NOT_FOUND, "reissue");
 }
+
+#[tokio::test]
+async fn metrics_are_json_behind_the_key_and_prometheus_on_their_own_port() {
+    let server = Server::default();
+    let client = reqwest::Client::new();
+
+    let json = client
+        .get(server.control_url("/metrics.json"))
+        .send()
+        .await
+        .expect("GET /metrics.json");
+    assert_eq!(
+        json.status(),
+        StatusCode::UNAUTHORIZED,
+        "json without a key"
+    );
+
+    let json: serde_json::Value = client
+        .get(server.control_url("/metrics.json"))
+        .bearer_auth(&server.api_key)
+        .send()
+        .await
+        .expect("GET /metrics.json")
+        .json()
+        .await
+        .expect("metrics json");
+    assert!(json["laps"].is_u64(), "json carries the counters");
+
+    let prometheus = client
+        .get(server.metrics_url())
+        .send()
+        .await
+        .expect("GET /metrics");
+    assert_eq!(prometheus.status(), StatusCode::OK, "no key needed");
+
+    let content_type = prometheus.headers()["content-type"]
+        .to_str()
+        .expect("content type")
+        .to_string();
+    assert!(
+        content_type.starts_with("application/openmetrics-text"),
+        "{content_type}"
+    );
+
+    let body = prometheus.text().await.expect("metrics text");
+    for expected in [
+        "# TYPE stream_sent_packets counter",
+        "stream_sent_packets_total ",
+        "stream_clients{loop=\"0\"} ",
+        "stream_phase_seconds_count{phase=\"lap\"} ",
+        "stream_forward_delay_seconds_bucket{le=\"+Inf\"} ",
+    ] {
+        assert!(body.contains(expected), "missing {expected:?}");
+    }
+    assert!(body.ends_with("# EOF\n"), "an exposition ends with EOF");
+}

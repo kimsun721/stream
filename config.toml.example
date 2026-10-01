@@ -18,6 +18,9 @@ http_rest_server_port = 8080
 # Media loops, each owning its share of the rooms on a thread of its own.
 # Absent uses the core count.
 # total_shards = 4
+# Serves Prometheus metrics at /metrics on this port, without a key. Keep it
+# on a private network. Absent turns it off.
+# metrics_port = 9464
 
 # Absent serves plain HTTP, which is correct when a reverse proxy terminates
 # TLS. Present serves TLS on the SDP and WHIP port and requires both paths. The

@@ -57,6 +57,7 @@ pub struct ServerConfig {
     pub http_rest_server_port: u16,
     pub tls: Option<TlsConfig>,
     pub total_shards: NonZeroUsize,
+    pub metrics_port: Option<u16>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -199,6 +200,7 @@ impl Default for ServerConfig {
             http_rest_server_port: 8080,
             tls: None,
             total_shards,
+            metrics_port: None,
         }
     }
 }
