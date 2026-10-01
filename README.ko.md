@@ -95,7 +95,7 @@ HTTP `:8080`, 백엔드 전용입니다. 모든 경로에 서버 API 키가 필�
 | `PATCH` | `/rooms/{id}` | 방 상태 변경. `Idle`은 방송 종료도 겸함 |
 | `DELETE` | `/rooms/{id}` | 방과 스트림 키 삭제 |
 | `POST` | `/rooms/{id}/stream-key` | 스트림 키 재발급. 이전 키는 폐기 |
-| `GET` | `/metrics` | 미디어 루프의 카운터와 소요 시간. 시작 후 누적값 |
+| `GET` | `/metrics.json` | 미디어 루프의 카운터와 소요 시간. 시작 후 누적값 |
 
 ## 클라이언트 API
 
@@ -142,6 +142,16 @@ cargo test --release --test load -- --ignored --nocapture     # 부하 테스트
 ```
 
 통합 테스트는 실제 서버 프로세스를 띄우고, simulcast RTP를 보내는 송출자를 포함한 str0m 클라이언트로 HTTP와 UDP를 통해 서버를 다룹니다. 테스트 구성, 부하 테스트 실행과 결과 읽는 법은 [docs/test](docs/test/README.md)에 있습니다.
+
+## 모니터링
+
+`server.metrics_port`를 설정하면 그 포트의 `/metrics`에서 Prometheus 메트릭을 제공합니다. 키 없이 응답하므로 사설망에만 두어야 합니다. 같은 수치는 `:8080`의 `/metrics.json`에서 API 키와 함께 JSON으로도 받을 수 있습니다.
+
+```sh
+docker compose --profile observability up
+```
+
+서버 옆에 Prometheus와 Grafana가 함께 뜨고, 시청자 수, CPU, 처리량, 드롭, 전달 지연을 보여주는 대시보드가 준비됩니다. 먼저 `config.toml`에 `metrics_port = 9464`를 넣고 `compose.yaml`에서 설정 파일 볼륨 줄의 주석을 풀어야 합니다. Grafana는 `localhost:3000`이며, 처음에는 `admin` 계정에 비밀번호 `admin`으로 로그인합니다.
 
 ## 한계
 

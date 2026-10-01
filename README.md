@@ -95,7 +95,7 @@ HTTP `:8080`, for your backend. Every route requires the server API key.
 | `PATCH` | `/rooms/{id}` | Set room state. `Idle` also ends the broadcast |
 | `DELETE` | `/rooms/{id}` | Delete the room and its stream key |
 | `POST` | `/rooms/{id}/stream-key` | Reissue, retiring the previous key |
-| `GET` | `/metrics` | Counters and timings for the media loops, cumulative since start |
+| `GET` | `/metrics.json` | Counters and timings for the media loops, cumulative since start |
 
 ## Client API
 
@@ -142,6 +142,16 @@ cargo test --release --test load -- --ignored --nocapture     # load run
 ```
 
 The integration suites start the real server and drive it over HTTP and UDP with str0m clients, including a publisher that sends simulcast RTP. [docs/test](docs/test/README.md) covers the suites, the load run and how to read it.
+
+## Monitoring
+
+`server.metrics_port` serves Prometheus metrics at `/metrics` on that port. It answers without a key, so keep it on a private network. `/metrics.json` on `:8080` carries the same figures as JSON, behind the API key.
+
+```sh
+docker compose --profile observability up
+```
+
+This starts Prometheus and Grafana beside the server, with a dashboard for viewers, CPU, throughput, drops and forwarding delay. Set `metrics_port = 9464` in `config.toml` and uncomment its volume in `compose.yaml` first. Grafana is on `localhost:3000`, signing in as `admin` with password `admin` the first time.
 
 ## Limits
 
