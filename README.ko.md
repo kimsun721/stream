@@ -4,6 +4,8 @@
 
 Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트리밍용 WebRTC SFU입니다. 송출자는 OBS나 브라우저에서 WHIP으로 방송을 올립니다. 시청자는 대역폭 추정치에 맞는 simulcast 레이어를 받고, 업로드 여유가 있는 시청자는 다른 시청자에게 P2P로 스트림을 중계해 서버 부하를 덜어줍니다.
 
+<!-- demo GIF -->
+
 ## 측정 결과
 
 한 머신에서 루프백으로 측정했고, 부하 생성기도 같은 머신에서 돌렸습니다(AMD Ryzen 7 8845HS, 16스레드). 송출자는 simulcast 레이어 3개를 보냅니다.
@@ -16,38 +18,58 @@ Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트
 
 각 측정과 그 측정으로 배제한 가설은 [docs/test/baseline](docs/test/baseline/)에 기록되어 있습니다.
 
-## 구조
-
-```
-backend ─── HTTP  :8080 ──┐
-clients ─── HTTPS :8443 ──┤ tokio
-                          │ room commands, routed by room id
-                          ▼
-clients ─── UDP :40000 ──▶ mux ──▶ media loops 0..N ──▶ UDP :40000 ──▶ clients
-                            ▲             │
-                            └─ address ◀──┘
-                               owners
-```
-
-UDP 소켓은 mux 스레드만 읽습니다. mux는 데이터그램을 출발지 주소의 주인인 미디어 루프에 넘기고, 처음 보는 주소면 모든 루프에 넘깁니다. 그중 자기 클라이언트가 받아들인 루프가 그 주소를 mux에 알려줍니다.
-
-미디어 루프는 각자 std 스레드 하나이고 자기 방들을 혼자 소유합니다. 그래서 방 안의 어떤 것도 스레드 사이에서 공유되지 않습니다. 모든 루프가 같은 소켓으로 보내므로 클라이언트에게는 포트 하나로 보입니다. 새 방은 다음 차례의 루프에 배치되고, 방 id에 루프 번호가 들어 있어서 웹 스레드는 이후 명령을 조회 테이블 없이 바로 해당 루프로 보냅니다. 루프 수는 `server.total_shards`이며 기본값은 코어 수입니다.
-
-## 실행
+## 빠른 시작
 
 ```sh
 cp .env.example .env            # API_KEY 설정, 16자 이상
 cp config.toml.example config.toml
-docker compose up
+cargo run --release
 ```
+
+방을 만듭니다.
+
+```sh
+curl -X POST http://localhost:8080/rooms -H "Authorization: Bearer <API_KEY>"
+# {"room_id":"RM_0_...","stream_key":"SK_..."}
+```
+
+OBS 30 이상에서 설정, 방송으로 들어가 서비스를 `WHIP`, 서버를 `http://localhost:8443/whip`, Bearer 토큰을 받은 `stream_key`로 설정하고 방송을 시작합니다. 이제 방은 `Preview` 상태입니다. 미디어는 들어오지만 아직 시청자에게 나가지 않습니다.
+
+방송을 시작합니다.
+
+```sh
+curl -X PATCH http://localhost:8080/rooms/<room_id> \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"state":"Live"}'
+```
+
+이제 시청자가 `/offer`로 SDP offer를 보내 입장할 수 있습니다.
+
+<!-- viewer page -->
 
 `config.toml`의 모든 항목에는 기본값이 있어서 파일이 없어도 됩니다. 비밀값은 `.env`의 하나뿐이고, 나머지는 모두 설정 파일에 있습니다.
 
-NAT 뒤나 컨테이너에서는 `server.public_ip`를 클라이언트가 닿을 수 있는 주소로 설정해야 합니다. 설정하지 않으면 처음 찾은 인터페이스 주소를 알리는데, 컨테이너에서는 브리지 주소라 외부에서 닿지 않습니다.
+서버는 처음 찾은 네트워크 인터페이스 주소로 미디어를 보내라고 클라이언트에게 알립니다. NAT 뒤에서는 `server.public_ip`를 클라이언트가 닿을 수 있는 주소로 설정해야 합니다.
+
+`docker compose up`으로도 같은 서버를 띄울 수 있습니다. 이때는 `compose.yaml`에서 `config.toml` 볼륨 줄의 주석을 풀어야 설정 파일을 읽고, `server.public_ip`도 설정해야 합니다. 컨테이너 안에서 처음 찾는 인터페이스는 브리지라 외부에서 닿지 않습니다.
 
 `[server.tls]`를 설정하면 `:8443`이 TLS로 동작합니다. `:8080`은 항상 평문 HTTP이며 사설망에만 두어야 합니다. 이 섹션이 없으면 둘 다 평문이며, 리버스 프록시 뒤에 두는 배포를 위한 설정입니다.
 
-Docker 없이 `cargo run`으로 실행해도 작업 디렉터리에서 같은 두 파일을 읽습니다.
+## 구조
+
+```mermaid
+flowchart LR
+    C["클라이언트"] -- "SDP, WHIP<br/>HTTPS :8443" --> W["웹 스레드"]
+    C -- "미디어 수신<br/>UDP :40000" --> M["mux 스레드"]
+    W -- "방 id로" --> L["미디어 루프<br/>코어당 하나"]
+    M -- "출발지 주소로" --> L
+    L -- "미디어 송신<br/>같은 UDP 포트" --> C
+```
+
+시그널링은 HTTPS로 웹 스레드에 들어오고, 웹 스레드는 각 클라이언트를 그 방을 맡은 미디어 루프에 넘깁니다. 미디어는 UDP 포트 하나로 들어오며, mux 스레드가 읽어서 출발지 주소의 주인인 루프에 넘깁니다. 각 루프는 자기 방들을 혼자 소유한 채 자기 스레드에서 돌고, 같은 포트로 내보내므로 클라이언트에게는 주소 하나로 보입니다.
+
+전체 흐름은 [docs/architecture](docs/architecture/overview.md)에 있습니다.
 
 ## 인증
 

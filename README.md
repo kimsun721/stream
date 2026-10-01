@@ -4,6 +4,8 @@ English | [한국어](README.ko.md)
 
 A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP, from OBS or a browser. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
 
+<!-- demo GIF -->
+
 ## Measured
 
 One machine, over loopback, with the load generator on the same machine (AMD Ryzen 7 8845HS, 16 threads). The publisher sends three simulcast layers.
@@ -16,38 +18,58 @@ One machine, over loopback, with the load generator on the same machine (AMD Ryz
 
 Each run, and what it ruled out, is recorded in [docs/test/baseline](docs/test/baseline/).
 
-## Architecture
-
-```
-backend ─── HTTP  :8080 ──┐
-clients ─── HTTPS :8443 ──┤ tokio
-                          │ room commands, routed by room id
-                          ▼
-clients ─── UDP :40000 ──▶ mux ──▶ media loops 0..N ──▶ UDP :40000 ──▶ clients
-                            ▲             │
-                            └─ address ◀──┘
-                               owners
-```
-
-The mux thread is the only reader of the UDP socket. It hands a datagram to the media loop that owns its source address, or to every loop when the address is new, and the loop whose client accepts it reports the address back.
-
-Each media loop is a std thread that owns its rooms outright, so nothing in a room is shared across threads. All loops send on the same socket, so clients see a single port. A new room goes to the next loop in turn, and its id carries the loop number, so the web threads route every later command without a lookup table. There are `server.total_shards` loops, the core count by default.
-
-## Running
+## Quick start
 
 ```sh
 cp .env.example .env            # set API_KEY, at least 16 characters
 cp config.toml.example config.toml
-docker compose up
+cargo run --release
 ```
+
+Create a room:
+
+```sh
+curl -X POST http://localhost:8080/rooms -H "Authorization: Bearer <API_KEY>"
+# {"room_id":"RM_0_...","stream_key":"SK_..."}
+```
+
+In OBS 30 or later, open Settings, Stream, and set Service to `WHIP`, Server to `http://localhost:8443/whip`, and Bearer Token to the `stream_key`. Start streaming. The room is now `Preview`: media arrives but nobody is served yet.
+
+Go live:
+
+```sh
+curl -X PATCH http://localhost:8080/rooms/<room_id> \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"state":"Live"}'
+```
+
+Viewers can now join with an SDP offer to `/offer`.
+
+<!-- viewer page -->
 
 Everything in `config.toml` has a default, so the file is optional. `.env` holds the one secret; everything else lives in the config file.
 
-Behind NAT or in a container, set `server.public_ip` to an address clients can reach. Without it the server advertises the first interface it finds, which is the bridge address and unroutable from outside.
+The server tells clients to send media to the first network interface it finds. Behind NAT, set `server.public_ip` to an address clients can reach.
+
+`docker compose up` runs the same server. Uncomment the `config.toml` volume in `compose.yaml` so the file is read, and set `server.public_ip`: inside a container the first interface is the bridge, unroutable from outside.
 
 `[server.tls]` serves TLS on `:8443`. `:8080` is always plain HTTP and belongs on a private network. Without the section both are plain, for deployments behind a reverse proxy.
 
-Without Docker, `cargo run` reads the same two files from the working directory.
+## Architecture
+
+```mermaid
+flowchart LR
+    C["Clients"] -- "SDP, WHIP<br/>HTTPS :8443" --> W["Web threads"]
+    C -- "media in<br/>UDP :40000" --> M["mux thread"]
+    W -- "by room id" --> L["Media loops<br/>one per core"]
+    M -- "by source address" --> L
+    L -- "media out<br/>same UDP port" --> C
+```
+
+Signalling goes over HTTPS to the web threads, which hand each client to the media loop that owns its room. Media arrives on one UDP port, where the mux thread reads it and hands each datagram to the loop that owns its source address. Each loop owns its rooms outright on a thread of its own, and sends on the same port, so clients see a single address.
+
+[docs/architecture](docs/architecture/overview.md) has the full flow.
 
 ## Authentication
 
