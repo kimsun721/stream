@@ -17,6 +17,7 @@ One machine, over loopback, with the load generator on the same machine (AMD Ryz
 | One media loop | saturates at about 400 viewers, on one core |
 | Four media loops | 1600 viewers across 4 rooms, no packet loss |
 | P2P relay | 46 to 50 percent of media bytes carried by viewers. One relay feeds one viewer, so half is the ceiling |
+| Forwarding delay | p99 under 4 ms at 200 viewers per loop, under 16 ms at the ceiling of 400 |
 
 Each run, and what it ruled out, is recorded in [docs/test/baseline](docs/test/baseline/).
 
