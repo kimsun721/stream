@@ -32,7 +32,7 @@ cargo run --release
 In a second terminal:
 
 ```sh
-scripts/demo.sh
+scripts/local-broadcast.sh
 ```
 
 The script stands in for your backend. It creates a room and prints what to enter in OBS, under Settings, Stream: Service `WHIP`, the server's `/whip` URL, and the room's stream key as the Bearer Token. Once OBS is publishing, Enter takes the room live and the script prints a link to the viewer page, `http://localhost:8443/watch?room=...`. The page plays the stream and switches between simulcast layers, which needs OBS 32.1 or later with more than one layer.

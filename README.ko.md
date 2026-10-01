@@ -32,7 +32,7 @@ cargo run --release
 다른 터미널에서 실행합니다.
 
 ```sh
-scripts/demo.sh
+scripts/local-broadcast.sh
 ```
 
 이 스크립트가 백엔드 역할을 대신합니다. 방을 만들고, OBS의 설정, 방송에 넣을 값을 출력합니다. 서비스는 `WHIP`, 서버는 `/whip` 주소, Bearer 토큰은 방의 스트림 키입니다. OBS가 송출을 시작하면 엔터로 방송을 시작하고, 시청 페이지 주소 `http://localhost:8443/watch?room=...`를 출력합니다. 이 페이지에서 스트림을 보며 simulcast 레이어를 바꿀 수 있는데, 레이어를 여러 개 보내려면 OBS 32.1 이상에서 레이어를 2개 이상으로 설정해야 합니다.

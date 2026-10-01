@@ -2,7 +2,7 @@
 # Plays the backend's part in a broadcast: creates a room, waits for OBS to
 # start publishing into it, takes it live, and deletes it on the way out.
 #
-#   scripts/demo.sh
+#   scripts/local-broadcast.sh
 #
 # The API key is read from the environment or from .env, and never leaves this
 # terminal. CONTROL_URL and PUBLIC_URL override where the server is reached.
