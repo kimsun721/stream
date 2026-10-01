@@ -1,5 +1,7 @@
 # Stream
 
+[![CI](https://github.com/kimsun721/stream/actions/workflows/ci.yml/badge.svg)](https://github.com/kimsun721/stream/actions/workflows/ci.yml)
+
 [English](README.md) | 한국어
 
 Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트리밍용 WebRTC SFU입니다. 송출자는 OBS나 브라우저에서 WHIP으로 방송을 올립니다. 시청자는 대역폭 추정치에 맞는 simulcast 레이어를 받고, 업로드 여유가 있는 시청자는 다른 시청자에게 P2P로 스트림을 중계해 서버 부하를 덜어줍니다.
@@ -168,3 +170,7 @@ cargo test --release --test load -- --ignored --nocapture     # 부하 테스트
 - [ ] 재시작 후에도 방과 스트림 키 유지
 - [ ] 시청자용 WHEP
 - [ ] 직접 닿지 못하는 클라이언트와 relay 쌍을 위한 TURN
+
+## 라이선스
+
+[Apache License 2.0](LICENSE-APACHE)과 [MIT](LICENSE-MIT) 중 원하는 쪽을 선택해 사용할 수 있습니다.

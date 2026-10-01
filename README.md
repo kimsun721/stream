@@ -1,5 +1,7 @@
 # Stream
 
+[![CI](https://github.com/kimsun721/stream/actions/workflows/ci.yml/badge.svg)](https://github.com/kimsun721/stream/actions/workflows/ci.yml)
+
 English | [한국어](README.ko.md)
 
 A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP, from OBS or a browser. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
@@ -168,3 +170,7 @@ The integration suites start the real server and drive it over HTTP and UDP with
 - [ ] Persist rooms and stream keys across restarts
 - [ ] WHEP for viewers
 - [ ] TURN, for clients and relay pairs that cannot reach each other directly
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or [MIT](LICENSE-MIT), at your option.
