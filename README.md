@@ -153,6 +153,13 @@ docker compose --profile observability up
 
 This starts Prometheus and Grafana beside the server, with a dashboard for viewers, CPU, throughput, drops and forwarding delay. Set `metrics_port = 9464` in `config.toml` and uncomment its volume in `compose.yaml` first. Grafana is on `localhost:3000`, signing in as `admin` with password `admin` the first time.
 
+To watch a load run instead, start only the two monitoring services and pin the run's metrics port. The load run starts its own server, which Prometheus finds on the host:
+
+```sh
+docker compose --profile observability up prometheus grafana
+LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
+```
+
 ## Limits
 
 - No TURN. A client that cannot reach UDP `:40000` directly cannot connect.

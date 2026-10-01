@@ -71,7 +71,11 @@ fn spawn_server() -> Server {
     let sdp_port = free_port();
     let control_port = free_port();
     let media_port = free_port();
-    let metrics_port = free_port();
+    // A load run can pin it, so a Prometheus outside the test can find the
+    // server.
+    let metrics_port = std::env::var("LOAD_METRICS_PORT")
+        .map(|value| value.parse().expect("LOAD_METRICS_PORT holds a port"))
+        .unwrap_or_else(|_| free_port());
     let api_key = "integration-test-api-key".to_string();
 
     // The server reads config.toml from its working directory, so give it one

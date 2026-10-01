@@ -79,6 +79,7 @@ was measured with, so a plain run stays comparable to it.
 | `LOAD_SETTLE` | `5` | Seconds before a step starts measuring |
 | `LOAD_WINDOW` | `10` | Seconds a step measures over |
 | `LOAD_SHARDS` | `4` | Media loops the server runs. Every test binary reads it, but only a load run has reason to move it |
+| `LOAD_METRICS_PORT` | a free port | Pins the server's Prometheus port, so the compose Prometheus can scrape the run. See the README's Monitoring section |
 
 An uneven room split is refused rather than rounded away, since rooms of
 different sizes cannot be compared with each other.

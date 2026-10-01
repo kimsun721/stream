@@ -153,6 +153,13 @@ docker compose --profile observability up
 
 서버 옆에 Prometheus와 Grafana가 함께 뜨고, 시청자 수, CPU, 처리량, 드롭, 전달 지연을 보여주는 대시보드가 준비됩니다. 먼저 `config.toml`에 `metrics_port = 9464`를 넣고 `compose.yaml`에서 설정 파일 볼륨 줄의 주석을 풀어야 합니다. Grafana는 `localhost:3000`이며, 처음에는 `admin` 계정에 비밀번호 `admin`으로 로그인합니다.
 
+부하 테스트를 지켜보려면 모니터링 서비스 두 개만 띄우고 부하 테스트의 메트릭 포트를 고정합니다. 부하 테스트는 자기 서버를 직접 띄우고, Prometheus가 호스트에서 그 서버를 찾습니다.
+
+```sh
+docker compose --profile observability up prometheus grafana
+LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
+```
+
 ## 한계
 
 - TURN이 없습니다. UDP `:40000`에 직접 닿지 못하는 클라이언트는 연결할 수 없습니다.

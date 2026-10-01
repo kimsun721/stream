@@ -25,6 +25,7 @@
 //! LOAD_SETTLE=5
 //! LOAD_WINDOW=10
 //! LOAD_SHARDS=4               media loops the server runs
+//! LOAD_METRICS_PORT=          pins the Prometheus port, for watching in Grafana
 //! ```
 
 mod common;
