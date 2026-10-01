@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::config::tuning;
 
+
 /// One bucket per power of two microseconds, so bucket `i` holds durations
 /// under `2^i`. 24 of them reach 8 seconds, well past anything the loop should
 /// produce.
@@ -139,6 +140,25 @@ pub fn time(phase: Phase) -> Timer {
 
 pub fn lap_lateness(lateness: Duration) {
     LAP_LATENESS.record(lateness);
+}
+
+/// From the mux reading a datagram to a loop taking it off its channel. str0m
+/// is handed the second instant, so this wait is invisible to it and to
+/// `forward_delay`.
+static CHANNEL_WAIT: Histogram = Histogram::new();
+
+/// From the first packet of a frame reaching its loop to the frame being
+/// written for one viewer, recorded once per viewer. A frame is forwarded
+/// whole, so this includes waiting for its last packet. The pacer's hold after
+/// the write is not in it.
+static FORWARD_DELAY: Histogram = Histogram::new();
+
+pub fn channel_wait(wait: Duration) {
+    CHANNEL_WAIT.record(wait);
+}
+
+pub fn forward_delay(delay: Duration) {
+    FORWARD_DELAY.record(delay);
 }
 
 macro_rules! atomics {
@@ -358,6 +378,8 @@ pub struct Snapshot {
 
     pub lap: Durations,
     pub lap_lateness: Durations,
+    pub channel_wait: Durations,
+    pub forward_delay: Durations,
     pub channel_drain: Durations,
     pub room_iteration: Durations,
     pub client_tick: Durations,
@@ -398,6 +420,8 @@ pub fn snapshot() -> Snapshot {
 
         lap: PHASES[Phase::Lap as usize].snapshot(),
         lap_lateness: LAP_LATENESS.snapshot(),
+        channel_wait: CHANNEL_WAIT.snapshot(),
+        forward_delay: FORWARD_DELAY.snapshot(),
         channel_drain: PHASES[Phase::ChannelDrain as usize].snapshot(),
         room_iteration: PHASES[Phase::RoomIteration as usize].snapshot(),
         client_tick: PHASES[Phase::ClientTick as usize].snapshot(),

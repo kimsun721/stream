@@ -439,13 +439,20 @@ fn handle_sfu_message(rooms: &mut Rooms, message: SfuMessage, destination: Socke
             reply,
         } => rooms.terminate_session(room_id, session_id, reply),
         SfuMessage::ReissueStreamKey { room_id, reply } => rooms.reissue_stream_key(room_id, reply),
-        SfuMessage::Datagram { data, source } => {
+        SfuMessage::Datagram {
+            data,
+            source,
+            received_at,
+        } => {
+            let now = Instant::now();
+            metrics::channel_wait(now.saturating_duration_since(received_at));
+
             let Ok(contents) = data.as_slice().try_into() else {
                 return;
             };
 
             let input = Input::Receive(
-                Instant::now(),
+                now,
                 Receive {
                     proto: Protocol::Udp,
                     source,

@@ -333,7 +333,7 @@ fn header(run: &Run, title: &str) {
     println!();
     println!("{title}  {}", run.describe());
     println!(
-        "{:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>6} {:>6}",
+        "{:>6} {:>6} {:>6} {:>7} {:>7} {:>7} {:>8} {:>7} {:>7} {:>6} {:>6} {:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>8} {:>7} {:>7}",
         "step",
         "live",
         "refus",
@@ -350,7 +350,10 @@ fn header(run: &Run, title: &str) {
         "drop/s",
         "tx/s",
         "MB/s",
-        "save%"
+        "save%",
+        "wait_p99",
+        "fwd_p50",
+        "fwd_p99"
     );
 }
 
@@ -474,6 +477,8 @@ impl Sample {
         let room = Windowed::between(&before.metrics, &self.metrics, "room_iteration");
         let tick = Windowed::between(&before.metrics, &self.metrics, "client_tick");
         let fanout = Windowed::between(&before.metrics, &self.metrics, "media_fanout");
+        let wait = Windowed::between(&before.metrics, &self.metrics, "channel_wait");
+        let forward = Windowed::between(&before.metrics, &self.metrics, "forward_delay");
 
         // Both sides are payload bytes of frames the server meant to send, so
         // the ratio holds even where the socket could not keep up and
@@ -486,7 +491,7 @@ impl Sample {
         let received = queued / seconds;
 
         println!(
-            "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>6.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {saving:>6.1}",
+            "{step:>6} {:>6} {refused:>6} {generator_cores:>7.2} {server_cores:>7.2} {:>7.0} {:>8} {:>7} {:>7} {:>6} {:>6.0} {:>7.0} {:>7.0} {:>7.0} {:>7.0} {:>6.1} {saving:>6.1} {:>8} {:>7} {:>7}",
             count(&self.metrics, "viewers"),
             per_second("laps"),
             late.percentile(99),
@@ -499,6 +504,9 @@ impl Sample {
             dropped,
             per_second("sent_packets"),
             per_second("sent_bytes") / 1_000_000.0,
+            wait.percentile(99),
+            forward.percentile(50),
+            forward.percentile(99),
         );
     }
 }

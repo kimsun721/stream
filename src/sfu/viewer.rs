@@ -240,6 +240,7 @@ impl Viewer {
 
             writer.write(pt, data.network_time, data.time, data.data.clone())?;
             metrics::media_write(data.data.len());
+            metrics::forward_delay(data.network_time.elapsed());
         }
         Ok(())
     }

@@ -120,6 +120,8 @@ takes to time out, and measure them too.
 | `tx/s` | Datagrams sent, one `sendto` each |
 | `MB/s` | Outbound bytes |
 | `save%` | Media bytes the relays carried instead of the server |
+| `wait_p99` | How long a datagram sat in a loop's channel after the mux read it, in microseconds |
+| `fwd_p50`, `fwd_p99` | From a frame's first packet reaching its loop to the frame being written for a viewer, in microseconds. Includes waiting for the rest of the frame, not the pacer after it |
 
 ### Reading a run
 

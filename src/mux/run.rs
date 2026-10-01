@@ -6,6 +6,7 @@ use std::{
         Arc,
         mpsc::{Receiver, SyncSender, TrySendError},
     },
+    time::Instant,
 };
 
 use tracing::error;
@@ -45,6 +46,7 @@ pub fn run(
 
         match socket.recv_from(&mut buf) {
             Ok((n, source)) => {
+                let received_at = Instant::now();
                 metrics::socket_read(n);
 
                 if let Some(idx) = shard_routes.get(&source)
@@ -52,14 +54,14 @@ pub fn run(
                 {
                     let data = buf[..n].to_vec();
 
-                    send(&shard.sender, data, source)?;
+                    send(&shard.sender, data, source, received_at)?;
                     continue;
                 }
 
                 for tx in shards.senders() {
                     let data = buf[..n].to_vec();
 
-                    send(tx, data, source)?;
+                    send(tx, data, source, received_at)?;
                 }
             }
 
@@ -73,8 +75,17 @@ pub fn run(
     }
 }
 
-fn send(tx: &SyncSender<SfuMessage>, data: Vec<u8>, source: SocketAddr) -> MuxResult<()> {
-    match tx.try_send(SfuMessage::Datagram { data, source }) {
+fn send(
+    tx: &SyncSender<SfuMessage>,
+    data: Vec<u8>,
+    source: SocketAddr,
+    received_at: Instant,
+) -> MuxResult<()> {
+    match tx.try_send(SfuMessage::Datagram {
+        data,
+        source,
+        received_at,
+    }) {
         Ok(()) => Ok(()),
         Err(TrySendError::Full(_)) => {
             metrics::channel_dropped();
