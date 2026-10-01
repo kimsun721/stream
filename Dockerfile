@@ -16,6 +16,7 @@ RUN mkdir src \
     && cargo build --release --locked \
     && rm -rf src
 
+COPY static ./static
 COPY src ./src
 RUN touch src/main.rs && cargo build --release --locked
 

@@ -290,3 +290,25 @@ impl Drop for Ffmpeg {
         let _ = self.0.wait();
     }
 }
+
+#[tokio::test]
+async fn the_watch_page_is_served() {
+    let server = Server::default();
+
+    let response = reqwest::get(server.sdp_url("/watch"))
+        .await
+        .expect("GET /watch");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let content_type = response.headers()["content-type"]
+        .to_str()
+        .expect("content type")
+        .to_string();
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+
+    let page = response.text().await.expect("page");
+    assert!(
+        page.contains("createDataChannel"),
+        "the page opens its data channel before the offer"
+    );
+}
