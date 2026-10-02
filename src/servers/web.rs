@@ -16,7 +16,7 @@ use axum::{
         request::Parts,
     },
     middleware::{self, Next},
-    response::{IntoResponse, Response, Result},
+    response::{Html, IntoResponse, Response, Result},
     routing,
 };
 use axum_extra::{
@@ -70,6 +70,7 @@ pub async fn run(shards: Arc<Shards>, config: WebConfig) -> anyhow::Result<()> {
     let addr = shards.advertised_addr;
 
     let https_api = Router::new()
+        .route("/watch", routing::get(watch_page))
         .route("/offer", routing::post(sdp_offer))
         .route("/whip", routing::post(whip_sdp_offer))
         .route(
@@ -411,6 +412,11 @@ async fn reissue_stream_key(
             stream_key: stream_key.0,
         }),
     ))
+}
+
+/// A minimal viewer, so the quick start ends at a picture rather than at an API.
+async fn watch_page() -> Html<&'static str> {
+    Html(include_str!("../../static/watch.html"))
 }
 
 async fn sdp_offer(

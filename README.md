@@ -29,27 +29,13 @@ cp config.toml.example config.toml
 cargo run --release
 ```
 
-Create a room:
+In a second terminal:
 
 ```sh
-curl -X POST http://localhost:8080/rooms -H "Authorization: Bearer <API_KEY>"
-# {"room_id":"RM_0_...","stream_key":"SK_..."}
+scripts/local-broadcast.sh
 ```
 
-In OBS 30 or later, open Settings, Stream, and set Service to `WHIP`, Server to `http://localhost:8443/whip`, and Bearer Token to the `stream_key`. Start streaming. The room is now `Preview`: media arrives but nobody is served yet.
-
-Go live:
-
-```sh
-curl -X PATCH http://localhost:8080/rooms/<room_id> \
-  -H "Authorization: Bearer <API_KEY>" \
-  -H "Content-Type: application/json" \
-  -d '{"state":"Live"}'
-```
-
-Viewers can now join with an SDP offer to `/offer`.
-
-<!-- viewer page -->
+The script stands in for your backend. It creates a room and prints what to enter in OBS, under Settings, Stream: Service `WHIP`, the server's `/whip` URL, and the room's stream key as the Bearer Token. Once OBS is publishing, Enter takes the room live and the script prints a link to the viewer page, `http://localhost:8443/watch?room=...`. The page plays the stream and switches between simulcast layers, which needs OBS 32.1 or later with more than one layer.
 
 Everything in `config.toml` has a default, so the file is optional. `.env` holds the one secret; everything else lives in the config file.
 
@@ -104,6 +90,7 @@ HTTPS `:8443`, called by clients directly.
 
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
+| `GET` | `/watch?room={id}` | none | A minimal viewer page |
 | `POST` | `/offer` | none | Viewer joins. SDP offer in, SDP answer out |
 | `POST` | `/whip` | stream key | Publish. `application/sdp` in and out |
 | `DELETE` | `/whip/sessions/{id}` | stream key | End the publishing session |
