@@ -145,7 +145,8 @@ pub fn run(
                         track_in: Rc::downgrade(track),
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
-                        chosen_rid: track.default_rid(),
+                        target_rid: track.default_rid(),
+                        chosen_rid: None,
                     });
                 }
             }

@@ -189,25 +189,6 @@ impl Viewer {
         }
     }
 
-    fn matching_viewer_mid(&self, mid: Mid, rid: Option<Rid>) -> Option<Mid> {
-        self.tracks_out.iter().find_map(|t| {
-            let track_in = t.track_in.upgrade()?;
-            if track_in.mid != mid {
-                return None;
-            };
-
-            if rid != t.chosen_rid {
-                return None;
-            };
-
-            let TrackOutState::Open(viewer_mid) = t.state else {
-                return None;
-            };
-
-            Some(viewer_mid)
-        })
-    }
-
     fn translate_keyframe_request(&self, request: KeyframeRequest) -> Option<KeyframeRequest> {
         self.tracks_out.iter().find_map(|t| {
             if t.state != TrackOutState::Open(request.mid) {
@@ -218,7 +199,7 @@ impl Viewer {
 
             Some(KeyframeRequest {
                 mid: streamer_mid,
-                rid: t.chosen_rid,
+                rid: t.target_rid.or(t.chosen_rid),
                 kind: request.kind,
             })
         })
@@ -226,7 +207,7 @@ impl Viewer {
 
     pub fn handle_media_datas(&mut self, datas: &Vec<MediaData>) -> ClientResult<()> {
         for data in datas {
-            let Some(mid) = self.matching_viewer_mid(data.mid, data.rid) else {
+            let Some((mid, track_out)) = matching_viewer_mid(&mut self.tracks_out, data) else {
                 continue;
             };
 
@@ -239,6 +220,20 @@ impl Viewer {
             };
 
             writer.write(pt, data.network_time, data.time, data.data.clone())?;
+
+            if track_out.promote_target(data)
+                && let Some(rid) = data.rid
+            {
+                let payload = S2cDcPayload::LayerChanged {
+                    rid: rid.to_string(),
+                    mid: mid.to_string(),
+                };
+
+                if let Err(e) = self.peer.send_payload_via_dc(payload) {
+                    error!("send_payload_via_dc failed error: {e}");
+                };
+            }
+
             metrics::media_write(data.data.len());
             metrics::forward_delay(data.network_time.elapsed());
         }
@@ -248,9 +243,9 @@ impl Viewer {
     /// What a leaf would have been sent had its relay not been carrying it. The
     /// same match the fanout applies, because a leaf takes one layer and
     /// counting every frame would inflate the figure by the layer count.
-    pub fn count_relay_saved(&self, datas: &Vec<MediaData>) {
+    pub fn count_relay_saved(&mut self, datas: &Vec<MediaData>) {
         for data in datas {
-            if self.matching_viewer_mid(data.mid, data.rid).is_some() {
+            if matching_viewer_mid(&mut self.tracks_out, data).is_some() {
                 metrics::relay_saved(data.data.len());
             }
         }
@@ -317,7 +312,7 @@ impl Viewer {
 
                 Some(KeyframeRequest {
                     mid: track_in.mid,
-                    rid: to.chosen_rid,
+                    rid: to.target_rid.or(to.chosen_rid),
                     kind: KeyframeRequestKind::Fir,
                 })
             })
@@ -398,7 +393,8 @@ impl Viewer {
                     let payload = S2cDcPayload::LayerStatus {
                         mid: mid.to_string(),
                         available_simulcast_layers,
-                        chosen_layer: track_out.chosen_rid.map(|rid| rid.to_string()),
+                        current_layer: track_out.chosen_rid.map(|rid| rid.to_string()),
+                        target_layer: track_out.target_rid.map(|rid| rid.to_string()),
                         layer_mode: track_out.layer_mode,
                     };
 
@@ -520,10 +516,16 @@ impl Viewer {
         let previous_rid = track_out.chosen_rid;
 
         if previous_rid == Some(rid) {
+            track_out.target_rid = None;
+
             return Ok(());
         };
 
-        track_out.chosen_rid = Some(available_rid);
+        if track_out.target_rid == Some(rid) {
+            return Ok(());
+        }
+
+        track_out.target_rid = Some(available_rid);
 
         info!(
             client_id = %self.id,
@@ -539,15 +541,6 @@ impl Viewer {
             rid: Some(rid),
             kind: str0m::media::KeyframeRequestKind::Fir,
         });
-
-        let payload = S2cDcPayload::LayerChanged {
-            rid: rid.to_string(),
-            mid: mid.to_string(),
-        };
-
-        if let Err(e) = self.peer.send_payload_via_dc(payload) {
-            error!("send_payload_via_dc failed error: {e}");
-        };
 
         Ok(())
     }
@@ -629,6 +622,28 @@ impl DerefMut for Viewers {
     }
 }
 
+fn matching_viewer_mid<'a>(
+    tracks_out: &'a mut [TrackOut],
+    data: &MediaData,
+) -> Option<(Mid, &'a mut TrackOut)> {
+    tracks_out.iter_mut().find_map(|track_out| {
+        let track_in = track_out.track_in.upgrade()?;
+        if track_in.mid != data.mid {
+            return None;
+        };
+
+        let TrackOutState::Open(viewer_mid) = track_out.state else {
+            return None;
+        };
+
+        if !track_out.should_forward(data) {
+            return None;
+        }
+
+        Some((viewer_mid, track_out))
+    })
+}
+
 fn is_layer_threshold_met(bitrate: u128, bitrate_estimate: u64, margin_percent: u128) -> bool {
     let bitrate_estimate = bitrate_estimate as u128;
 
@@ -653,7 +668,7 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
             .max_by_key(|(_, estimate)| estimate)
             .or_else(|| estimates.iter().min_by_key(|(_, estimate)| estimate))
             .and_then(|(rid, estimate)| {
-                let current_rid = track_out.chosen_rid?;
+                let current_rid = track_out.target_rid.or(track_out.chosen_rid)?;
                 let current_layer_estimated_bps = estimates
                     .iter()
                     .find(|(rid, _)| *rid == current_rid)
@@ -682,15 +697,21 @@ fn target_rid_for_bitrate(track_out: &TrackOut, bitrate: u128) -> Option<Rid> {
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, rc::Rc, time::Instant};
+    use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 
     use str0m::{
         Rtc,
         bwe::{Bitrate, BweKind},
-        media::{KeyframeRequest, KeyframeRequestKind, MediaKind, Mid, Rid},
+        format::{Codec, CodecExtra, CodecSpec, FormatParams, H264CodecExtra, PayloadParams},
+        media::{
+            Frequency, KeyframeRequest, KeyframeRequestKind, MediaData, MediaKind, MediaTime, Mid,
+            Pt, Rid,
+        },
+        rtp::SeqNo,
     };
     use uuid::Uuid;
 
+    use super::matching_viewer_mid;
     use crate::types::{
         BitrateEstimator, LayerMode, SimulcastLayer, TrackIn, TrackOut, TrackOutState, Viewer,
     };
@@ -702,6 +723,7 @@ mod tests {
         }
     }
 
+    /// A viewer settled on the low layer, with no switch pending.
     fn viewer_with_track_out() -> (Viewer, Rc<TrackIn>) {
         let mut client = Viewer::new(Rtc::new(Instant::now()), Uuid::new_v4());
 
@@ -724,6 +746,7 @@ mod tests {
             track_in: Rc::downgrade(&track_in),
             state: TrackOutState::Open(viewer_mid),
             chosen_rid: track_in.default_rid(),
+            target_rid: None,
             layer_mode: LayerMode::Auto,
         };
 
@@ -731,21 +754,64 @@ mod tests {
         (client, track_in)
     }
 
+    /// A frame of the streamer's video track. Only the fields the forwarding
+    /// decision reads carry meaning.
+    fn frame(mid: &str, rid: Option<&str>, keyframe: bool) -> MediaData {
+        let pt = Pt::from(96);
+
+        MediaData {
+            mid: Mid::from(mid),
+            pt,
+            rid: rid.map(Rid::from),
+            params: PayloadParams::new(
+                pt,
+                None,
+                CodecSpec {
+                    codec: Codec::H264,
+                    clock_rate: Frequency::NINETY_KHZ,
+                    channels: None,
+                    format: FormatParams::default(),
+                },
+            ),
+            time: MediaTime::new(0, Frequency::NINETY_KHZ),
+            network_time: Instant::now(),
+            seq_range: SeqNo::default()..=SeqNo::default(),
+            contiguous: true,
+            data: Arc::from(Vec::new()),
+            ext_vals: Default::default(),
+            codec_extra: CodecExtra::H264(H264CodecExtra {
+                is_keyframe: keyframe,
+            }),
+            last_sender_info: None,
+            audio_start_of_talk_spurt: false,
+        }
+    }
+
+    fn forwarded_to(client: &mut Viewer, data: &MediaData) -> Option<Mid> {
+        matching_viewer_mid(&mut client.tracks_out, data).map(|(mid, _)| mid)
+    }
+
+    /// What `handle_media_datas` does around the write, without a peer to write
+    /// to: the decision, then the commit a successful write would make.
+    fn deliver(client: &mut Viewer, data: &MediaData) -> Option<bool> {
+        matching_viewer_mid(&mut client.tracks_out, data)
+            .map(|(_, track_out)| track_out.promote_target(data))
+    }
+
     #[test]
-    fn set_layer_updates_chosen_rid_and_requests_keyframe() {
+    fn set_layer_records_a_target_and_requests_its_keyframe() {
         let (mut client, _track_in) = viewer_with_track_out();
         let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
-        let viewer_mid = Mid::from("viewer-video");
-        let streamer_mid = Mid::from("streamer-video");
         let high_rid = Rid::from("h");
 
         client
-            .set_layer(viewer_mid, high_rid, &mut keyframe_requests)
+            .set_layer(Mid::from("viewer-video"), high_rid, &mut keyframe_requests)
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(high_rid));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(high_rid));
         assert_eq!(keyframe_requests.len(), 1);
-        assert_eq!(keyframe_requests[0].mid, streamer_mid);
+        assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(high_rid));
     }
 
@@ -763,6 +829,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
         assert!(keyframe_requests.is_empty());
     }
 
@@ -780,6 +847,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
         assert!(keyframe_requests.is_empty());
     }
 
@@ -797,7 +865,49 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
         assert!(keyframe_requests.is_empty());
+    }
+
+    #[test]
+    fn set_layer_back_to_the_current_layer_cancels_the_switch() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+        let viewer_mid = Mid::from("viewer-video");
+
+        client
+            .set_layer(viewer_mid, Rid::from("h"), &mut keyframe_requests)
+            .unwrap();
+        client
+            .set_layer(viewer_mid, Rid::from("l"), &mut keyframe_requests)
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
+
+        // The high keyframe the cancelled switch asked for no longer moves it.
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("h"), true)),
+            None
+        );
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+    }
+
+    #[test]
+    fn set_layer_to_the_pending_target_asks_once() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        let mut keyframe_requests: Vec<KeyframeRequest> = Vec::new();
+        let viewer_mid = Mid::from("viewer-video");
+
+        client
+            .set_layer(viewer_mid, Rid::from("h"), &mut keyframe_requests)
+            .unwrap();
+        client
+            .set_layer(viewer_mid, Rid::from("h"), &mut keyframe_requests)
+            .unwrap();
+
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("h")));
+        assert_eq!(keyframe_requests.len(), 1);
     }
 
     #[test]
@@ -818,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn bwe_switches_layer_in_auto_mode() {
+    fn bwe_targets_a_higher_layer_in_auto_mode() {
         let (mut client, _track_in) = viewer_with_track_out();
         let mut keyframe_requests = Vec::new();
 
@@ -829,7 +939,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("h")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
@@ -862,6 +973,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
         assert!(keyframe_requests.is_empty());
     }
 
@@ -884,7 +996,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
         assert!(keyframe_requests.is_empty());
 
         client
@@ -895,7 +1007,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("h")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].mid, Mid::from("streamer-video"));
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("h")));
@@ -914,38 +1027,120 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("l")));
         assert_eq!(keyframe_requests.len(), 1);
         assert_eq!(keyframe_requests[0].rid, Some(Rid::from("l")));
     }
 
     #[test]
     fn media_routed_only_when_rid_matches_chosen() {
-        let (client, _track_in) = viewer_with_track_out();
-        let streamer_mid = Mid::from("streamer-video");
+        let (mut client, _track_in) = viewer_with_track_out();
         let viewer_mid = Mid::from("viewer-video");
 
         let cases = [
-            (Some(Rid::from("l")), Some(viewer_mid)),
-            (Some(Rid::from("h")), None),
+            (Some("l"), Some(viewer_mid)),
+            (Some("h"), None),
             (None, None),
         ];
 
         for (incoming_rid, expected) in cases {
-            let viewer_mid = client.matching_viewer_mid(streamer_mid, incoming_rid);
+            let data = frame("streamer-video", incoming_rid, false);
 
-            assert_eq!(viewer_mid, expected, "incoming rid {incoming_rid:?}",);
+            assert_eq!(
+                forwarded_to(&mut client, &data),
+                expected,
+                "incoming rid {incoming_rid:?}"
+            );
         }
     }
 
     #[test]
     fn media_dropped_for_unknown_mid() {
-        let (client, _track_in) = viewer_with_track_out();
+        let (mut client, _track_in) = viewer_with_track_out();
 
-        let viewer_mid =
-            client.matching_viewer_mid(Mid::from("unknown-video"), Some(Rid::from("l")));
+        let data = frame("unknown-video", Some("l"), true);
 
-        assert_eq!(viewer_mid, None);
+        assert_eq!(forwarded_to(&mut client, &data), None);
+    }
+
+    #[test]
+    fn a_delta_frame_of_the_target_does_not_switch() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        client.tracks_out[0].target_rid = Some(Rid::from("h"));
+
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("h"), false)),
+            None,
+            "a delta frame of the target is not forwarded"
+        );
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("l"), false)),
+            Some(false),
+            "the current layer keeps flowing"
+        );
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("h")));
+    }
+
+    #[test]
+    fn a_keyframe_of_another_layer_does_not_switch() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        client.tracks_out[0].target_rid = Some(Rid::from("m"));
+
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("l"), true)),
+            Some(false),
+            "a keyframe of the current layer is forwarded but switches nothing"
+        );
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("h"), true)),
+            None,
+            "a keyframe of a third layer is not forwarded"
+        );
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
+        assert_eq!(client.tracks_out[0].target_rid, Some(Rid::from("m")));
+    }
+
+    #[test]
+    fn a_keyframe_of_the_target_switches() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        client.tracks_out[0].target_rid = Some(Rid::from("h"));
+
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("h"), true)),
+            Some(true),
+            "the keyframe is forwarded as the first frame of the new layer"
+        );
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("h")));
+        assert_eq!(client.tracks_out[0].target_rid, None);
+
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("h"), false)),
+            Some(false)
+        );
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("l"), false)),
+            None,
+            "the old layer stops"
+        );
+    }
+
+    #[test]
+    fn a_new_viewer_starts_on_a_keyframe() {
+        let (mut client, track_in) = viewer_with_track_out();
+        client.tracks_out[0].chosen_rid = None;
+        client.tracks_out[0].target_rid = track_in.default_rid();
+
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("l"), false)),
+            None
+        );
+        assert_eq!(
+            deliver(&mut client, &frame("streamer-video", Some("l"), true)),
+            Some(true)
+        );
+        assert_eq!(client.tracks_out[0].chosen_rid, Some(Rid::from("l")));
     }
 
     #[test]
@@ -963,6 +1158,22 @@ mod tests {
         assert_eq!(translated.mid, Mid::from("streamer-video"));
         assert_eq!(translated.rid, Some(Rid::from("l")));
         assert_eq!(translated.kind, KeyframeRequestKind::Pli);
+    }
+
+    #[test]
+    fn keyframe_request_asks_for_the_pending_target() {
+        let (mut client, _track_in) = viewer_with_track_out();
+        client.tracks_out[0].target_rid = Some(Rid::from("h"));
+
+        let translated = client
+            .translate_keyframe_request(KeyframeRequest {
+                mid: Mid::from("viewer-video"),
+                rid: None,
+                kind: KeyframeRequestKind::Pli,
+            })
+            .expect("request should map to the streamer track");
+
+        assert_eq!(translated.rid, Some(Rid::from("h")));
     }
 
     #[test]

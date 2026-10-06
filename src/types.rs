@@ -146,6 +146,7 @@ pub struct TrackOut {
     pub track_in: Weak<TrackIn>,
     pub state: TrackOutState,
     pub chosen_rid: Option<Rid>,
+    pub target_rid: Option<Rid>,
     pub layer_mode: LayerMode,
 }
 
@@ -288,7 +289,8 @@ pub enum S2cDcPayload {
     LayerStatus {
         mid: String,
         available_simulcast_layers: Vec<AvailableSimulcastLayer>,
-        chosen_layer: Option<String>,
+        current_layer: Option<String>,
+        target_layer: Option<String>,
         layer_mode: LayerMode,
     },
 }
@@ -378,6 +380,27 @@ impl TrackIn {
             .iter()
             .filter_map(|layer| layer.estimate_bps())
             .max()
+    }
+}
+
+impl TrackOut {
+    pub fn should_forward(&self, data: &MediaData) -> bool {
+        if data.is_keyframe() && self.target_rid == data.rid {
+            true
+        } else {
+            self.chosen_rid == data.rid
+        }
+    }
+
+    pub fn promote_target(&mut self, data: &MediaData) -> bool {
+        if data.is_keyframe() && data.rid == self.target_rid {
+            self.chosen_rid = self.target_rid;
+            self.target_rid = None;
+
+            true
+        } else {
+            false
+        }
     }
 }
 
