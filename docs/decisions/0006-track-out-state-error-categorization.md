@@ -6,7 +6,7 @@ Accepted (2026-04-29)
 
 ## Context
 
-`TrackOut`'s state machine is `ToOpen → Negotiating(mid) → Open(mid)`. The original renegotiation flow flipped state to `Negotiating` **before** sending the SDP offer over the DataChannel. If the DC write failed, state was stuck in `Negotiating` with no rollback — subsequent retries skipped the track, deadlocking it.
+`TrackOut`'s state machine is `ToOpen → Negotiating(mid) → Open(mid)`. The original renegotiation flow flipped state to `Negotiating` **before** sending the SDP offer over the DataChannel. If the DC write failed, state was stuck in `Negotiating` with no rollback, so subsequent retries skipped the track, deadlocking it.
 
 ## Decision
 

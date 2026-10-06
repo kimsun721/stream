@@ -7,7 +7,7 @@ P-1 to P-3 are shipped. P-2's manual trigger was removed when P-3 landed. P-4 is
 ## Phases
 
 - **P-1. Perf reporting.** Viewer sends `perf_report` over DC; server logs. No promotion.
-- **P-2. Manual promotion.** Single relay, single leaf — validate the path.
+- **P-2. Manual promotion.** Single relay, single leaf, to validate the path.
 - **P-3. Automatic promotion.** Server promotes by perf thresholds. Fallback under failure. Policy: [ADR 0009](../decisions/0009-auto-promote-demote-policy.md).
 - **P-4. Multi-leaf per relay.**
 

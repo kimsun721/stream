@@ -6,11 +6,11 @@ Accepted (2026-05-11)
 
 ## Context
 
-After [ADR 0001](0001-actor-pattern.md), HTTP handlers wait for SFU replies on `mpsc::sync_channel<Option<T>>` via `recv()` — a **blocking** call — inside an `async fn`.
+After [ADR 0001](0001-actor-pattern.md), HTTP handlers wait for SFU replies on `mpsc::sync_channel<Option<T>>` via `recv()`, a **blocking** call, inside an `async fn`.
 
 Two latency problems:
 
-1. **Wall-clock.** If a message arrives mid-iteration, it waits for the SFU loop to return to message processing — worst case ≈ one full SFU tick.
+1. **Wall-clock.** If a message arrives mid-iteration, it waits for the SFU loop to return to message processing, worst case ≈ one full SFU tick.
 2. **Tokio worker.** `std::sync::mpsc::recv()` blocks the OS thread, not just the task. Enough concurrent waiting handlers can starve unrelated requests.
 
 ## Decision

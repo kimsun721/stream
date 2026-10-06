@@ -1,4 +1,4 @@
-# 0001. Actor pattern — single-thread ownership of `Rooms`
+# 0001. Actor pattern: single-thread ownership of `Rooms`
 
 ## Status
 
@@ -8,7 +8,7 @@ Accepted (2026-05-11)
 
 `Rooms` was `Arc<Mutex<HashMap<u64, Room>>>`, shared between the SFU thread and HTTP handlers.
 
-The SFU thread is a timeout-driven polling loop that iterates every room and every client on each tick — it holds the lock effectively 100% of the time. HTTP handlers were starved. The pattern also fights `str0m`, which is sans-IO and designed for single-thread ownership per `Rtc`.
+The SFU thread is a timeout-driven polling loop that iterates every room and every client on each tick, so it holds the lock effectively 100% of the time. HTTP handlers were starved. The pattern also fights `str0m`, which is sans-IO and designed for single-thread ownership per `Rtc`.
 
 ## Decision
 

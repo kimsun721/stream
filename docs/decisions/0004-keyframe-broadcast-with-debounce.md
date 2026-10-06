@@ -6,7 +6,7 @@ Accepted (2026-04-21)
 
 ## Context
 
-A viewer's PLI/FIR arrives as `Event::KeyframeRequest` on **that viewer's** `Rtc`. The server forwards it to the streamer. The streamer's keyframe is then forwarded to every viewer in the room — there is no per-viewer keyframe in the SFU forwarding model.
+A viewer's PLI/FIR arrives as `Event::KeyframeRequest` on **that viewer's** `Rtc`. The server forwards it to the streamer. The streamer's keyframe is then forwarded to every viewer in the room. There is no per-viewer keyframe in the SFU forwarding model.
 
 Identifying the originator to deliver only to them would require per-viewer in-flight state and outbound RTP gating. Significant complexity for marginal benefit.
 
@@ -29,4 +29,4 @@ Throttle to **one outbound keyframe request per `(track, kind)` per 1 second**, 
 
 ## Notes
 
-With simulcast, this should narrow to per `(track, kind, rid)` — only viewers consuming that rid need the keyframe.
+With simulcast, this should narrow to per `(track, kind, rid)`, since only viewers consuming that rid need the keyframe.
