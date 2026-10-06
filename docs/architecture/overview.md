@@ -37,7 +37,7 @@ Browser ──RTP/RTCP──▶ mux ──▶ media loop ──UDP──▶ Brow
                        └───────────┘ address owners
 ```
 
-Media is forwarded per room: a streamer's RTP fans out to every viewer in the same room, and a viewer promoted to relay forwards it to one other viewer over a peer link.
+Media is forwarded per room: a streamer's RTP fans out to every viewer in the same room, and a viewer promoted to relay forwards it to one other viewer over a peer link. A viewer is sent one simulcast layer per track, and changes layer on a keyframe of the new one.
 
 ## Placement and routing
 
@@ -83,4 +83,4 @@ The client opens a DataChannel **before** `createOffer`, so the DC is part of th
 - HTTP handlers block on `recv()` while a loop works through its rooms. Deferred, see [ADR 0007](../decisions/0007-defer-sync-mpsc-recv-blocking.md).
 - A room lives on one loop, so one room is bounded by one core. [#73](https://github.com/kimsun721/stream/issues/73) places clients instead.
 - One process.
-- Keyframe requests fan out to all viewers in the room. See [ADR 0004](../decisions/0004-keyframe-broadcast-with-debounce.md).
+- A keyframe requested by one viewer goes to every viewer on that layer. See [ADR 0004](../decisions/0004-keyframe-broadcast-with-debounce.md).

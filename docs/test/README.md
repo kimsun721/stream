@@ -7,8 +7,8 @@ exercises the same paths a browser would.
 ## Running
 
 ```text
-cargo test                          unit and integration
-cargo test -- --include-ignored     adds the tests that need ffmpeg installed
+cargo test                                        unit and integration
+cargo test --test viewer -- --include-ignored     adds the test that needs ffmpeg installed
 ```
 
 The load run is separate and is described below.
@@ -17,9 +17,9 @@ The load run is separate and is described below.
 
 | File | Covers |
 | --- | --- |
-| `tests/viewer.rs` | Connecting, receiving media, layer advertisement, manual and automatic layer selection |
+| `tests/viewer.rs` | Connecting, receiving media, layer advertisement, manual and automatic layer selection, the watch page |
 | `tests/room_lifecycle.rs` | Ending a WHIP session, going idle, refusing viewers before a room is live |
-| `tests/control_api.rs` | API key, stream key, content type, duplicate streamer, key reissue, missing rooms |
+| `tests/control_api.rs` | API key, stream key, content type, duplicate streamer, key reissue, missing rooms, the metrics endpoints |
 | `tests/relay.rs` | Relay promotion, the upload cutoff, leaf gating, the peer link timeout |
 | `tests/load.rs` | The load baseline. Ignored by default |
 
@@ -48,6 +48,11 @@ forwards frames without decoding them and sizes a layer by byte count alone, so
 bytes of the right length are indistinguishable from an encoder's. This is what
 makes layer estimates, egress bandwidth estimates and relay savings measurable
 at all, none of which the SDP alone can produce.
+
+The one thing the server reads from a frame is whether it is a keyframe, since a
+viewer changes layer only on one. Every frame the publisher writes is marked as
+a keyframe, so a switch lands on the next frame. The wait for a keyframe is
+covered by unit tests instead.
 
 **Relay clients answer the protocol on their own.** A peer replies to an upload
 probe and to a peer to peer offer without the test arranging it. Declaring the

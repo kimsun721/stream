@@ -49,7 +49,7 @@ streamer ──WebRTC──▶ SFU ─┬─WebRTC──▶ viewer (legacy 브�
 ## 관련 결정
 
 - [ADR 0003](../decisions/0003-receive-simulcast-layers-from-streamer.md) — simulcast는 WebTransport 분기에서도 layer 선택 로직 재활용 가능. layer를 raw bytes로 어떻게 컨테이너화할지가 추가 결정 포인트.
-- P2P relay ([p2p-relay.md](p2p-relay.md)) — WebRTC viewer끼리만 P2P 가능. WebTransport viewer는 server fan-out 그대로 받음. 그래서 도입해도 P2P 보완재이지 대체재 아님.
+- P2P relay ([p2p-relay.md](../feature/p2p-relay.md)) — WebRTC viewer끼리만 P2P 가능. WebTransport viewer는 server fan-out 그대로 받음. 그래서 도입해도 P2P 보완재이지 대체재 아님.
 
 ## 메모
 
