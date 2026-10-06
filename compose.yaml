@@ -13,8 +13,9 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       # Create the files before uncommenting, or Docker makes directories.
-      - ./config.toml:/app/config.toml:ro
-      - ./certs:/app/certs:ro
+      # - ./config.toml:/app/config.toml:ro
+      # - ./certs:/app/certs:ro
+      []
 
 
   # docker compose --profile observability up
