@@ -88,8 +88,23 @@
   .controls .label { color: var(--muted); margin-right: 4px; }
   #layers { display: flex; flex-wrap: wrap; gap: 6px; }
   #sound { margin-left: auto; }
+  #debug { background: none; border-color: transparent; color: var(--muted); }
+  #debug:hover { border-color: var(--line); }
+  #debug[aria-pressed="true"] { background: none; border-color: var(--line); color: var(--ink); }
 
   #status { margin: 0; color: var(--muted); }
+
+  #log {
+    margin: 0;
+    max-height: 260px;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    font: 12px/1.6 var(--mono);
+    white-space: pre-wrap;
+  }
 </style>
 </head>
 <body>
@@ -109,9 +124,11 @@
     <span class="label">Layer</span>
     <div id="layers"></div>
     <button id="sound" type="button">Unmute</button>
+    <button id="debug" type="button" aria-pressed="false">Debug</button>
   </div>
 
   <p id="status">Enter a room id to watch.</p>
+  <pre id="log" hidden></pre>
 </main>
 
 <script>
@@ -125,8 +142,49 @@
   // once a keyframe of that layer arrives.
   const layer = { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false };
 
+  // Debug mode logs every switch, every freeze the browser counts and every
+  // jump in the RTP timestamp, to check playback against a real publisher.
+  let debug = false;
+  let probe = null;
+  let asked = null;
+  let lastFreezes = { count: 0, seconds: 0, lost: 0, dropped: 0 };
+  let lastSource = null;
+
   function setStatus(text) {
     $("status").textContent = text;
+  }
+
+  function clockText(now) {
+    const pad = (n, width = 2) => String(n).padStart(width, "0");
+    return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
+  }
+
+  function note(text) {
+    if (!debug) return;
+    const log = $("log");
+    log.textContent += `${clockText(new Date())}  ${text}\n`;
+    log.scrollTop = log.scrollHeight;
+  }
+
+  // Layers are separate RTP streams, so a switch can move the timestamp by far
+  // more than the time that passed. Read from the receiver, not from drawn
+  // frames: a browser draws a window nobody can see about once a second.
+  function probeTimestamp() {
+    const receiver = pc && pc.getReceivers().find((r) => r.track && r.track.kind === "video");
+    const source = receiver && receiver.getSynchronizationSources().sort((a, b) => b.timestamp - a.timestamp)[0];
+    if (!source || source.rtpTimestamp === undefined) return;
+
+    if (!lastSource) {
+      note("reading RTP timestamps");
+    } else if (source.timestamp !== lastSource.timestamp) {
+      const step = (((source.rtpTimestamp - lastSource.rtpTimestamp + 2 ** 31) % 2 ** 32) + 2 ** 32) % 2 ** 32 - 2 ** 31;
+      const ahead = step / 90 - (source.timestamp - lastSource.timestamp);
+      if (Math.abs(ahead) > 1000) {
+        note(`RTP timestamp jumped ${Math.round(Math.abs(ahead) / 1000)} s ${ahead > 0 ? "forward" : "back"}`);
+      }
+    }
+
+    lastSource = { timestamp: source.timestamp, rtpTimestamp: source.rtpTimestamp };
   }
 
   function send(message) {
@@ -150,8 +208,13 @@
     if (pc) pc.close();
     Object.assign(layer, { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false });
     lastStats = null;
+    asked = null;
+    lastFreezes = { count: 0, seconds: 0, lost: 0, dropped: 0 };
+    lastSource = null;
     renderLayers();
-    history.replaceState(null, "", `?room=${encodeURIComponent(room)}`);
+    const query = new URLSearchParams(location.search);
+    query.set("room", room);
+    history.replaceState(null, "", `?${query}`);
     setStatus("Connecting...");
 
     pc = new RTCPeerConnection();
@@ -219,6 +282,12 @@
 
       case "layer_changed":
         if (message.mid === layer.mid) {
+          if (asked && asked.rid === message.rid) {
+            note(`switched ${layer.current} to ${message.rid}, ${Math.round(performance.now() - asked.at)} ms after asking`);
+            asked = null;
+          } else {
+            note(layer.current ? `switched ${layer.current} to ${message.rid}` : `started on ${message.rid}`);
+          }
           layer.current = message.rid;
           // In automatic mode the server retargets without saying so, which
           // leaves the target heard earlier stale. A switch always settles it.
@@ -239,8 +308,12 @@
 
     if (rid === null) {
       layer.mode = "auto";
+      asked = null;
+      note("asked for auto");
       send({ type: "set_layer_mode", mid: layer.mid, layer_mode: "auto" });
     } else {
+      asked = rid === layer.current ? null : { rid, at: performance.now() };
+      note(`asked for ${rid}`);
       if (layer.mode !== "manual") {
         layer.mode = "manual";
         send({ type: "set_layer_mode", mid: layer.mid, layer_mode: "manual" });
@@ -287,12 +360,30 @@
 
     const video = $("video");
     let line = video.videoWidth ? `${video.videoWidth}x${video.videoHeight}` : "no video";
+    let freezes = "";
     const report = await pc.getStats();
 
     report.forEach((entry) => {
       if (entry.type !== "inbound-rtp" || entry.kind !== "video") return;
 
       if (entry.framesPerSecond) line += `  ${Math.round(entry.framesPerSecond)} fps`;
+
+      const now = {
+        count: entry.freezeCount ?? 0,
+        seconds: entry.totalFreezesDuration ?? 0,
+        lost: entry.packetsLost ?? 0,
+        dropped: entry.framesDropped ?? 0,
+      };
+      if (debug) freezes = `\nfreezes ${now.count}, ${now.seconds.toFixed(1)} s`;
+      // Loss points at the network or the sender, drops at this browser, and
+      // neither at frames that simply arrived late.
+      if (now.count > lastFreezes.count) {
+        const ms = Math.round((now.seconds - lastFreezes.seconds) * 1000);
+        const times = now.count - lastFreezes.count;
+        const froze = times === 1 ? `froze ${ms} ms` : `froze ${times} times, ${ms} ms in all`;
+        note(`${froze}, ${now.lost - lastFreezes.lost} packets lost, ${now.dropped - lastFreezes.dropped} frames dropped`);
+      }
+      lastFreezes = now;
 
       if (lastStats) {
         const seconds = (entry.timestamp - lastStats.timestamp) / 1000;
@@ -304,14 +395,12 @@
 
     if (layer.current) line += `\nlayer ${layer.current}, ${layer.mode}`;
     if (layer.target) line += `\nwaiting for a keyframe of ${layer.target}`;
+    line += freezes;
     $("stats").textContent = line;
   }
 
   function tick() {
-    const now = new Date();
-    const pad = (n, width = 2) => String(n).padStart(width, "0");
-    $("clock").textContent =
-      `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
+    $("clock").textContent = clockText(new Date());
     requestAnimationFrame(tick);
   }
 
@@ -325,6 +414,36 @@
     video.muted = !video.muted;
     $("sound").textContent = video.muted ? "Unmute" : "Mute";
   };
+
+  // The address keeps the choice, so a reload or a shared link stays in debug.
+  function setDebug(on) {
+    debug = on;
+    $("debug").setAttribute("aria-pressed", on);
+    $("log").hidden = !on;
+
+    clearInterval(probe);
+    lastSource = null;
+    if (on) probe = setInterval(probeTimestamp, 250);
+
+    const query = new URLSearchParams(location.search);
+    if (on) query.set("debug", "");
+    else query.delete("debug");
+    history.replaceState(null, "", query.size ? `?${query}` : location.pathname);
+  }
+
+  $("debug").onclick = () => setDebug(!debug);
+
+  let size = "";
+  $("video").addEventListener("resize", () => {
+    const now = `${$("video").videoWidth}x${$("video").videoHeight}`;
+    if (now !== size) note(`picture is now ${now}`);
+    size = now;
+  });
+  document.addEventListener("visibilitychange", () => note(document.hidden ? "page hidden" : "page visible"));
+  window.addEventListener("blur", () => note("window lost focus"));
+  window.addEventListener("focus", () => note("window focused"));
+
+  setDebug(new URLSearchParams(location.search).has("debug"));
 
   renderLayers();
   setInterval(readStats, 1000);
