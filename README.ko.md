@@ -4,7 +4,7 @@
 
 [English](README.md) | 한국어
 
-Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트리밍용 WebRTC SFU입니다. 송출자는 OBS나 브라우저에서 WHIP으로 방송을 올립니다. 시청자는 대역폭 추정치에 맞는 simulcast 레이어를 받고, 업로드 여유가 있는 시청자는 다른 시청자에게 P2P로 스트림을 중계해 서버 부하를 덜어줍니다.
+Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트리밍용 WebRTC SFU입니다. 송출자는 OBS에서 WHIP으로 방송을 올립니다. 시청자는 대역폭 추정치에 맞는 simulcast 레이어를 받고, 업로드 여유가 있는 시청자는 다른 시청자에게 P2P로 스트림을 중계해 서버 부하를 덜어줍니다.
 
 <!-- demo GIF -->
 
@@ -95,7 +95,7 @@ HTTPS `:8443`, 클라이언트가 직접 호출합니다.
 | `POST` | `/whip` | 스트림 키 | 송출. `application/sdp`로 주고받음 |
 | `DELETE` | `/whip/sessions/{id}` | 스트림 키 | 송출 세션 종료 |
 
-`/whip`은 OBS와 브라우저 모두에서 동작합니다.
+`/whip`은 OBS로 검증했습니다. 브라우저를 포함한 다른 WHIP 클라이언트도 송출할 수 있지만, 키프레임을 주기적으로 보내는 것은 송출자의 책임입니다. 시청자의 레이어 전환은 새 레이어의 키프레임에서 일어나고, 서버는 그 키프레임을 한 번만 요청합니다.
 
 ## 방 상태
 

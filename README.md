@@ -4,7 +4,7 @@
 
 English | [한국어](README.ko.md)
 
-A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP, from OBS or a browser. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
+A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP from OBS. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
 
 <!-- demo GIF -->
 
@@ -95,7 +95,7 @@ HTTPS `:8443`, called by clients directly.
 | `POST` | `/whip` | stream key | Publish. `application/sdp` in and out |
 | `DELETE` | `/whip/sessions/{id}` | stream key | End the publishing session |
 
-`/whip` works from OBS and from a browser alike.
+`/whip` is tested with OBS. Another WHIP client, a browser included, can publish as well, but sending keyframes on an interval is its job: a viewer changes layer on a keyframe of the new layer, and the server asks for that keyframe once.
 
 ## Room State
 
