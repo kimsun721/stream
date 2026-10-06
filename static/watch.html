@@ -59,6 +59,7 @@
   button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #0b0d0e; }
   button.picked { border-color: var(--accent); }
+  button.pending { border-color: var(--accent); border-style: dashed; }
 
   .stage {
     position: relative;
@@ -120,7 +121,9 @@
   let channel = null;
   let messages = Promise.resolve();
   let lastStats = null;
-  const layer = { mid: null, rids: [], chosen: null, mode: "auto", heard: false };
+  // `current` is what the server is sending. `target` is what it will switch to
+  // once a keyframe of that layer arrives.
+  const layer = { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false };
 
   function setStatus(text) {
     $("status").textContent = text;
@@ -145,7 +148,7 @@
 
   async function watch(room) {
     if (pc) pc.close();
-    Object.assign(layer, { mid: null, rids: [], chosen: null, mode: "auto", heard: false });
+    Object.assign(layer, { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false });
     lastStats = null;
     renderLayers();
     history.replaceState(null, "", `?room=${encodeURIComponent(room)}`);
@@ -207,7 +210,8 @@
         if (message.available_simulcast_layers.length > 0) {
           layer.mid = message.mid;
           layer.rids = message.available_simulcast_layers;
-          layer.chosen = message.chosen_layer;
+          layer.current = message.current_layer;
+          layer.target = message.target_layer;
           layer.mode = message.layer_mode;
         }
         renderLayers();
@@ -215,7 +219,10 @@
 
       case "layer_changed":
         if (message.mid === layer.mid) {
-          layer.chosen = message.rid;
+          layer.current = message.rid;
+          // In automatic mode the server retargets without saying so, which
+          // leaves the target heard earlier stale. A switch always settles it.
+          if (layer.mode === "auto" || layer.target === message.rid) layer.target = null;
           renderLayers();
         }
         break;
@@ -239,6 +246,7 @@
         send({ type: "set_layer_mode", mid: layer.mid, layer_mode: "manual" });
       }
       send({ type: "set_layer", mid: layer.mid, rid });
+      layer.target = rid === layer.current ? null : rid;
     }
 
     renderLayers();
@@ -266,8 +274,9 @@
       button.textContent = bitrate_estimate
         ? `${rid}  ${Math.round(bitrate_estimate / 1000)} kbps`
         : rid;
-      button.setAttribute("aria-pressed", layer.mode === "manual" && layer.chosen === rid);
-      button.classList.toggle("picked", layer.mode === "auto" && layer.chosen === rid);
+      button.setAttribute("aria-pressed", layer.mode === "manual" && layer.current === rid);
+      button.classList.toggle("picked", layer.mode === "auto" && layer.current === rid);
+      button.classList.toggle("pending", layer.target === rid);
       button.onclick = () => choose(rid);
       box.append(button);
     }
@@ -293,7 +302,8 @@
       lastStats = { timestamp: entry.timestamp, bytesReceived: entry.bytesReceived };
     });
 
-    if (layer.chosen) line += `\nlayer ${layer.chosen}, ${layer.mode}`;
+    if (layer.current) line += `\nlayer ${layer.current}, ${layer.mode}`;
+    if (layer.target) line += `\nwaiting for a keyframe of ${layer.target}`;
     $("stats").textContent = line;
   }
 

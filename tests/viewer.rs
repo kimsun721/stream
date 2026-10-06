@@ -66,8 +66,18 @@ async fn viewer_is_told_which_layers_exist() {
     assert_eq!(rids, ["l", "m", "h"], "advertised layers");
     assert_eq!(status["layer_mode"], "auto", "viewers start in auto");
     assert!(
-        !status["chosen_layer"].is_null(),
-        "a layer is already chosen"
+        status["current_layer"].is_null(),
+        "nothing is sent before a keyframe"
+    );
+    assert!(
+        !status["target_layer"].is_null(),
+        "a layer is already targeted"
+    );
+
+    let started = wait_for(&mut viewer, "layer_changed").expect("playback never started");
+    assert!(
+        rids.contains(&started["rid"].as_str().expect("starting layer")),
+        "playback starts on an advertised layer once its keyframe arrives"
     );
 
     drop(room);
@@ -82,7 +92,11 @@ async fn viewer_switches_layers_by_hand() {
 
     let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
     let mid = status["mid"].clone();
-    let chosen = status["chosen_layer"].as_str().expect("chosen layer");
+
+    // Nothing is sent until a keyframe, so the layer in use is only known once
+    // playback starts.
+    let started = wait_for(&mut viewer, "layer_changed").expect("playback never started");
+    let current = started["rid"].as_str().expect("starting layer").to_string();
 
     // Auto owns the choice until the viewer takes it, so a set_layer in auto
     // mode is ignored.
@@ -90,14 +104,21 @@ async fn viewer_switches_layers_by_hand() {
 
     let target = ["l", "m", "h"]
         .into_iter()
-        .find(|rid| *rid != chosen)
+        .find(|rid| *rid != current)
         .expect("another layer");
 
     viewer.send(&json!({ "type": "set_layer", "mid": mid, "rid": target }));
 
-    let changed = wait_for(&mut viewer, "layer_changed").expect("no layer_changed arrived");
+    // Auto may have had a switch of its own in flight before manual took over,
+    // so this waits for the requested layer rather than for the next change.
+    let mut reached = false;
+    viewer.run_until(REACT, |event| {
+        reached =
+            dc_message(event, "layer_changed").is_some_and(|changed| changed["rid"] == target);
+        reached
+    });
 
-    assert_eq!(changed["rid"], target, "switched to the requested layer");
+    assert!(reached, "never switched to the requested layer");
 
     drop(room);
 }
@@ -195,11 +216,13 @@ async fn auto_mode_moves_a_viewer_up_to_the_layer_its_bandwidth_allows() {
 
     let status = wait_for(&mut viewer, "layer_status").expect("no layer_status arrived");
     assert_eq!(status["layer_mode"], "auto", "viewers start in auto");
-    assert_eq!(status["chosen_layer"], "l", "and on the default layer");
+    assert_eq!(status["target_layer"], "l", "aiming at the default layer");
 
+    // The first change is playback starting on that layer. The move worth
+    // asserting on is the one away from it.
     let mut changed = None;
     viewer.run_until(Duration::from_secs(15), |event| {
-        changed = dc_message(event, "layer_changed");
+        changed = dc_message(event, "layer_changed").filter(|changed| changed["rid"] != "l");
         changed.is_some()
     });
 
@@ -227,6 +250,11 @@ async fn live_simulcast(
         publisher.run_until(CONNECT, is_connected),
         "publisher connect"
     );
+
+    // A viewer is sent nothing until a keyframe of its layer arrives, so the
+    // layers have to carry media for playback to start at all.
+    let rates: Vec<(&str, u32)> = rids.iter().copied().zip([300, 800, 2500]).collect();
+    publisher.start_media(&rates);
 
     server.set_live(client, &room.room_id).await;
 

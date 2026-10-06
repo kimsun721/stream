@@ -257,7 +257,8 @@ impl Room {
                         track_in,
                         state: TrackOutState::ToOpen,
                         layer_mode: LayerMode::Auto,
-                        chosen_rid: default_rid,
+                        chosen_rid: None,
+                        target_rid: default_rid,
                     });
                 }
 
