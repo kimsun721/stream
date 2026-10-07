@@ -6,7 +6,9 @@ English | [한국어](README.ko.md)
 
 A WebRTC SFU for live streaming, written in Rust on [str0m](https://github.com/algesten/str0m). Publishers push over WHIP from OBS. Viewers get the simulcast layer their bandwidth estimate allows, and viewers with upload to spare relay the stream to each other over a peer link, taking load off the server.
 
-<!-- demo GIF -->
+![The watch page playing an OBS broadcast and switching simulcast layers](docs/assets/demo.webp)
+
+The watch page playing an OBS broadcast. It starts in automatic mode, then the viewer switches to the lowest simulcast layer and back to the highest.
 
 ## Measured
 

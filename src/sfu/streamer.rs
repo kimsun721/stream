@@ -8,7 +8,9 @@ use std::{
 
 use str0m::{
     Event, IceConnectionState, Rtc,
+    format::Codec,
     media::{KeyframeRequest, MediaKind, Mid, Rid},
+    unversioned::{H264Packetizer, Packetizer},
 };
 use uuid::Uuid;
 
@@ -20,6 +22,8 @@ use crate::{
         StreamerEffects, TickResult, TrackIn, TrackInEntry,
     },
 };
+
+const MAX_PACKET_SIZE: usize = 1200;
 
 impl Streamer {
     pub fn new(rtc: Rtc, session_id: Uuid) -> Streamer {
@@ -61,10 +65,24 @@ impl Streamer {
                                 .iter()
                                 .find(|l| l.rid == rid)
                         {
+                            let frame_size = match data.params.spec().codec {
+                                Codec::H264 => {
+                                    let mut packetizer = H264Packetizer::default();
+                                    if let Ok(packet) =
+                                        packetizer.packetize(MAX_PACKET_SIZE, &data.data)
+                                    {
+                                        packet.iter().map(|v| v.len()).sum()
+                                    } else {
+                                        data.data.len()
+                                    }
+                                }
+                                _ => data.data.len(),
+                            };
+
                             let push_outcome = simulcast_layer
                                 .bitrate_estimator
                                 .borrow_mut()
-                                .push(data.data.len(), Instant::now());
+                                .push(frame_size, Instant::now());
 
                             if matches!(push_outcome, PushOutcome::EstimateBecameAvailable) {
                                 *should_reevaluate = true;
