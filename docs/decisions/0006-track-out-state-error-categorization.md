@@ -24,6 +24,6 @@ State only mutates on the success path.
 
 ## Consequences
 
-**Gain**: no rollback bookkeeping; new failure points have a clear taxonomy (transient → retry, hard → tear down).
+**Gain**: no rollback bookkeeping; new failure points have a clear taxonomy (retry what is transient, tear down on a hard error).
 
 **Lose**: a hard error tears down the entire client even if the failure was scoped to one track. Categorization is convention-based, not type-enforced.

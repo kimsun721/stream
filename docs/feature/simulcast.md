@@ -33,6 +33,6 @@ The server does not ask again. The publisher has to send keyframes on an interva
 
 ## Notes
 
-- Server → viewer is single-stream. No SDP change on viewer side.
+- The server sends a viewer a single stream. No SDP change on viewer side.
 - `KeyframeRequest` from viewer has `rid = None`. Server substitutes the viewer's target rid, or the current one when no switch is pending, before forwarding. Reference: str0m `examples/chat.rs`.
 - DC messages use `{ "type": ..., ... }` envelope (shared with P2P relay).

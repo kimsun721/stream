@@ -10,7 +10,7 @@ After [ADR 0001](0001-actor-pattern.md), HTTP handlers wait for SFU replies on `
 
 Two latency problems:
 
-1. **Wall-clock.** If a message arrives mid-iteration, it waits for the SFU loop to return to message processing, worst case ≈ one full SFU tick.
+1. **Wall-clock.** If a message arrives mid-iteration, it waits for the SFU loop to return to message processing, in the worst case about one full SFU tick.
 2. **Tokio worker.** `std::sync::mpsc::recv()` blocks the OS thread, not just the task. Enough concurrent waiting handlers can starve unrelated requests.
 
 ## Decision
@@ -35,4 +35,4 @@ Rationale: simulcast doesn't depend on this; behavior is correct (just slow unde
 
 - Measured p99 HTTP latency exceeds target under realistic load.
 - Observed tokio worker starvation.
-- New feature that depends on fast HTTP→SFU round trips.
+- New feature that depends on fast round trips from HTTP to the SFU.
