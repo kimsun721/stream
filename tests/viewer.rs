@@ -182,6 +182,16 @@ async fn the_server_measures_every_layer_it_receives() {
         high > low * 4,
         "the gap matches what was sent, 300 against 2500 kbps: {estimates:?}"
     );
+
+    // Ranking alone would also hold for a count of packets or frames. The
+    // figure has to be the bitrate itself, since layers are picked by it.
+    for (bps, sent_kbps) in measured.iter().zip([300u64, 800, 2500]) {
+        let sent = sent_kbps * 1000;
+        assert!(
+            (sent * 3 / 4..=sent * 5 / 4).contains(bps),
+            "a layer sent at {sent_kbps} kbps is measured near it: {estimates:?}"
+        );
+    }
 }
 
 /// Auto mode filters on two numbers the SDP cannot supply: a bitrate estimate
