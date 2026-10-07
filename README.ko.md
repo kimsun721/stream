@@ -6,7 +6,9 @@
 
 Rust와 [str0m](https://github.com/algesten/str0m)으로 만든 라이브 스트리밍용 WebRTC SFU입니다. 송출자는 OBS에서 WHIP으로 방송을 올립니다. 시청자는 대역폭 추정치에 맞는 simulcast 레이어를 받고, 업로드 여유가 있는 시청자는 다른 시청자에게 P2P로 스트림을 중계해 서버 부하를 덜어줍니다.
 
-<!-- demo GIF -->
+![OBS 방송을 재생하면서 simulcast 레이어를 전환하는 시청 페이지](docs/assets/demo.webp)
+
+OBS 방송을 재생하는 시청 페이지입니다. 자동 모드로 시작한 뒤, 시청자가 가장 낮은 simulcast 레이어로 내렸다가 가장 높은 레이어로 되돌립니다.
 
 ## 측정 결과
 
