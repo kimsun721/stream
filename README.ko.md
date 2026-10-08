@@ -43,7 +43,16 @@ scripts/local-broadcast.sh
 
 서버는 처음 찾은 네트워크 인터페이스 주소로 미디어를 보내라고 클라이언트에게 알립니다. NAT 뒤에서는 `server.public_ip`를 클라이언트가 닿을 수 있는 주소로 설정해야 합니다.
 
-`docker compose up`으로도 같은 서버를 띄울 수 있습니다. 이때는 `compose.yaml`에서 `config.toml` 볼륨 줄의 주석을 풀어야 설정 파일을 읽고, `server.public_ip`도 설정해야 합니다. 컨테이너 안에서 처음 찾는 인터페이스는 브리지라 외부에서 닿지 않습니다.
+컨테이너로 띄우려면 GHCR에 올라가 있는 이미지를 쓰면 됩니다.
+
+```sh
+docker run --rm -e API_KEY=<your key> \
+  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -p 40000:40000/udp -p 8443:8443 -p 127.0.0.1:8080:8080 \
+  ghcr.io/kimsun721/stream
+```
+
+이때 그 `config.toml`에 `server.public_ip`를 설정해야 합니다. 컨테이너 안에서 처음 찾는 인터페이스는 브리지라 외부에서 닿지 않습니다. `docker compose up`은 같은 이미지를 체크아웃한 소스에서 직접 빌드해 띄웁니다. 이 경우 `compose.yaml`에서 `config.toml` 볼륨 줄의 주석을 풀어야 설정 파일을 읽습니다.
 
 `[server.tls]`를 설정하면 `:8443`이 TLS로 동작합니다. `:8080`은 항상 평문 HTTP이며 사설망에만 두어야 합니다. 이 섹션이 없으면 둘 다 평문이며, 리버스 프록시 뒤에 두는 배포를 위한 설정입니다.
 

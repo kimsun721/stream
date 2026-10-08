@@ -43,7 +43,16 @@ Everything in `config.toml` has a default, so the file is optional. `.env` holds
 
 The server tells clients to send media to the first network interface it finds. Behind NAT, set `server.public_ip` to an address clients can reach.
 
-`docker compose up` runs the same server. Uncomment the `config.toml` volume in `compose.yaml` so the file is read, and set `server.public_ip`: inside a container the first interface is the bridge, unroutable from outside.
+To run it in a container instead, an image is published on GHCR:
+
+```sh
+docker run --rm -e API_KEY=<your key> \
+  -v "$PWD/config.toml:/app/config.toml:ro" \
+  -p 40000:40000/udp -p 8443:8443 -p 127.0.0.1:8080:8080 \
+  ghcr.io/kimsun721/stream
+```
+
+Set `server.public_ip` in that `config.toml`: inside a container the first interface is the bridge, unroutable from outside. `docker compose up` builds the same image from the checkout instead. Uncomment the `config.toml` volume in `compose.yaml` so the file is read.
 
 `[server.tls]` serves TLS on `:8443`. `:8080` is always plain HTTP and belongs on a private network. Without the section both are plain, for deployments behind a reverse proxy.
 
