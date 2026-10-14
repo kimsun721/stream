@@ -1,6 +1,9 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::{Arc, mpsc::SyncSender},
+    sync::{
+        Arc,
+        mpsc::{SyncSender, TrySendError},
+    },
     time::Instant,
 };
 
@@ -215,10 +218,8 @@ impl FromRequestParts<SdpState> for AuthStreamKey {
                 hashed_stream_key,
                 reply: tx.clone(),
             };
-            sfu_tx.send(msg).map_err(|e| {
-                error!("send to sfu loop failed: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            })?;
+
+            send_to_sfu(sfu_tx, msg).map_err(IntoResponse::into_response)?;
         }
 
         drop(tx);
@@ -250,10 +251,7 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
 
     let msg = SfuMessage::CreateRoom { room_id, reply: tx };
 
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(sfu_tx, msg)?;
 
     let (room_id, stream_key) = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
@@ -299,7 +297,7 @@ async fn get_room(
         return Err(StatusCode::NOT_FOUND);
     };
 
-    sfu_tx.send(SfuMessage::GetRoom { room_id, reply: tx }).ok();
+    send_to_sfu(sfu_tx, SfuMessage::GetRoom { room_id, reply: tx })?;
 
     let (views, state) = rx
         .await
@@ -335,10 +333,7 @@ async fn update_room(
         reply: tx,
     };
 
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(sfu_tx, msg)?;
 
     rx.await
         .map_err(|e| {
@@ -361,10 +356,7 @@ async fn delete_room(
 
     let msg = SfuMessage::DeleteRoom { room_id, reply: tx };
 
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(sfu_tx, msg)?;
 
     rx.await
         .map_err(|e| {
@@ -392,10 +384,7 @@ async fn reissue_stream_key(
 
     let msg = SfuMessage::ReissueStreamKey { room_id, reply: tx };
 
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(sfu_tx, msg)?;
 
     let stream_key = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
@@ -512,10 +501,7 @@ async fn whip_terminate_session(
         reply: tx,
     };
 
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(sfu_tx, msg)?;
 
     rx.await
         .map_err(|e| {
@@ -568,10 +554,7 @@ async fn register_client(
     rx: oneshot::Receiver<Option<StatusCode>>,
     sfu_tx: SyncSender<SfuMessage>,
 ) -> Result<(), StatusCode> {
-    sfu_tx.send(msg).map_err(|e| {
-        error!("send to sfu loop failed: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    send_to_sfu(&sfu_tx, msg)?;
 
     if let Some(status_code) = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
@@ -581,4 +564,17 @@ async fn register_client(
     };
 
     Ok(())
+}
+
+fn send_to_sfu(sfu_tx: &SyncSender<SfuMessage>, msg: SfuMessage) -> Result<(), StatusCode> {
+    sfu_tx.try_send(msg).map_err(|e| match e {
+        TrySendError::Disconnected(_) => {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+        TrySendError::Full(_) => {
+            error!("send to sfu loop failed: {}", e);
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    })
 }
