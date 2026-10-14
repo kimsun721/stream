@@ -173,6 +173,7 @@ atomics!(
     CHANNEL_MESSAGES,
     CHANNEL_DRAIN_FULL,
     CHANNEL_DROPS,
+    REQUESTS_REFUSED,
     SOCKET_READS,
     SOCKET_READ_BYTES,
     ROOMS_VISITED,
@@ -208,6 +209,13 @@ pub fn channel_drain_full() {
 /// counted here.
 pub fn channel_dropped() {
     CHANNEL_DROPS.fetch_add(1, Relaxed);
+}
+
+/// A web request answered `503` because its media loop's channel was full.
+/// Counted rather than logged, since it arrives in floods. Stream key
+/// resolution asks every loop but counts once.
+pub fn request_refused() {
+    REQUESTS_REFUSED.fetch_add(1, Relaxed);
 }
 
 pub fn socket_read(bytes: usize) {
@@ -352,6 +360,7 @@ pub struct Snapshot {
     pub channel_messages: u64,
     pub channel_drain_full: u64,
     pub channel_drops: u64,
+    pub requests_refused: u64,
     pub socket_reads: u64,
     pub socket_read_bytes: u64,
 
@@ -394,6 +403,7 @@ pub fn snapshot() -> Snapshot {
         channel_messages: CHANNEL_MESSAGES.load(Relaxed),
         channel_drain_full: CHANNEL_DRAIN_FULL.load(Relaxed),
         channel_drops: CHANNEL_DROPS.load(Relaxed),
+        requests_refused: REQUESTS_REFUSED.load(Relaxed),
         socket_reads: SOCKET_READS.load(Relaxed),
         socket_read_bytes: SOCKET_READ_BYTES.load(Relaxed),
 

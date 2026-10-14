@@ -6,7 +6,7 @@ use std::{
     rc::{Rc, Weak},
     sync::{
         atomic::{AtomicU64, Ordering},
-        mpsc::{Sender, SyncSender},
+        mpsc::Sender,
     },
     time::Instant,
 };
@@ -22,6 +22,7 @@ use str0m::{
 };
 
 use derive_more::{Debug, Display, Eq};
+use tokio::sync::oneshot;
 use tracing::error;
 use uuid::Uuid;
 
@@ -209,43 +210,43 @@ pub enum SfuMessage {
         rtc: Box<Rtc>,
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<StatusCode>>,
+        reply: oneshot::Sender<Option<StatusCode>>,
     },
     RegisterStreamer {
         rtc: Box<Rtc>,
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<StatusCode>>,
+        reply: oneshot::Sender<Option<StatusCode>>,
     },
     CreateRoom {
         room_id: RoomId,
-        reply: SyncSender<(RoomId, StreamKey)>,
+        reply: oneshot::Sender<(RoomId, StreamKey)>,
     },
     DeleteRoom {
         room_id: RoomId,
-        reply: SyncSender<Option<()>>,
+        reply: oneshot::Sender<Option<()>>,
     },
     UpdateRoomState {
         room_id: RoomId,
         state: RoomState,
-        reply: SyncSender<Option<()>>,
+        reply: oneshot::Sender<Option<()>>,
     },
     GetRoom {
         room_id: RoomId,
-        reply: SyncSender<Option<(usize, RoomState)>>,
+        reply: oneshot::Sender<Option<(usize, RoomState)>>,
     },
     ResolveStreamKey {
         hashed_stream_key: [u8; 32],
-        reply: SyncSender<Option<RoomId>>,
+        reply: tokio::sync::mpsc::Sender<Option<RoomId>>,
     },
     TerminateSession {
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<()>>,
+        reply: oneshot::Sender<Option<()>>,
     },
     ReissueStreamKey {
         room_id: RoomId,
-        reply: SyncSender<Option<StreamKey>>,
+        reply: oneshot::Sender<Option<StreamKey>>,
     },
     Datagram {
         data: Vec<u8>,

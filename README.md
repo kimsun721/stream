@@ -164,7 +164,6 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 - No TURN. A client that cannot reach UDP `:40000` directly cannot connect.
 - A room lives on one media loop, so one room is bounded by one core. [#73](https://github.com/kimsun721/stream/issues/73) lets a room span loops.
 - Rooms and stream keys live in memory. A restart drops them.
-- An HTTP handler holds a tokio worker while it waits for a media loop to answer. See [ADR 0007](docs/decisions/0007-defer-sync-mpsc-recv-blocking.md).
 - One process. Nothing spreads load across servers.
 
 ## Docs

@@ -2,13 +2,14 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     rc::Rc,
-    sync::mpsc::{Sender, SyncSender},
+    sync::mpsc::Sender,
     time::Instant,
 };
 
 use axum::http::StatusCode;
 use str0m::Rtc;
 use subtle::ConstantTimeEq;
+use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -34,7 +35,7 @@ impl Rooms {
         rtc: Rtc,
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<StatusCode>>,
+        reply: oneshot::Sender<Option<StatusCode>>,
     ) {
         if let Some(room) = self.get_mut(&room_id) {
             room.add_viewer(rtc, session_id, reply);
@@ -49,7 +50,7 @@ impl Rooms {
         rtc: Rtc,
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<StatusCode>>,
+        reply: oneshot::Sender<Option<StatusCode>>,
     ) {
         if let Some(room) = self.get_mut(&room_id) {
             room.add_streamer(rtc, session_id, reply);
@@ -59,7 +60,7 @@ impl Rooms {
         }
     }
 
-    pub fn create(&mut self, room_id: RoomId, reply: SyncSender<(RoomId, StreamKey)>) {
+    pub fn create(&mut self, room_id: RoomId, reply: oneshot::Sender<(RoomId, StreamKey)>) {
         let stream_key = StreamKey::new();
         let hashed_stream_key = stream_key.hashed();
 
@@ -76,7 +77,7 @@ impl Rooms {
         reply.send((room_id, stream_key)).ok();
     }
 
-    pub fn get_room(&self, room_id: RoomId, reply: SyncSender<Option<(usize, RoomState)>>) {
+    pub fn get_room(&self, room_id: RoomId, reply: oneshot::Sender<Option<(usize, RoomState)>>) {
         match self.get(&room_id) {
             Some(room) => reply.send(Some((room.view_count(), room.state))).ok(),
             None => reply.send(None).ok(),
@@ -87,7 +88,7 @@ impl Rooms {
         &mut self,
         room_id: RoomId,
         state: RoomState,
-        reply: SyncSender<Option<()>>,
+        reply: oneshot::Sender<Option<()>>,
     ) {
         match self.rooms.get_mut(&room_id) {
             Some(room) => {
@@ -102,7 +103,7 @@ impl Rooms {
         };
     }
 
-    pub fn delete(&mut self, room_id: RoomId, reply: SyncSender<Option<()>>) {
+    pub fn delete(&mut self, room_id: RoomId, reply: oneshot::Sender<Option<()>>) {
         match self.rooms.remove(&room_id) {
             Some(_) => {
                 self.socket_routes.clean_routes_by_room_id(&room_id);
@@ -115,20 +116,20 @@ impl Rooms {
     pub fn resolve_stream_key(
         &self,
         hashed_stream_key: [u8; 32],
-        reply: SyncSender<Option<RoomId>>,
+        reply: tokio::sync::mpsc::Sender<Option<RoomId>>,
     ) {
         let room_id = self.iter().find_map(|(room_id, room)| {
             bool::from(hashed_stream_key.ct_eq(&room.hashed_stream_key)).then_some(room_id.clone())
         });
 
-        reply.send(room_id).ok();
+        reply.try_send(room_id).ok();
     }
 
     pub fn terminate_session(
         &mut self,
         room_id: RoomId,
         session_id: Uuid,
-        reply: SyncSender<Option<()>>,
+        reply: oneshot::Sender<Option<()>>,
     ) {
         if let Some(room) = self.rooms.get_mut(&room_id)
             && let Some(streamer) = &room.streamer
@@ -142,7 +143,11 @@ impl Rooms {
         };
     }
 
-    pub fn reissue_stream_key(&mut self, room_id: RoomId, reply: SyncSender<Option<StreamKey>>) {
+    pub fn reissue_stream_key(
+        &mut self,
+        room_id: RoomId,
+        reply: oneshot::Sender<Option<StreamKey>>,
+    ) {
         if let Some(room) = self.get_mut(&room_id) {
             let stream_key = StreamKey::new();
             let hashed_stream_key = stream_key.hashed();
@@ -232,7 +237,12 @@ impl Room {
         self.state = state;
     }
 
-    fn add_viewer(&mut self, rtc: Rtc, session_id: Uuid, reply: SyncSender<Option<StatusCode>>) {
+    fn add_viewer(
+        &mut self,
+        rtc: Rtc,
+        session_id: Uuid,
+        reply: oneshot::Sender<Option<StatusCode>>,
+    ) {
         let mut viewer = Viewer::new(rtc, session_id);
 
         match self.state {
@@ -272,7 +282,12 @@ impl Room {
         }
     }
 
-    fn add_streamer(&mut self, rtc: Rtc, session_id: Uuid, reply: SyncSender<Option<StatusCode>>) {
+    fn add_streamer(
+        &mut self,
+        rtc: Rtc,
+        session_id: Uuid,
+        reply: oneshot::Sender<Option<StatusCode>>,
+    ) {
         if self.streamer.is_none() {
             self.state = RoomState::Preview;
 
@@ -310,6 +325,7 @@ mod tests {
 
     use axum::http::StatusCode;
     use str0m::Rtc;
+    use tokio::sync::oneshot;
     use uuid::Uuid;
 
     use crate::{
@@ -324,8 +340,8 @@ mod tests {
         (Rooms::new(tx, 0), rx)
     }
 
-    fn reply<T>() -> (mpsc::SyncSender<Option<T>>, mpsc::Receiver<Option<T>>) {
-        mpsc::sync_channel(1)
+    fn reply<T>() -> (oneshot::Sender<Option<T>>, oneshot::Receiver<Option<T>>) {
+        oneshot::channel()
     }
 
     fn rtc() -> Rtc {
@@ -333,9 +349,15 @@ mod tests {
     }
 
     fn create_room(rooms: &mut Rooms) -> (RoomId, StreamKey) {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = oneshot::channel();
         rooms.create(RoomId::new(0), tx);
-        rx.recv().unwrap()
+        rx.blocking_recv().unwrap()
+    }
+
+    fn resolve(rooms: &Rooms, hashed_stream_key: [u8; 32]) -> Option<RoomId> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        rooms.resolve_stream_key(hashed_stream_key, tx);
+        rx.blocking_recv().unwrap()
     }
 
     fn missing_id() -> RoomId {
@@ -380,15 +402,14 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.reissue_stream_key(room_id.clone(), tx);
-        let new_key = rx.recv().unwrap().expect("room exists");
+        let new_key = rx.blocking_recv().unwrap().expect("room exists");
 
-        let (tx, rx) = reply();
-        rooms.resolve_stream_key(old_key.hashed(), tx);
-        assert_eq!(rx.recv().unwrap(), None, "the old key must stop resolving");
-
-        let (tx, rx) = reply();
-        rooms.resolve_stream_key(new_key.hashed(), tx);
-        assert_eq!(rx.recv().unwrap(), Some(room_id));
+        assert_eq!(
+            resolve(&rooms, old_key.hashed()),
+            None,
+            "the old key must stop resolving"
+        );
+        assert_eq!(resolve(&rooms, new_key.hashed()), Some(room_id));
     }
 
     #[test]
@@ -397,7 +418,7 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.reissue_stream_key(missing_id(), tx);
-        assert!(rx.recv().unwrap().is_none());
+        assert!(rx.blocking_recv().unwrap().is_none());
     }
 
     #[test]
@@ -408,7 +429,7 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.update_state(room_id.clone(), RoomState::Live, tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        assert_eq!(rx.blocking_recv().unwrap(), Some(()));
         assert!(matches!(
             rooms.get(&room_id).unwrap().state,
             RoomState::Live
@@ -416,7 +437,7 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.update_state(missing_id(), RoomState::Live, tx);
-        assert_eq!(rx.recv().unwrap(), None);
+        assert_eq!(rx.blocking_recv().unwrap(), None);
     }
 
     #[test]
@@ -434,20 +455,20 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.update_state(room_id.clone(), RoomState::Live, tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        assert_eq!(rx.blocking_recv().unwrap(), Some(()));
 
         let (tx, _rx) = reply::<StatusCode>();
         rooms.register_viewer(rtc(), room_id.clone(), Uuid::new_v4(), tx);
 
         let (tx, rx) = reply();
         rooms.get_room(room_id, tx);
-        let (views, state) = rx.recv().unwrap().unwrap();
+        let (views, state) = rx.blocking_recv().unwrap().unwrap();
         assert_eq!(views, 1);
         assert!(matches!(state, RoomState::Live));
 
         let (tx, rx) = reply::<(usize, RoomState)>();
         rooms.get_room(missing_id(), tx);
-        assert!(rx.recv().unwrap().is_none());
+        assert!(rx.blocking_recv().unwrap().is_none());
     }
 
     #[test]
@@ -458,12 +479,12 @@ mod tests {
 
         let (tx, rx) = reply();
         rooms.delete(room_id.clone(), tx);
-        assert_eq!(rx.recv().unwrap(), Some(()));
+        assert_eq!(rx.blocking_recv().unwrap(), Some(()));
         assert!(!rooms.contains_key(&room_id));
 
         let (tx, rx) = reply();
         rooms.delete(room_id, tx);
-        assert_eq!(rx.recv().unwrap(), None);
+        assert_eq!(rx.blocking_recv().unwrap(), None);
     }
 
     #[test]

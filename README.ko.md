@@ -164,7 +164,6 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 - TURN이 없습니다. UDP `:40000`에 직접 닿지 못하는 클라이언트는 연결할 수 없습니다.
 - 방 하나는 미디어 루프 하나에서만 돌기 때문에 코어 하나를 넘지 못합니다. [#73](https://github.com/kimsun721/stream/issues/73)에서 방이 여러 루프에 걸치도록 바꿉니다.
 - 방과 스트림 키는 메모리에만 있어서 재시작하면 사라집니다.
-- HTTP 핸들러는 미디어 루프의 응답을 기다리는 동안 tokio 워커를 붙잡습니다. [ADR 0007](docs/decisions/0007-defer-sync-mpsc-recv-blocking.md) 참고.
 - 프로세스 하나로 동작하며, 여러 서버로 부하를 나누지 않습니다.
 
 ## 문서
