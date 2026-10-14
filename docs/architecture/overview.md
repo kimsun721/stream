@@ -22,7 +22,7 @@ The external backend is treated as a black box that speaks HTTP. This server mak
 - mux: one std thread, blocked on the socket.
 - Media loops: `server.total_shards` std threads, the core count by default. Each is the sole owner of its `Rooms`, as [ADR 0001](../decisions/0001-actor-pattern.md) describes for the single loop it started with.
 
-Every loop has one `sync_channel<SfuMessage>` that both the web threads and the mux write to, so a loop waits on one thing: its channel, until the next str0m deadline. The mux copies each datagram into an owned buffer to cross the thread boundary, and drops it rather than wait when a loop's channel is full.
+Every loop has one `sync_channel<SfuMessage>` that both the web threads and the mux write to, so a loop waits on one thing: its channel, until the next str0m deadline. The mux copies each datagram into an owned buffer to cross the thread boundary, and drops it rather than wait when a loop's channel is full. The web threads do not wait either: a request to a full loop gets `503`.
 
 All loops send on the same socket, so clients see one address.
 
