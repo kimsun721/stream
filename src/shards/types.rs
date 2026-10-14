@@ -8,11 +8,7 @@ use std::{
 
 use tracing::error;
 
-use crate::{
-    config::tuning,
-    sfu,
-    types::{RoomId, SfuMessage},
-};
+use crate::{config::tuning, sfu, types::SfuMessage};
 
 pub struct Shard {
     pub sender: SyncSender<SfuMessage>,
@@ -34,8 +30,8 @@ impl Shards {
         self.next_shard.fetch_add(1, Ordering::Relaxed) % self.shards.len()
     }
 
-    pub fn sender_for(&self, room_id: &RoomId) -> Option<&SyncSender<SfuMessage>> {
-        let shard_id = room_id.0.split("_").nth(1)?.parse::<usize>().ok();
+    pub fn sender_by_key(&self, key: &str) -> Option<&SyncSender<SfuMessage>> {
+        let shard_id = extract_shard_id(key);
 
         if let Some(shard_id) = shard_id {
             self.shards.get(shard_id).map(|s| &s.sender)
@@ -75,4 +71,8 @@ impl Shards {
 
         shards
     }
+}
+
+pub fn extract_shard_id(key: &str) -> Option<usize> {
+    key.split("_").nth(1)?.parse::<usize>().ok()
 }

@@ -60,6 +60,37 @@ async fn publishing_requires_a_stream_key() {
 }
 
 #[tokio::test]
+async fn a_wrong_stream_key_is_refused_whatever_loop_it_names() {
+    let server = Server::default();
+    // A key whose loop is never asked must still get an answer, so a hang
+    // fails the test instead of stalling it.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("client");
+
+    let keys = [
+        (
+            format!("SK_{}_wrong", common::shards()),
+            "a loop that does not exist",
+        ),
+        ("SK_0_wrong".to_string(), "a loop without the key"),
+    ];
+
+    for (key, case) in keys {
+        let response = client
+            .post(server.sdp_url("/whip"))
+            .bearer_auth(&key)
+            .header("Content-Type", "application/sdp")
+            .body("v=0\r\n")
+            .send()
+            .await
+            .expect("POST /whip");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+    }
+}
+
+#[tokio::test]
 async fn publishing_rejects_a_body_that_is_not_sdp() {
     let server = Server::default();
     let client = reqwest::Client::new();

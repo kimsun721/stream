@@ -237,7 +237,7 @@ pub enum SfuMessage {
     },
     ResolveStreamKey {
         hashed_stream_key: [u8; 32],
-        reply: tokio::sync::mpsc::Sender<Option<RoomId>>,
+        reply: oneshot::Sender<Option<RoomId>>,
     },
     TerminateSession {
         room_id: RoomId,
@@ -354,8 +354,8 @@ impl RoomId {
 }
 
 impl StreamKey {
-    pub fn new() -> StreamKey {
-        StreamKey(format!("SK_{}", random_string(STREAM_KEY_LEN)))
+    pub fn new(shard_id: usize) -> StreamKey {
+        StreamKey(format!("SK_{}_{}", shard_id, random_string(STREAM_KEY_LEN)))
     }
 
     pub fn hashed(&self) -> [u8; 32] {
