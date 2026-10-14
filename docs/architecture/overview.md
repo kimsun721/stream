@@ -41,7 +41,7 @@ Media is forwarded per room: a streamer's RTP fans out to every viewer in the sa
 
 ## Placement and routing
 
-A new room goes to the next loop in turn. Its id carries the loop number (`RM_2_...`), so every later command reaches the right loop without a table. Resolving a stream key has no room id to go on, so it asks every loop.
+A new room goes to the next loop in turn. Its id carries the loop number (`RM_2_...`), so every later command reaches the right loop without a table. A stream key carries the same number (`SK_2_...`), so resolving one asks that loop alone.
 
 A datagram carries only its source address, so routing takes two maps:
 
