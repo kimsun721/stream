@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{metrics, types::Viewer};
+use crate::{metrics, shards::types::extract_shard_id, types::Viewer};
 use crate::{
     shards::types::ShardRouteMsg,
     types::{
@@ -61,7 +61,11 @@ impl Rooms {
     }
 
     pub fn create(&mut self, room_id: RoomId, reply: oneshot::Sender<(RoomId, StreamKey)>) {
-        let stream_key = StreamKey::new();
+        let Some(shard_id) = extract_shard_id(&room_id.0) else {
+            return;
+        };
+
+        let stream_key = StreamKey::new(shard_id);
         let hashed_stream_key = stream_key.hashed();
 
         self.insert(
@@ -116,13 +120,13 @@ impl Rooms {
     pub fn resolve_stream_key(
         &self,
         hashed_stream_key: [u8; 32],
-        reply: tokio::sync::mpsc::Sender<Option<RoomId>>,
+        reply: oneshot::Sender<Option<RoomId>>,
     ) {
         let room_id = self.iter().find_map(|(room_id, room)| {
             bool::from(hashed_stream_key.ct_eq(&room.hashed_stream_key)).then_some(room_id.clone())
         });
 
-        reply.try_send(room_id).ok();
+        reply.send(room_id).ok();
     }
 
     pub fn terminate_session(
@@ -148,8 +152,10 @@ impl Rooms {
         room_id: RoomId,
         reply: oneshot::Sender<Option<StreamKey>>,
     ) {
-        if let Some(room) = self.get_mut(&room_id) {
-            let stream_key = StreamKey::new();
+        if let Some(room) = self.get_mut(&room_id)
+            && let Some(shard_id) = extract_shard_id(&room_id.0)
+        {
+            let stream_key = StreamKey::new(shard_id);
             let hashed_stream_key = stream_key.hashed();
 
             room.hashed_stream_key = hashed_stream_key;
@@ -355,7 +361,7 @@ mod tests {
     }
 
     fn resolve(rooms: &Rooms, hashed_stream_key: [u8; 32]) -> Option<RoomId> {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = oneshot::channel();
         rooms.resolve_stream_key(hashed_stream_key, tx);
         rx.blocking_recv().unwrap()
     }

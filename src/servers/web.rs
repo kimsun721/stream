@@ -211,26 +211,26 @@ impl FromRequestParts<SdpState> for AuthStreamKey {
 
         let hashed_stream_key = hash_string(bearer.token());
 
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<RoomId>>(state.shards.shards.len());
+        let (tx, rx) = oneshot::channel::<Option<RoomId>>();
 
-        for sfu_tx in state.shards.senders() {
+        if let Some(sfu_tx) = state.shards.sender_by_key(bearer.token()) {
             let msg = SfuMessage::ResolveStreamKey {
                 hashed_stream_key,
-                reply: tx.clone(),
+                reply: tx,
             };
 
             send_to_sfu(sfu_tx, msg).map_err(IntoResponse::into_response)?;
+        } else {
+            return Err(unauthorized());
         }
 
-        drop(tx);
-
-        while let Some(reply) = rx.recv().await {
-            if let Some(room_id) = reply {
-                return Ok(AuthStreamKey(room_id));
-            }
-        }
-
-        Err(unauthorized())
+        rx.await
+            .map_err(|e| {
+                error!("send to sfu loop failed: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            })?
+            .map(AuthStreamKey)
+            .ok_or_else(unauthorized)
     }
 }
 
@@ -245,7 +245,7 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
 
     let room_id = RoomId::new(state.shards.next_shard());
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
 
@@ -293,7 +293,7 @@ async fn get_room(
     let (tx, rx) = oneshot::channel::<Option<(usize, RoomState)>>();
     let room_id = RoomId(room_id);
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -323,7 +323,7 @@ async fn update_room(
     let (tx, rx) = oneshot::channel::<Option<()>>();
     let room_id = RoomId(room_id);
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -350,7 +350,7 @@ async fn delete_room(
     let (tx, rx) = oneshot::channel::<Option<()>>();
     let room_id = RoomId(room_id);
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -378,7 +378,7 @@ async fn reissue_stream_key(
     let (tx, rx) = oneshot::channel::<Option<StreamKey>>();
     let room_id = RoomId(room_id);
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -423,7 +423,7 @@ async fn sdp_offer(
     let (tx, rx) = oneshot::channel::<Option<StatusCode>>();
     let room_id = RoomId(room_id);
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::NOT_FOUND);
     };
 
@@ -461,7 +461,7 @@ async fn whip_sdp_offer(
     let location = format!("/whip/sessions/{}", session_id);
     let (tx, rx) = oneshot::channel::<Option<StatusCode>>();
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
 
@@ -491,7 +491,7 @@ async fn whip_terminate_session(
 ) -> Result<StatusCode, StatusCode> {
     let (tx, rx) = oneshot::channel::<Option<()>>();
 
-    let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
+    let Some(sfu_tx) = state.shards.sender_by_key(&room_id.0) else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
 
