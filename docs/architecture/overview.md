@@ -80,7 +80,6 @@ The client opens a DataChannel **before** `createOffer`, so the DC is part of th
 
 ## Known limits
 
-- HTTP handlers block on `recv()` while a loop works through its rooms. Deferred, see [ADR 0007](../decisions/0007-defer-sync-mpsc-recv-blocking.md).
 - A room lives on one loop, so one room is bounded by one core. [#73](https://github.com/kimsun721/stream/issues/73) places clients instead.
 - One process.
 - A keyframe requested by one viewer goes to every viewer on that layer. See [ADR 0004](../decisions/0004-keyframe-broadcast-with-debounce.md).
