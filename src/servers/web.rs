@@ -1,9 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    sync::{
-        Arc,
-        mpsc::{self, Receiver, SyncSender},
-    },
+    sync::{Arc, mpsc::SyncSender},
     time::Instant,
 };
 
@@ -31,7 +28,7 @@ use str0m::{
     change::{SdpAnswer, SdpOffer},
 };
 use subtle::ConstantTimeEq;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::oneshot};
 use tower_http::cors::CorsLayer;
 use tracing::error;
 use uuid::Uuid;
@@ -211,7 +208,7 @@ impl FromRequestParts<SdpState> for AuthStreamKey {
 
         let hashed_stream_key = hash_string(bearer.token());
 
-        let (tx, rx) = mpsc::sync_channel::<Option<RoomId>>(state.shards.shards.len());
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<RoomId>>(state.shards.shards.len());
 
         for sfu_tx in state.shards.senders() {
             let msg = SfuMessage::ResolveStreamKey {
@@ -226,10 +223,13 @@ impl FromRequestParts<SdpState> for AuthStreamKey {
 
         drop(tx);
 
-        rx.iter()
-            .find_map(|reply| reply)
-            .map(AuthStreamKey)
-            .ok_or_else(unauthorized)
+        while let Some(reply) = rx.recv().await {
+            if let Some(room_id) = reply {
+                return Ok(AuthStreamKey(room_id));
+            }
+        }
+
+        Err(unauthorized())
     }
 }
 
@@ -240,7 +240,7 @@ struct CreateRoomResponse {
 }
 
 async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<(RoomId, StreamKey)>(1);
+    let (tx, rx) = oneshot::channel::<(RoomId, StreamKey)>();
 
     let room_id = RoomId::new(state.shards.next_shard());
 
@@ -255,7 +255,7 @@ async fn create_room(State(state): State<ApiState>) -> Result<impl IntoResponse,
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let (room_id, stream_key) = rx.recv().map_err(|e| {
+    let (room_id, stream_key) = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -292,7 +292,7 @@ async fn get_room(
     Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<Json<GetRoomResponse>, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<(usize, RoomState)>>(1);
+    let (tx, rx) = oneshot::channel::<Option<(usize, RoomState)>>();
     let room_id = RoomId(room_id);
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
@@ -302,7 +302,7 @@ async fn get_room(
     sfu_tx.send(SfuMessage::GetRoom { room_id, reply: tx }).ok();
 
     let (views, state) = rx
-        .recv()
+        .await
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -322,7 +322,7 @@ async fn update_room(
     Path(room_id): Path<String>,
     Json(payload): Json<UpdateRoomState>,
 ) -> Result<(), StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+    let (tx, rx) = oneshot::channel::<Option<()>>();
     let room_id = RoomId(room_id);
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
@@ -340,7 +340,7 @@ async fn update_room(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    rx.recv()
+    rx.await
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -352,7 +352,7 @@ async fn delete_room(
     Path(room_id): Path<String>,
     State(state): State<ApiState>,
 ) -> Result<(), StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+    let (tx, rx) = oneshot::channel::<Option<()>>();
     let room_id = RoomId(room_id);
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
@@ -366,7 +366,7 @@ async fn delete_room(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    rx.recv()
+    rx.await
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -383,7 +383,7 @@ async fn reissue_stream_key(
     State(state): State<ApiState>,
     Path(room_id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<StreamKey>>(1);
+    let (tx, rx) = oneshot::channel::<Option<StreamKey>>();
     let room_id = RoomId(room_id);
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
@@ -397,7 +397,7 @@ async fn reissue_stream_key(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let stream_key = rx.recv().map_err(|e| {
+    let stream_key = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -431,7 +431,7 @@ async fn sdp_offer(
 
     let (rtc, answer) = viewer_rtc_from_offer(sdp, state.addr)?;
     let session_id = Uuid::new_v4();
-    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+    let (tx, rx) = oneshot::channel::<Option<StatusCode>>();
     let room_id = RoomId(room_id);
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
@@ -445,7 +445,7 @@ async fn sdp_offer(
         reply: tx,
     };
 
-    register_client(msg, rx, sfu_tx.to_owned())?;
+    register_client(msg, rx, sfu_tx.to_owned()).await?;
 
     let value = serde_json::to_value(&answer).map_err(|e| {
         error!("json to value failed: {}", e);
@@ -470,7 +470,7 @@ async fn whip_sdp_offer(
     let (rtc, answer) = streamer_rtc_from_offer(sdp, state.addr)?;
     let session_id = Uuid::new_v4();
     let location = format!("/whip/sessions/{}", session_id);
-    let (tx, rx) = mpsc::sync_channel::<Option<StatusCode>>(1);
+    let (tx, rx) = oneshot::channel::<Option<StatusCode>>();
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -483,7 +483,7 @@ async fn whip_sdp_offer(
         reply: tx,
     };
 
-    register_client(msg, rx, sfu_tx.to_owned())?;
+    register_client(msg, rx, sfu_tx.to_owned()).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -500,7 +500,7 @@ async fn whip_terminate_session(
     AuthStreamKey(room_id): AuthStreamKey,
     State(state): State<SdpState>,
 ) -> Result<StatusCode, StatusCode> {
-    let (tx, rx) = mpsc::sync_channel::<Option<()>>(1);
+    let (tx, rx) = oneshot::channel::<Option<()>>();
 
     let Some(sfu_tx) = state.shards.sender_for(&room_id) else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -517,7 +517,7 @@ async fn whip_terminate_session(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    rx.recv()
+    rx.await
         .map_err(|e| {
             error!("send to sfu loop failed: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -563,9 +563,9 @@ fn accept_offer(
     Ok((rtc, answer))
 }
 
-fn register_client(
+async fn register_client(
     msg: SfuMessage,
-    rx: Receiver<Option<StatusCode>>,
+    rx: oneshot::Receiver<Option<StatusCode>>,
     sfu_tx: SyncSender<SfuMessage>,
 ) -> Result<(), StatusCode> {
     sfu_tx.send(msg).map_err(|e| {
@@ -573,7 +573,7 @@ fn register_client(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    if let Some(status_code) = rx.recv().map_err(|e| {
+    if let Some(status_code) = rx.await.map_err(|e| {
         error!("send to sfu loop failed: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })? {
