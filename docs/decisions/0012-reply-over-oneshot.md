@@ -17,7 +17,7 @@ The deferral has a cost that is listed among the README's limits: a handler hold
 - A reply travels over `tokio::sync::oneshot`. The media loop sends with a plain call and the handler awaits.
 - Stream key resolution asks every loop, so its reply uses `tokio::sync::mpsc` with one sender per loop. A loop sends with `try_send`, which needs no runtime either, and the channel holds one reply per loop, so it never fills.
 - The request channel stays `std::sync::mpsc::sync_channel`. A loop waits on it until str0m's next deadline, and tokio's `mpsc` has no blocking receive with a timeout outside a runtime. The mux feeds the same channel.
-- A handler sends a request with `try_send` and answers `503` when the loop's channel is full. The channel also carries media from the mux, and media that waits reaches viewers late or not at all, while a refused request costs the client a retry.
+- A handler sends a request with `try_send` and answers `503` when the loop's channel is full. The channel also carries media from the mux, and media that waits reaches viewers late or not at all, while a refused request costs the client a retry. A refusal is counted in `stream_requests_refused` rather than logged, since refusals come in floods.
 - Stream key resolution answers `503` if any loop's channel is full, not `401`, since the key may belong to that loop.
 
 ## Alternatives considered
