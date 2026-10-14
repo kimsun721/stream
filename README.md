@@ -18,7 +18,7 @@ One machine, over loopback, with the load generator on the same machine (AMD Ryz
 | --- | --- |
 | One media loop | saturates at about 400 viewers, on one core |
 | Four media loops | 1600 viewers across 4 rooms, no packet loss |
-| P2P relay | 46 to 50 percent of media bytes carried by viewers. One relay feeds one viewer, so half is the ceiling |
+| P2P relay | 46 to 49 percent of media bytes carried by viewers. One relay feeds one viewer, so half is the ceiling |
 | Forwarding delay | p99 under 4 ms at 200 viewers per loop, under 16 ms at the ceiling of 400 |
 
 Each run, and what it ruled out, is recorded in [docs/test/baseline](docs/test/baseline/).
@@ -52,7 +52,7 @@ docker run --rm -e API_KEY=<your key> \
   ghcr.io/kimsun721/stream
 ```
 
-Set `server.public_ip` in that `config.toml`: inside a container the first interface is the bridge, unroutable from outside. `docker compose up` builds the same image from the checkout instead. Uncomment the `config.toml` volume in `compose.yaml` so the file is read.
+Set `server.public_ip` in that `config.toml`: inside a container the first interface is the bridge, unroutable from outside. `docker compose up` builds the same image from the checkout instead. Uncomment `volumes` and its `config.toml` line in `compose.yaml` so the file is read.
 
 `[server.tls]` serves TLS on `:8443`. `:8080` is always plain HTTP and belongs on a private network. Without the section both are plain, for deployments behind a reverse proxy.
 
@@ -150,7 +150,7 @@ The integration suites start the real server and drive it over HTTP and UDP with
 docker compose --profile observability up
 ```
 
-This starts Prometheus and Grafana beside the server, with a dashboard for viewers, CPU, throughput, drops and forwarding delay. Set `metrics_port = 9464` in `config.toml` and uncomment its volume in `compose.yaml` first. Grafana is on `localhost:3000`, signing in as `admin` with password `admin` the first time.
+This starts Prometheus and Grafana beside the server, with a dashboard for viewers, CPU, throughput, drops and forwarding delay. Set `metrics_port = 9464` in `config.toml` and uncomment `volumes` with that line in `compose.yaml` first. Grafana is on `localhost:3000`, signing in as `admin` with password `admin` the first time.
 
 To watch a load run instead, start only the two monitoring services and pin the run's metrics port. The load run starts its own server, which Prometheus finds on the host:
 

@@ -8,7 +8,7 @@ Project docs are organized by purpose.
 | -------------------------------- | ---------------------------------------------------------------- | -------- |
 | [`architecture/`](architecture/) | High-level system shape: components, data flow, threading model  | English  |
 | [`decisions/`](decisions/)       | Architecture Decision Records (ADRs)                             | English  |
-| [`feature/`](feature/)           | Design docs for non-trivial features being built                 | English  |
+| [`feature/`](feature/)           | Design docs for the larger features                              | English  |
 | [`explorations/`](explorations/) | Free-form research notes, spikes, ideas under consideration      | Korean   |
 | [`test/`](test/)                 | What the test suites cover, and how to run the load baseline     | English  |
 

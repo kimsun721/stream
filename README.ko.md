@@ -18,7 +18,7 @@ OBS 방송을 재생하는 시청 페이지입니다. 자동 모드로 시작한
 | --- | --- |
 | 미디어 루프 1개 | 시청자 약 400명에서 포화, 코어 1개 사용 |
 | 미디어 루프 4개 | 방 4개에 시청자 1600명, 패킷 손실 없음 |
-| P2P relay | 미디어 바이트의 46~50%를 시청자가 대신 전달. relay 하나가 시청자 하나를 맡으므로 절반이 상한 |
+| P2P relay | 미디어 바이트의 46~49%를 시청자가 대신 전달. relay 하나가 시청자 하나를 맡으므로 절반이 상한 |
 | 전달 지연 | 루프당 시청자 200명에서 p99 4 ms 미만, 한계인 400명에서 16 ms 미만 |
 
 각 측정과 그 측정으로 배제한 가설은 [docs/test/baseline](docs/test/baseline/)에 기록되어 있습니다.
@@ -52,7 +52,7 @@ docker run --rm -e API_KEY=<your key> \
   ghcr.io/kimsun721/stream
 ```
 
-이때 그 `config.toml`에 `server.public_ip`를 설정해야 합니다. 컨테이너 안에서 처음 찾는 인터페이스는 브리지라 외부에서 닿지 않습니다. `docker compose up`은 같은 이미지를 체크아웃한 소스에서 직접 빌드해 띄웁니다. 이 경우 `compose.yaml`에서 `config.toml` 볼륨 줄의 주석을 풀어야 설정 파일을 읽습니다.
+이때 그 `config.toml`에 `server.public_ip`를 설정해야 합니다. 컨테이너 안에서 처음 찾는 인터페이스는 브리지라 외부에서 닿지 않습니다. `docker compose up`은 같은 이미지를 체크아웃한 소스에서 직접 빌드해 띄웁니다. 이 경우 `compose.yaml`에서 `volumes`와 그 아래 `config.toml` 줄의 주석을 풀어야 설정 파일을 읽습니다.
 
 `[server.tls]`를 설정하면 `:8443`이 TLS로 동작합니다. `:8080`은 항상 평문 HTTP이며 사설망에만 두어야 합니다. 이 섹션이 없으면 둘 다 평문이며, 리버스 프록시 뒤에 두는 배포를 위한 설정입니다.
 
@@ -150,7 +150,7 @@ cargo test --release --test load -- --ignored --nocapture     # 부하 테스트
 docker compose --profile observability up
 ```
 
-서버 옆에 Prometheus와 Grafana가 함께 뜨고, 시청자 수, CPU, 처리량, 드롭, 전달 지연을 보여주는 대시보드가 준비됩니다. 먼저 `config.toml`에 `metrics_port = 9464`를 넣고 `compose.yaml`에서 설정 파일 볼륨 줄의 주석을 풀어야 합니다. Grafana는 `localhost:3000`이며, 처음에는 `admin` 계정에 비밀번호 `admin`으로 로그인합니다.
+서버 옆에 Prometheus와 Grafana가 함께 뜨고, 시청자 수, CPU, 처리량, 드롭, 전달 지연을 보여주는 대시보드가 준비됩니다. 먼저 `config.toml`에 `metrics_port = 9464`를 넣고 `compose.yaml`에서 `volumes`와 그 아래 `config.toml` 줄의 주석을 풀어야 합니다. Grafana는 `localhost:3000`이며, 처음에는 `admin` 계정에 비밀번호 `admin`으로 로그인합니다.
 
 부하 테스트를 지켜보려면 모니터링 서비스 두 개만 띄우고 부하 테스트의 메트릭 포트를 고정합니다. 부하 테스트는 자기 서버를 직접 띄우고, Prometheus가 호스트에서 그 서버를 찾습니다.
 
