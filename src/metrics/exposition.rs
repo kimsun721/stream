@@ -15,8 +15,8 @@ use super::{
     BUCKET_COUNT, CHANNEL_DRAIN_FULL, CHANNEL_DROPS, CHANNEL_MESSAGES, CHANNEL_WAIT,
     CLIENT_TICK_ERRORS, CLIENTS_DISCONNECTED, DEMOTIONS, Durations, FORWARD_DELAY, Histogram,
     LAP_LATENESS, LAPS, MEDIA_DATAS, MEDIA_WRITE_BYTES, MEDIA_WRITES, PHASES, PROMOTIONS, Phase,
-    RELAY_SAVED_BYTES, RELAY_SAVED_FRAMES, ROOMS_SKIPPED, ROOMS_VISITED, SENT_BYTES, SENT_PACKETS,
-    SOCKET_READ_BYTES, SOCKET_READS, ShardGauges, shards,
+    RELAY_SAVED_BYTES, RELAY_SAVED_FRAMES, REQUESTS_REFUSED, ROOMS_SKIPPED, ROOMS_VISITED,
+    SENT_BYTES, SENT_PACKETS, SOCKET_READ_BYTES, SOCKET_READS, ShardGauges, shards,
 };
 
 pub const CONTENT_TYPE: &str = "application/openmetrics-text; version=1.0.0; charset=utf-8";
@@ -82,7 +82,7 @@ impl Collector for Exposition {
     }
 }
 
-fn counters() -> [(&'static str, &'static str, &'static AtomicU64); 19] {
+fn counters() -> [(&'static str, &'static str, &'static AtomicU64); 20] {
     [
         ("stream_laps", "Media loop iterations", &LAPS),
         (
@@ -99,6 +99,11 @@ fn counters() -> [(&'static str, &'static str, &'static AtomicU64); 19] {
             "stream_channel_drops",
             "Datagrams the mux read but dropped because a loop's channel was full",
             &CHANNEL_DROPS,
+        ),
+        (
+            "stream_requests_refused",
+            "Web requests answered 503 because a loop's channel was full",
+            &REQUESTS_REFUSED,
         ),
         (
             "stream_socket_reads",

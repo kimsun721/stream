@@ -573,7 +573,7 @@ fn send_to_sfu(sfu_tx: &SyncSender<SfuMessage>, msg: SfuMessage) -> Result<(), S
             StatusCode::INTERNAL_SERVER_ERROR
         }
         TrySendError::Full(_) => {
-            error!("send to sfu loop failed: {}", e);
+            metrics::request_refused();
             StatusCode::SERVICE_UNAVAILABLE
         }
     })
