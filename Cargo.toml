@@ -1,6 +1,6 @@
 [package]
 name = "stream"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A WebRTC SFU for live streaming, with simulcast, WHIP and viewer to viewer relay"
 license = "MIT OR Apache-2.0"
