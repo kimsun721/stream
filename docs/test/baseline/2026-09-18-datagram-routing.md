@@ -3,6 +3,7 @@
 Date: 2026-09-18
 Commit: d439c4d on perf/70-constant-datagram-cost
 Previous: [2026-09-15](2026-09-15-integration-tests.md)
+Corrected by: [2026-10-13](2026-10-13-single-loop-profile.md)
 
 ## Why this run
 

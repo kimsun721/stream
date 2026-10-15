@@ -2,7 +2,7 @@
 
 ## Status
 
-Superseded by [ADR 0012](0012-reply-over-oneshot.md) (2026-10-08). Accepted (2026-05-11).
+Superseded by [ADR 0012](0012-reply-over-oneshot.md) (2026-10-14). Accepted (2026-05-11).
 
 ## Context
 

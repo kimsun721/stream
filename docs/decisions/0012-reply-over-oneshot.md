@@ -2,7 +2,7 @@
 
 ## Status
 
-Stream key resolution superseded by [ADR 0013](0013-stream-key-carries-its-loop.md) (2026-10-15). Accepted (2026-10-08). Supersedes [ADR 0007](0007-defer-sync-mpsc-recv-blocking.md).
+Stream key resolution superseded by [ADR 0013](0013-stream-key-carries-its-loop.md) (2026-10-15). Accepted (2026-10-14). Supersedes [ADR 0007](0007-defer-sync-mpsc-recv-blocking.md).
 
 ## Context
 
