@@ -170,7 +170,7 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 
 - [Decisions](docs/decisions/): 설계가 지금 모양인 이유를 남긴 ADR
 - [Architecture](docs/architecture/overview.md): 컴포넌트, 스레드, 데이터 흐름
-- [Features](docs/feature/): simulcast와 P2P relay 설계 문서
+- [Features](docs/feature/): simulcast, P2P relay, 뷰어 SDK 설계 문서
 - [Tests](docs/test/README.md): 테스트 구성, 부하 테스트, 기록된 베이스라인
 
 ## 로드맵
@@ -184,7 +184,9 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 - [ ] 방 대신 클라이언트 단위 배치로 방 하나가 여러 루프에 걸치게 하기
 - [ ] 재시작 후에도 방과 스트림 키 유지
 - [ ] 시청자용 WHEP
+- [ ] 브라우저용 뷰어 SDK
 - [ ] 직접 닿지 못하는 클라이언트와 relay 쌍을 위한 TURN
+- [ ] relay 업로드를 클라이언트 보고 대신 서버가 측정
 
 ## 라이선스
 

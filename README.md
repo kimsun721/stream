@@ -170,7 +170,7 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 
 - [Decisions](docs/decisions/): ADRs recording why the design is what it is
 - [Architecture](docs/architecture/overview.md): components, threads and data flow
-- [Features](docs/feature/): design docs for simulcast and the P2P relay
+- [Features](docs/feature/): design docs for simulcast, the P2P relay and the viewer SDK
 - [Tests](docs/test/README.md): suites, the load run, and recorded baselines
 
 ## Roadmap
@@ -184,7 +184,9 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 - [ ] Place clients rather than rooms, so one room can span loops
 - [ ] Persist rooms and stream keys across restarts
 - [ ] WHEP for viewers
+- [ ] A viewer SDK for browsers
 - [ ] TURN, for clients and relay pairs that cannot reach each other directly
+- [ ] Relay upload measured by the server rather than reported by the client
 
 ## License
 
