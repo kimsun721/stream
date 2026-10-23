@@ -9,6 +9,7 @@ exercises the same paths a browser would.
 ```text
 cargo test                                        unit and integration
 cargo test --test viewer -- --include-ignored     adds the test that needs ffmpeg installed
+cd sdk && npm run check                           the viewer SDK: types, unit tests, build
 ```
 
 The load run is separate and is described below.

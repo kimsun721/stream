@@ -102,11 +102,14 @@ HTTPS `:8443`, called by clients directly.
 | Method | Path | Auth | Description |
 | --- | --- | --- | --- |
 | `GET` | `/watch?room={id}` | none | A minimal viewer page |
+| `GET` | `/stream-viewer.js` | none | The viewer SDK as one file, which `/watch` runs on |
 | `POST` | `/offer` | none | Viewer joins. SDP offer in, SDP answer out |
 | `POST` | `/whip` | stream key | Publish. `application/sdp` in and out |
 | `DELETE` | `/whip/sessions/{id}` | stream key | End the publishing session |
 
 `/whip` is tested with OBS. Another WHIP client, a browser included, can publish as well, but sending keyframes on an interval is its job: a viewer changes layer on a keyframe of the new layer, and the server asks for that keyframe once.
+
+A page of your own does not speak the viewer protocol by hand: the [viewer SDK](sdk/README.md), `@kimsun721/stream-viewer` on npm, joins, plays, follows the layers and reconnects, and comes with a player.
 
 ## Room State
 
