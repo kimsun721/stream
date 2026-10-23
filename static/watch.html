@@ -5,22 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Watch</title>
 <style>
-  :root {
-    --bg: #0f1113;
-    --panel: #181b1e;
-    --line: #2b3035;
-    --ink: #e7e9eb;
-    --muted: #8d959c;
-    --accent: #5cc2b4;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-  }
-
   * { box-sizing: border-box; }
 
   body {
     margin: 0;
-    background: var(--bg);
-    color: var(--ink);
+    background: #0f1113;
+    color: #e7e9eb;
     font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   }
 
@@ -38,73 +28,27 @@
     flex: 1;
     min-width: 0;
     padding: 9px 12px;
-    background: var(--panel);
-    border: 1px solid var(--line);
+    background: #181b1e;
+    border: 1px solid #2b3035;
     border-radius: 6px;
-    color: var(--ink);
-    font: 14px var(--mono);
+    color: inherit;
+    font: 14px ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
 
-  button {
+  form button {
     padding: 8px 14px;
-    background: var(--panel);
-    border: 1px solid var(--line);
+    background: #181b1e;
+    border: 1px solid #2b3035;
     border-radius: 6px;
-    color: var(--ink);
+    color: inherit;
     font: inherit;
     cursor: pointer;
   }
 
-  button:hover { border-color: var(--muted); }
-  button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #0b0d0e; }
-  button.picked { border-color: var(--accent); }
-  button.pending { border-color: var(--accent); border-style: dashed; }
+  form button:hover { border-color: #8d959c; }
+  input:focus-visible, form button:focus-visible { outline: 2px solid #5cc2b4; outline-offset: 1px; }
 
-  .stage {
-    position: relative;
-    aspect-ratio: 16 / 9;
-    background: #000;
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  video { display: block; width: 100%; height: 100%; object-fit: contain; }
-
-  .readout {
-    position: absolute;
-    top: 12px;
-    padding: 6px 10px;
-    background: rgba(0, 0, 0, 0.62);
-    border-radius: 4px;
-    font: 12px/1.5 var(--mono);
-    white-space: pre;
-  }
-
-  #stats { left: 12px; }
-  #clock { right: 12px; font-size: 18px; font-weight: 600; }
-
-  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-  .controls .label { color: var(--muted); margin-right: 4px; }
-  #layers { display: flex; flex-wrap: wrap; gap: 6px; }
-  #sound { margin-left: auto; }
-  #debug { background: none; border-color: transparent; color: var(--muted); }
-  #debug:hover { border-color: var(--line); }
-  #debug[aria-pressed="true"] { background: none; border-color: var(--line); color: var(--ink); }
-
-  #status { margin: 0; color: var(--muted); }
-
-  #log {
-    margin: 0;
-    max-height: 260px;
-    overflow: auto;
-    padding: 10px 12px;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    font: 12px/1.6 var(--mono);
-    white-space: pre-wrap;
-  }
+  #hint { margin: 0; color: #8d959c; }
 </style>
 </head>
 <body>
@@ -114,345 +58,48 @@
     <button>Watch</button>
   </form>
 
-  <div class="stage">
-    <video id="video" autoplay playsinline muted></video>
-    <div class="readout" id="stats">no stream</div>
-    <div class="readout" id="clock"></div>
-  </div>
-
-  <div class="controls">
-    <span class="label">Layer</span>
-    <div id="layers"></div>
-    <button id="sound" type="button">Unmute</button>
-    <button id="debug" type="button" aria-pressed="false">Debug</button>
-  </div>
-
-  <p id="status">Enter a room id to watch.</p>
-  <pre id="log" hidden></pre>
+  <div id="player"></div>
+  <p id="hint">Enter a room id to watch.</p>
 </main>
 
-<script>
-  const $ = (id) => document.getElementById(id);
+<script type="module">
+  // The page is a thin shell over the viewer SDK, which the server serves as
+  // one file. A page with a bundler imports @kimsun721/stream-viewer instead.
+  import { createPlayer } from "/stream-viewer.js";
 
-  let pc = null;
-  let channel = null;
-  let messages = Promise.resolve();
-  let lastStats = null;
-  // `current` is what the server is sending. `target` is what it will switch to
-  // once a keyframe of that layer arrives.
-  const layer = { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false };
+  const query = () => new URLSearchParams(location.search);
+  let player = null;
 
-  // Debug mode logs every switch, every freeze the browser counts and every
-  // jump in the RTP timestamp, to check playback against a real publisher.
-  let debug = false;
-  let probe = null;
-  let asked = null;
-  let lastFreezes = { count: 0, seconds: 0, lost: 0, dropped: 0 };
-  let lastSource = null;
-
-  function setStatus(text) {
-    $("status").textContent = text;
+  // The address keeps the room and the debug mode, so a reload or a shared link
+  // comes back the same.
+  function remember(update) {
+    const params = query();
+    update(params);
+    history.replaceState(null, "", params.size ? `?${params}` : location.pathname);
   }
 
-  function clockText(now) {
-    const pad = (n, width = 2) => String(n).padStart(width, "0");
-    return `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}.${pad(now.getMilliseconds(), 3)}`;
-  }
+  function watch(room) {
+    player?.destroy();
+    document.getElementById("hint").hidden = true;
+    remember((params) => params.set("room", room));
 
-  function note(text) {
-    if (!debug) return;
-    const log = $("log");
-    log.textContent += `${clockText(new Date())}  ${text}\n`;
-    log.scrollTop = log.scrollHeight;
-  }
-
-  // Layers are separate RTP streams, so a switch can move the timestamp by far
-  // more than the time that passed. Read from the receiver, not from drawn
-  // frames: a browser draws a window nobody can see about once a second.
-  function probeTimestamp() {
-    const receiver = pc && pc.getReceivers().find((r) => r.track && r.track.kind === "video");
-    const source = receiver && receiver.getSynchronizationSources().sort((a, b) => b.timestamp - a.timestamp)[0];
-    if (!source || source.rtpTimestamp === undefined) return;
-
-    if (!lastSource) {
-      note("reading RTP timestamps");
-    } else if (source.timestamp !== lastSource.timestamp) {
-      const step = (((source.rtpTimestamp - lastSource.rtpTimestamp + 2 ** 31) % 2 ** 32) + 2 ** 32) % 2 ** 32 - 2 ** 31;
-      const ahead = step / 90 - (source.timestamp - lastSource.timestamp);
-      if (Math.abs(ahead) > 1000) {
-        note(`RTP timestamp jumped ${Math.round(Math.abs(ahead) / 1000)} s ${ahead > 0 ? "forward" : "back"}`);
-      }
-    }
-
-    lastSource = { timestamp: source.timestamp, rtpTimestamp: source.rtpTimestamp };
-  }
-
-  function send(message) {
-    if (channel && channel.readyState === "open") {
-      channel.send(JSON.stringify(message));
-    }
-  }
-
-  // The server takes candidates from the offer itself, so gathering has to
-  // finish before it is posted. Host candidates take milliseconds.
-  function gathered(peer) {
-    if (peer.iceGatheringState === "complete") return Promise.resolve();
-    return new Promise((resolve) => {
-      const done = () => peer.iceGatheringState === "complete" && resolve();
-      peer.addEventListener("icegatheringstatechange", done);
-      setTimeout(resolve, 2000);
+    player = createPlayer(document.getElementById("player"), {
+      room,
+      clock: true,
+      debug: query().has("debug"),
+      onDebugChange: (on) => remember((params) => (on ? params.set("debug", "") : params.delete("debug"))),
     });
   }
 
-  async function watch(room) {
-    if (pc) pc.close();
-    Object.assign(layer, { mid: null, rids: [], current: null, target: null, mode: "auto", heard: false });
-    lastStats = null;
-    asked = null;
-    lastFreezes = { count: 0, seconds: 0, lost: 0, dropped: 0 };
-    lastSource = null;
-    renderLayers();
-    const query = new URLSearchParams(location.search);
-    query.set("room", room);
-    history.replaceState(null, "", `?${query}`);
-    setStatus("Connecting...");
-
-    pc = new RTCPeerConnection();
-    const stream = new MediaStream();
-    $("video").srcObject = stream;
-    pc.ontrack = (event) => stream.addTrack(event.track);
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      if (state === "connected") setStatus(`Watching ${room}`);
-      if (state === "failed" || state === "disconnected") setStatus("The stream ended or the connection was lost.");
-    };
-
-    // The server adds the media tracks over this channel once it opens, so
-    // the channel has to be part of the first offer.
-    channel = pc.createDataChannel("data");
-    channel.onmessage = (event) => {
-      const message = JSON.parse(event.data);
-      messages = messages.then(() => handle(message)).catch((e) => console.error(e));
-    };
-
-    await pc.setLocalDescription(await pc.createOffer());
-    await gathered(pc);
-
-    const response = await fetch("/offer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp, room_id: room }),
-    });
-
-    if (response.status === 404) {
-      pc.close();
-      setStatus("This room is not live.");
-      return;
-    }
-    if (!response.ok) {
-      pc.close();
-      setStatus(`The server refused the offer: ${response.status}`);
-      return;
-    }
-
-    await pc.setRemoteDescription(await response.json());
-  }
-
-  async function handle(message) {
-    switch (message.type) {
-      case "offer":
-        await pc.setRemoteDescription(message);
-        await pc.setLocalDescription(await pc.createAnswer());
-        send({ type: "answer", sdp: pc.localDescription.sdp });
-        break;
-
-      case "layer_status":
-        // Audio, and video from a publisher without simulcast, come with no
-        // layers to choose from.
-        layer.heard = true;
-        if (message.available_simulcast_layers.length > 0) {
-          layer.mid = message.mid;
-          layer.rids = message.available_simulcast_layers;
-          layer.current = message.current_layer;
-          layer.target = message.target_layer;
-          layer.mode = message.layer_mode;
-        }
-        renderLayers();
-        break;
-
-      case "layer_changed":
-        if (message.mid === layer.mid) {
-          if (asked && asked.rid === message.rid) {
-            note(`switched ${layer.current} to ${message.rid}, ${Math.round(performance.now() - asked.at)} ms after asking`);
-            asked = null;
-          } else {
-            note(layer.current ? `switched ${layer.current} to ${message.rid}` : `started on ${message.rid}`);
-          }
-          layer.current = message.rid;
-          // In automatic mode the server retargets without saying so, which
-          // leaves the target heard earlier stale. A switch always settles it.
-          if (layer.mode === "auto" || layer.target === message.rid) layer.target = null;
-          renderLayers();
-        }
-        break;
-
-      // Relay messages need the peer side of the protocol, which this page does
-      // not speak. Left unanswered, the server never promotes it.
-    }
-  }
-
-  // The server ignores a layer request in automatic mode, so picking one
-  // switches to manual first.
-  function choose(rid) {
-    if (!layer.mid) return;
-
-    if (rid === null) {
-      layer.mode = "auto";
-      asked = null;
-      note("asked for auto");
-      send({ type: "set_layer_mode", mid: layer.mid, layer_mode: "auto" });
-    } else {
-      asked = rid === layer.current ? null : { rid, at: performance.now() };
-      note(`asked for ${rid}`);
-      if (layer.mode !== "manual") {
-        layer.mode = "manual";
-        send({ type: "set_layer_mode", mid: layer.mid, layer_mode: "manual" });
-      }
-      send({ type: "set_layer", mid: layer.mid, rid });
-      layer.target = rid === layer.current ? null : rid;
-    }
-
-    renderLayers();
-  }
-
-  function renderLayers() {
-    const box = $("layers");
-    box.replaceChildren();
-
-    if (!layer.mid) {
-      box.textContent = layer.heard ? "single layer" : "none yet";
-      return;
-    }
-
-    const auto = document.createElement("button");
-    auto.type = "button";
-    auto.textContent = "Auto";
-    auto.setAttribute("aria-pressed", layer.mode === "auto");
-    auto.onclick = () => choose(null);
-    box.append(auto);
-
-    for (const { rid, bitrate_estimate } of layer.rids) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = bitrate_estimate
-        ? `${rid}  ${Math.round(bitrate_estimate / 1000)} kbps`
-        : rid;
-      button.setAttribute("aria-pressed", layer.mode === "manual" && layer.current === rid);
-      button.classList.toggle("picked", layer.mode === "auto" && layer.current === rid);
-      button.classList.toggle("pending", layer.target === rid);
-      button.onclick = () => choose(rid);
-      box.append(button);
-    }
-  }
-
-  async function readStats() {
-    if (!pc) return;
-
-    const video = $("video");
-    let line = video.videoWidth ? `${video.videoWidth}x${video.videoHeight}` : "no video";
-    let freezes = "";
-    const report = await pc.getStats();
-
-    report.forEach((entry) => {
-      if (entry.type !== "inbound-rtp" || entry.kind !== "video") return;
-
-      if (entry.framesPerSecond) line += `  ${Math.round(entry.framesPerSecond)} fps`;
-
-      const now = {
-        count: entry.freezeCount ?? 0,
-        seconds: entry.totalFreezesDuration ?? 0,
-        lost: entry.packetsLost ?? 0,
-        dropped: entry.framesDropped ?? 0,
-      };
-      if (debug) freezes = `\nfreezes ${now.count}, ${now.seconds.toFixed(1)} s`;
-      // Loss points at the network or the sender, drops at this browser, and
-      // neither at frames that simply arrived late.
-      if (now.count > lastFreezes.count) {
-        const ms = Math.round((now.seconds - lastFreezes.seconds) * 1000);
-        const times = now.count - lastFreezes.count;
-        const froze = times === 1 ? `froze ${ms} ms` : `froze ${times} times, ${ms} ms in all`;
-        note(`${froze}, ${now.lost - lastFreezes.lost} packets lost, ${now.dropped - lastFreezes.dropped} frames dropped`);
-      }
-      lastFreezes = now;
-
-      if (lastStats) {
-        const seconds = (entry.timestamp - lastStats.timestamp) / 1000;
-        const mbps = ((entry.bytesReceived - lastStats.bytesReceived) * 8) / seconds / 1e6;
-        if (seconds > 0) line += `\n${mbps.toFixed(2)} Mbps`;
-      }
-      lastStats = { timestamp: entry.timestamp, bytesReceived: entry.bytesReceived };
-    });
-
-    if (layer.current) line += `\nlayer ${layer.current}, ${layer.mode}`;
-    if (layer.target) line += `\nwaiting for a keyframe of ${layer.target}`;
-    line += freezes;
-    $("stats").textContent = line;
-  }
-
-  function tick() {
-    $("clock").textContent = clockText(new Date());
-    requestAnimationFrame(tick);
-  }
-
-  $("join").onsubmit = (event) => {
+  document.getElementById("join").onsubmit = (event) => {
     event.preventDefault();
-    watch($("room").value.trim()).catch((e) => setStatus(`Could not connect: ${e.message}`));
+    watch(document.getElementById("room").value.trim());
   };
 
-  $("sound").onclick = () => {
-    const video = $("video");
-    video.muted = !video.muted;
-    $("sound").textContent = video.muted ? "Unmute" : "Mute";
-  };
-
-  // The address keeps the choice, so a reload or a shared link stays in debug.
-  function setDebug(on) {
-    debug = on;
-    $("debug").setAttribute("aria-pressed", on);
-    $("log").hidden = !on;
-
-    clearInterval(probe);
-    lastSource = null;
-    if (on) probe = setInterval(probeTimestamp, 250);
-
-    const query = new URLSearchParams(location.search);
-    if (on) query.set("debug", "");
-    else query.delete("debug");
-    history.replaceState(null, "", query.size ? `?${query}` : location.pathname);
-  }
-
-  $("debug").onclick = () => setDebug(!debug);
-
-  let size = "";
-  $("video").addEventListener("resize", () => {
-    const now = `${$("video").videoWidth}x${$("video").videoHeight}`;
-    if (now !== size) note(`picture is now ${now}`);
-    size = now;
-  });
-  document.addEventListener("visibilitychange", () => note(document.hidden ? "page hidden" : "page visible"));
-  window.addEventListener("blur", () => note("window lost focus"));
-  window.addEventListener("focus", () => note("window focused"));
-
-  setDebug(new URLSearchParams(location.search).has("debug"));
-
-  renderLayers();
-  setInterval(readStats, 1000);
-  tick();
-
-  const room = new URLSearchParams(location.search).get("room");
+  const room = query().get("room");
   if (room) {
-    $("room").value = room;
-    watch(room).catch((e) => setStatus(`Could not connect: ${e.message}`));
+    document.getElementById("room").value = room;
+    watch(room);
   }
 </script>
 </body>
