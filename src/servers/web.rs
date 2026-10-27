@@ -71,6 +71,7 @@ pub async fn run(shards: Arc<Shards>, config: WebConfig) -> anyhow::Result<()> {
 
     let https_api = Router::new()
         .route("/watch", routing::get(watch_page))
+        .route("/stream-viewer.js", routing::get(viewer_sdk))
         .route("/offer", routing::post(sdp_offer))
         .route("/whip", routing::post(whip_sdp_offer))
         .route(
@@ -406,6 +407,14 @@ async fn reissue_stream_key(
 /// A minimal viewer, so the quick start ends at a picture rather than at an API.
 async fn watch_page() -> Html<&'static str> {
     Html(include_str!("../../static/watch.html"))
+}
+
+/// The viewer SDK as one file, for the watch page and any page without a bundler.
+async fn viewer_sdk() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../../static/stream-viewer.js"),
+    )
 }
 
 async fn sdp_offer(

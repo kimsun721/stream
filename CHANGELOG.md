@@ -1,5 +1,14 @@
 # [Unreleased]
 
+## Added
+
+- A viewer SDK for browsers, `@kimsun721/stream-viewer`: joining, playback, simulcast layers, perf reports, reconnecting, the relay and leaf sides of P2P relay, a debug log, and a player built on it. See [sdk/README.md](sdk/README.md). It does not answer the upload probe yet, so the server does not promote a browser to relay.
+- `/stream-viewer.js` serves the same SDK as one file.
+
+## Changed
+
+- `/watch` runs on the SDK.
+
 # [0.1.1]
 
 ## Added

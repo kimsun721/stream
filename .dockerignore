@@ -4,3 +4,5 @@ target
 config.toml
 certs
 docs
+# The server embeds the built bundle from static/.
+sdk

@@ -1,0 +1,42 @@
+{
+  "name": "@kimsun721/stream-viewer",
+  "version": "0.1.0",
+  "description": "Browser viewer for the stream WebRTC SFU: playback, simulcast layers, perf reports and a ready-made player",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kimsun721/stream.git",
+    "directory": "sdk"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./player": {
+      "types": "./dist/player.d.ts",
+      "default": "./dist/player.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "node build.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p test/tsconfig.json",
+    "test": "node --test \"test/*.test.ts\"",
+    "check": "npm run typecheck && npm test && npm run build",
+    "e2e": "node e2e/run.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "esbuild": "0.28.2",
+    "playwright-core": "1.55.0",
+    "typescript": "7.0.2"
+  }
+}

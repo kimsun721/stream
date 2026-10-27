@@ -9,6 +9,8 @@ exercises the same paths a browser would.
 ```text
 cargo test                                        unit and integration
 cargo test --test viewer -- --include-ignored     adds the test that needs ffmpeg installed
+cd sdk && npm run check                           the viewer SDK: types, unit tests, build
+cd sdk && npm run e2e                             the SDK in headless Chrome against a release build
 ```
 
 The load run is separate and is described below.
@@ -22,6 +24,8 @@ The load run is separate and is described below.
 | `tests/control_api.rs` | API key, stream key, content type, duplicate streamer, key reissue, missing rooms, the metrics endpoints |
 | `tests/relay.rs` | Relay promotion, the upload cutoff, leaf gating, the peer link timeout |
 | `tests/load.rs` | The load baseline. Ignored by default |
+| `sdk/e2e/watch.mjs` | One viewer on `/watch`: playback, layer picks, a room going idle and back, a room that is not live |
+| `sdk/e2e/relay.mjs` | Two viewers paired as relay and leaf: the handover both ways, the relay's reports, a relay leaving. The test answers the upload probe the SDK leaves alone |
 
 Each load run worth keeping is recorded under [`baseline/`](baseline/), from
 [`_template.md`](baseline/_template.md), so a later run is compared against an

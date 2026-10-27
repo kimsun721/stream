@@ -346,7 +346,32 @@ async fn the_watch_page_is_served() {
 
     let page = response.text().await.expect("page");
     assert!(
-        page.contains("createDataChannel"),
-        "the page opens its data channel before the offer"
+        page.contains("/stream-viewer.js"),
+        "the page runs on the SDK the server serves"
+    );
+}
+
+#[tokio::test]
+async fn the_viewer_sdk_is_served() {
+    let server = Server::default();
+
+    let response = reqwest::get(server.sdp_url("/stream-viewer.js"))
+        .await
+        .expect("GET /stream-viewer.js");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let content_type = response.headers()["content-type"]
+        .to_str()
+        .expect("content type")
+        .to_string();
+    assert!(
+        content_type.starts_with("text/javascript"),
+        "{content_type}"
+    );
+
+    let script = response.text().await.expect("script");
+    assert!(
+        script.contains("createDataChannel"),
+        "the SDK opens its data channel before the offer"
     );
 }
