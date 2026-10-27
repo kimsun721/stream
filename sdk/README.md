@@ -83,3 +83,10 @@ npm run check    # typecheck, unit tests, build
 ```
 
 `npm run build` also rewrites `../static/stream-viewer.js`. Commit it with the sources; CI fails when it drifts.
+
+```sh
+cargo build --release   # from the repository root
+npm run e2e             # or: npm run e2e -- relay
+```
+
+`e2e/` starts that build with a config of its own, publishes Chrome's fake camera over WHIP and watches it from `/watch` in headless Chrome. It takes Chrome from its usual install path, or `CHROME_PATH`, and the server from `STREAM_BIN`.
