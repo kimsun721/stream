@@ -109,7 +109,7 @@ HTTPS `:8443`, 클라이언트가 직접 호출합니다.
 
 `/whip`은 OBS로 검증했습니다. 브라우저를 포함한 다른 WHIP 클라이언트도 송출할 수 있지만, 키프레임을 주기적으로 보내는 것은 송출자의 책임입니다. 시청자의 레이어 전환은 새 레이어의 키프레임에서 일어나고, 서버는 그 키프레임을 한 번만 요청합니다.
 
-직접 만드는 페이지에서 시청자 프로토콜을 손으로 구현할 필요는 없습니다. npm의 `@kimsun721/stream-viewer`인 [뷰어 SDK](sdk/README.md)가 입장, 재생, 레이어 전환, 재접속을 맡고, 플레이어도 함께 제공합니다.
+직접 만드는 페이지에서 시청자 프로토콜을 손으로 구현할 필요는 없습니다. npm의 `@kimsun721/stream-viewer`인 [뷰어 SDK](sdk/README.md)가 입장, 재생, 레이어 전환, 재접속, P2P 중계를 맡고, 플레이어도 함께 제공합니다.
 
 ## 방 상태
 
@@ -173,7 +173,7 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 
 - [Decisions](docs/decisions/): 설계가 지금 모양인 이유를 남긴 ADR
 - [Architecture](docs/architecture/overview.md): 컴포넌트, 스레드, 데이터 흐름
-- [Features](docs/feature/): simulcast, P2P relay, 뷰어 SDK 설계 문서
+- [Features](docs/feature/): simulcast, P2P relay 설계 문서
 - [Tests](docs/test/README.md): 테스트 구성, 부하 테스트, 기록된 베이스라인
 
 ## 로드맵

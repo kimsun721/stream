@@ -62,7 +62,7 @@ Before choosing the DataChannel, check that str0m's SCTP takes a few Mbps. If it
 
 **Rejected: the server as a stand-in leaf.** The server would open a peer link to the candidate as a leaf and attach the real one only after it passed. That makes the server a WebRTC client inside a media loop, decrypts the whole stream for the trial, and still measures only the path to the server.
 
-**When.** Once relays run in browsers. Today only the str0m test clients answer the relay protocol, and `watch.html` does not speak it.
+**When.** Browsers can relay through the viewer SDK, which leaves the probe unanswered until this lands. Today only the str0m test clients answer it.
 
 ## Notes
 
@@ -70,4 +70,5 @@ Before choosing the DataChannel, check that str0m's SCTP takes a few Mbps. If it
 - A relay forwards only what it receives, so its leaf watches the relay's layer.
 - One relay carries one leaf.
 - No TURN. A pair that cannot connect directly times out and stays on the SFU.
-- A browser re-encodes a track it forwards to another peer link, which costs the relay CPU and quality and changes the bitrate it sends. Passing encoded frames through needs the Encoded Transform API. The test clients forward RTP as is, so this has not come up.
+- A browser re-encodes a track it forwards to another peer link, which costs the relay CPU and quality and changes the bitrate it sends. The viewer SDK holds the encoder near the bitrate the relay receives, with a start and a floor, because a browser starts low and the rate is judged after `min_p2p_connection_age_secs`. Passing encoded frames through needs the Encoded Transform API and a keyframe from the publisher at link up, which the server has no message for. The test clients forward RTP as is.
+- A relay that changes layer while paired changes what its encoder is held to, and its rate lags behind. Seen with a headless Chrome publisher, whose layers come and go: the server demoted pairs while the relay moved between `h` and `m`.

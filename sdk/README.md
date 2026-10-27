@@ -1,6 +1,6 @@
 # @kimsun721/stream-viewer
 
-The browser side of [stream](https://github.com/kimsun721/stream), a WebRTC SFU for live streaming. It joins a room, plays it, follows the simulcast layers the server offers, and reports link quality, so a page does not reimplement the viewer protocol.
+The browser side of [stream](https://github.com/kimsun721/stream), a WebRTC SFU for live streaming. It joins a room, plays it, follows the simulcast layers the server offers, reports link quality, and relays to another viewer when the server pairs it with one, so a page does not reimplement the viewer protocol.
 
 ```sh
 npm install @kimsun721/stream-viewer
@@ -48,14 +48,16 @@ viewer.close();
 | `maxRetryDelayMs` | `10000` | Ceiling for the wait between attempts, which doubles from one second |
 | `statsIntervalMs` | `1000` | How often stats are read and link quality reported |
 | `debug` | `false` | Emit `log` events, also switched with `setDebug` |
-| `rtcConfiguration` | | Passed to `RTCPeerConnection` |
+| `rtcConfiguration` | | Passed to `RTCPeerConnection`, relay links included |
+| `relay` | `true` | Forward the stream to another viewer when the server makes this one a relay |
 
 | Event | Payload |
 | --- | --- |
 | `state` | `idle`, `connecting`, `connected`, `reconnecting`, `not-live`, `failed` or `closed`, with a `reason` |
 | `layers` | The video track's layers, the one being sent, a pending target and the mode |
 | `layerchange` | A switch, with how long it took when it answers a request |
-| `stats` | Picture size, frame rate, bitrate, round trip, freezes, loss |
+| `stats` | Picture size, frame rate, bitrate, round trip, freezes, loss. From the relay link while a leaf watches through it |
+| `role` | `relay`, `leaf` or `null`, and whether the peer link is up |
 | `log` | Debug mode: switches, freezes, RTP timestamp jumps, connection changes |
 | `error` | An error, retried or not |
 
@@ -65,7 +67,12 @@ viewer.close();
 
 - A layer change takes effect on the next keyframe of the new layer. The server asks the publisher for one once, so a publisher has to send keyframes on an interval of its own, as OBS does.
 - Browsers start video muted to allow autoplay. The player has a button for sound; with the core, unmute the element from a user gesture.
-- Relaying to other viewers is not supported yet. The server never promotes a viewer that does not answer the relay protocol.
+- The server may pair two viewers: the relay forwards what it receives to the leaf over a peer link of their own, and the server stops sending to the leaf. Either side falls back to the server's stream when the link drops or the server demotes the pair. A page needs no code for it, and the player says nothing of it outside debug mode.
+- A switch between the server's stream and a relay's keeps the old picture up until the new source has decoded a frame. A leaf whose relay goes silent for a second goes back to the server without waiting for the connection state.
+- A browser encodes a forwarded track again. The relay holds its encoder near the bitrate it receives, since the server demotes a relay that sends well under it.
+- The SDK does not answer the server's upload probe, which the server is to replace with a measurement of its own. Until then the server promotes no browser to relay, and the pairing above does not happen.
+- A leaf watches the relay's layer. Picking a layer has no effect while it does.
+- The relay link has no TURN of its own: pass ICE servers in `rtcConfiguration`, or a pair that cannot connect directly stays on the server.
 - The server serves the same code as one file at `/stream-viewer.js`, which its own `/watch` page uses.
 
 ## Developing

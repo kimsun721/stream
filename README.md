@@ -109,7 +109,7 @@ HTTPS `:8443`, called by clients directly.
 
 `/whip` is tested with OBS. Another WHIP client, a browser included, can publish as well, but sending keyframes on an interval is its job: a viewer changes layer on a keyframe of the new layer, and the server asks for that keyframe once.
 
-A page of your own does not speak the viewer protocol by hand: the [viewer SDK](sdk/README.md), `@kimsun721/stream-viewer` on npm, joins, plays, follows the layers and reconnects, and comes with a player.
+A page of your own does not speak the viewer protocol by hand: the [viewer SDK](sdk/README.md), `@kimsun721/stream-viewer` on npm, joins, plays, follows the layers, reconnects and relays, and comes with a player.
 
 ## Room State
 
@@ -173,7 +173,7 @@ LOAD_METRICS_PORT=9464 cargo test --release --test load -- --ignored --nocapture
 
 - [Decisions](docs/decisions/): ADRs recording why the design is what it is
 - [Architecture](docs/architecture/overview.md): components, threads and data flow
-- [Features](docs/feature/): design docs for simulcast, the P2P relay and the viewer SDK
+- [Features](docs/feature/): design docs for simulcast and the P2P relay
 - [Tests](docs/test/README.md): suites, the load run, and recorded baselines
 
 ## Roadmap
