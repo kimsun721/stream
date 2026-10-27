@@ -68,8 +68,63 @@ function requestLayer(state, rid) {
   };
 }
 
-// src/stats.ts
+// src/relay.ts
 var num = (value) => typeof value === "number" ? value : 0;
+function readSent(entries) {
+  let at = 0;
+  let bytesSent = 0;
+  for (const entry of entries) {
+    at = Math.max(at, num(entry["timestamp"]));
+    if (entry.type === "outbound-rtp") bytesSent += num(entry["bytesSent"]);
+  }
+  return { at, bytesSent };
+}
+function outgoingKbps(previous, next) {
+  const seconds = (next.at - previous.at) / 1e3;
+  if (seconds <= 0) return null;
+  return Math.max(0, Math.round((next.bytesSent - previous.bytesSent) * 8 / seconds / 1e3));
+}
+var CEILING_SHARE = 1.2;
+var FLOOR_SHARE = 0.8;
+function relayVideoCeiling(receivedKbps) {
+  return Math.round(receivedKbps * CEILING_SHARE * 1e3);
+}
+var VIDEO_CODECS = /* @__PURE__ */ new Set(["vp8", "vp9", "h264", "av1", "h265"]);
+function withBitrateHints(sdp, kbps) {
+  const params = `x-google-start-bitrate=${kbps};x-google-min-bitrate=${Math.round(kbps * FLOOR_SHARE)}`;
+  const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+  const lines = sdp.split(eol);
+  const out = [];
+  let video = false;
+  const withFmtp = /* @__PURE__ */ new Set();
+  for (const line of lines) {
+    if (line.startsWith("m=")) video = line.startsWith("m=video");
+    else if (video && line.startsWith("a=fmtp:")) withFmtp.add(line.slice(7, line.indexOf(" ")));
+  }
+  video = false;
+  for (const line of lines) {
+    if (line.startsWith("m=")) video = line.startsWith("m=video");
+    out.push(line);
+    if (!video) continue;
+    const rtpmap = /^a=rtpmap:(\d+) ([^/]+)\//.exec(line);
+    if (rtpmap && VIDEO_CODECS.has(rtpmap[2].toLowerCase()) && !withFmtp.has(rtpmap[1])) {
+      out.push(`a=fmtp:${rtpmap[1]} ${params}`);
+    }
+    const fmtp = /^a=fmtp:(\d+) /.exec(line);
+    if (fmtp && isVideoCodec(lines, fmtp[1])) {
+      out[out.length - 1] = `${line};${params}`;
+    }
+  }
+  return out.join(eol);
+}
+function isVideoCodec(lines, pt) {
+  const rtpmap = lines.find((l) => l.startsWith(`a=rtpmap:${pt} `));
+  const name = rtpmap ? /^a=rtpmap:\d+ ([^/]+)\//.exec(rtpmap)?.[1] : void 0;
+  return !!name && VIDEO_CODECS.has(name.toLowerCase());
+}
+
+// src/stats.ts
+var num2 = (value) => typeof value === "number" ? value : 0;
 var opt = (value) => typeof value === "number" ? value : null;
 function readSnapshot(entries) {
   const all = Array.from(entries);
@@ -79,19 +134,20 @@ function readSnapshot(entries) {
   let packetsLost = 0;
   let video = null;
   for (const entry of all) {
-    at = Math.max(at, num(entry["timestamp"]));
+    at = Math.max(at, num2(entry["timestamp"]));
     if (entry.type !== "inbound-rtp") continue;
-    packetsReceived += num(entry["packetsReceived"]);
-    packetsLost += Math.max(0, num(entry["packetsLost"]));
+    packetsReceived += num2(entry["packetsReceived"]);
+    packetsLost += Math.max(0, num2(entry["packetsLost"]));
     if (entry["kind"] === "video") {
       video = {
-        width: num(entry["frameWidth"]),
-        height: num(entry["frameHeight"]),
-        bytesReceived: num(entry["bytesReceived"]),
+        width: num2(entry["frameWidth"]),
+        height: num2(entry["frameHeight"]),
+        bytesReceived: num2(entry["bytesReceived"]),
         framesPerSecond: opt(entry["framesPerSecond"]),
-        framesDropped: num(entry["framesDropped"]),
-        freezeCount: num(entry["freezeCount"]),
-        freezeSeconds: num(entry["totalFreezesDuration"])
+        framesDecoded: num2(entry["framesDecoded"]),
+        framesDropped: num2(entry["framesDropped"]),
+        freezeCount: num2(entry["freezeCount"]),
+        freezeSeconds: num2(entry["totalFreezesDuration"])
       };
     }
   }
@@ -158,6 +214,11 @@ var JoinError = class extends Error {
 var DISCONNECTED_GRACE_MS = 5e3;
 var GATHERING_TIMEOUT_MS = 2e3;
 var TIMESTAMP_PROBE_MS = 250;
+var RECEIVED_WINDOW = 5;
+var HANDOVER_TIMEOUT_MS = 1e4;
+var HANDOVER_POLL_MS = 100;
+var RELAY_SILENCE_MS = 1e3;
+var RELAY_WATCH_MS = 250;
 var Viewer = class extends Emitter {
   /** Carries the room's tracks across reconnects, so a `<video>` is attached once. */
   stream = new MediaStream();
@@ -167,6 +228,22 @@ var Viewer = class extends Emitter {
   #debug;
   #pc = null;
   #channel = null;
+  #sfuTracks = /* @__PURE__ */ new Map();
+  // At most one of the two links is open: a relay's to its leaf, or a leaf's
+  // from its relay.
+  #role = null;
+  #linked = false;
+  #relayLink = null;
+  #leafLink = null;
+  #relayTracks = /* @__PURE__ */ new Map();
+  #lastSent = null;
+  #linking = false;
+  #watchTimer;
+  // Video received from the server over the last few seconds, which a relay
+  // holds its encoder to. The highest of them, so a freeze just before a
+  // promotion does not start the relay near zero.
+  #received = [];
+  #lastLeafSnapshot = null;
   #messages = Promise.resolve();
   #attempts = 0;
   #joinedOnce = false;
@@ -189,7 +266,8 @@ var Viewer = class extends Emitter {
       maxRetryDelayMs: options.maxRetryDelayMs ?? 1e4,
       statsIntervalMs: options.statsIntervalMs ?? 1e3,
       debug: options.debug ?? false,
-      rtcConfiguration: options.rtcConfiguration
+      rtcConfiguration: options.rtcConfiguration,
+      relay: options.relay ?? true
     };
     this.#debug = this.#options.debug;
   }
@@ -201,6 +279,9 @@ var Viewer = class extends Emitter {
   }
   get debug() {
     return this.#debug;
+  }
+  get role() {
+    return { role: this.#role, linked: this.#linked };
   }
   /**
    * Joins the room. Resolves once the server has answered the first offer.
@@ -292,11 +373,12 @@ var Viewer = class extends Emitter {
     this.#layers = initialLayers();
     this.emit("layers", this.#layers);
     pc.ontrack = (event) => {
-      for (const old of this.stream.getTracks().filter((t) => t.kind === event.track.kind)) {
-        this.stream.removeTrack(old);
-      }
-      this.stream.addTrack(event.track);
-      this.#log(`receiving ${event.track.kind}`);
+      const track = event.track;
+      this.#sfuTracks.set(track.kind, track);
+      if (!this.#onRelayStream()) this.#show(track);
+      const sender = this.#relayLink?.getSenders().find((s) => s.track?.kind === track.kind);
+      if (sender) void sender.replaceTrack(track).catch((error) => this.emit("error", error));
+      this.#log(`receiving ${track.kind}`);
     };
     pc.onconnectionstatechange = () => this.#onConnectionState(pc);
     const channel = pc.createDataChannel("data");
@@ -381,13 +463,203 @@ var Viewer = class extends Emitter {
         this.emit("layers", this.#layers);
         break;
       }
-      default: {
+      case "probe_available_upload": {
         if (!this.#ignored.has(message.type)) {
           this.#ignored.add(message.type);
-          this.#log(`${message.type} ignored, relay is not supported yet`);
+          this.#log("upload probe ignored, the server is to measure upload itself");
         }
+        break;
+      }
+      case "request_offer": {
+        await this.#offerToLeaf();
+        break;
+      }
+      case "p2p_answer": {
+        const link = this.#relayLink;
+        if (!link || link.signalingState !== "have-local-offer") break;
+        const kbps = this.#receivedKbps();
+        const sdp = kbps ? withBitrateHints(message.sdp, kbps) : message.sdp;
+        await link.setRemoteDescription({ type: "answer", sdp });
+        break;
+      }
+      case "p2p_offer": {
+        await this.#answerRelay(message.sdp);
+        break;
+      }
+      case "demote": {
+        this.#dropLink("demoted, back on the server's stream");
+        break;
       }
     }
+  }
+  // The relay side. The server has promoted this viewer and pairs it with a
+  // leaf, so this viewer offers the leaf what it receives.
+  async #offerToLeaf() {
+    if (!this.#options.relay) {
+      this.#log("asked to relay, declined by the relay option");
+      return;
+    }
+    this.#dropLink();
+    const link = new RTCPeerConnection(this.#options.rtcConfiguration);
+    this.#relayLink = link;
+    this.#setRole("relay", false);
+    const kbps = this.#receivedKbps();
+    for (const track of this.#sfuTracks.values()) {
+      const ceiling = track.kind === "video" && kbps ? relayVideoCeiling(kbps) : null;
+      link.addTransceiver(track, {
+        direction: "sendonly",
+        streams: [this.stream],
+        ...ceiling === null ? {} : { sendEncodings: [{ maxBitrate: ceiling }] }
+      });
+    }
+    link.onconnectionstatechange = () => {
+      if (this.#relayLink !== link) return;
+      const state = link.connectionState;
+      this.#log(`link to leaf ${state}`);
+      if (state === "connected") this.#setRole("relay", true);
+      else if (this.#linked) this.#setRole("relay", false);
+    };
+    await link.setLocalDescription(await link.createOffer());
+    await gathered(link);
+    if (this.#relayLink !== link) return;
+    this.#send({ type: "p2p_offer", sdp: link.localDescription?.sdp ?? "" });
+    this.#log("promoted to relay, offered a link to the leaf");
+  }
+  // Follows the layer this viewer receives, which changes with its own
+  // bandwidth and its picks.
+  async #holdRelayCeiling(link) {
+    const sender = link.getSenders().find((s) => s.track?.kind === "video");
+    const kbps = this.#receivedKbps();
+    if (!sender || !kbps) return;
+    const ceiling = relayVideoCeiling(kbps);
+    const parameters = sender.getParameters();
+    const encoding = parameters.encodings[0];
+    const current = encoding?.maxBitrate;
+    if (!encoding || current && Math.abs(current - ceiling) < current * 0.1) return;
+    encoding.maxBitrate = ceiling;
+    await sender.setParameters(parameters);
+  }
+  // The leaf side. The server has paired this viewer with a relay, which
+  // offers a link. The server keeps sending until the link is up.
+  async #answerRelay(sdp) {
+    this.#dropLink();
+    const link = new RTCPeerConnection(this.#options.rtcConfiguration);
+    this.#leafLink = link;
+    this.#setRole("leaf", false);
+    link.ontrack = (event) => {
+      this.#relayTracks.set(event.track.kind, event.track);
+      if (this.#onRelayStream()) this.#show(event.track);
+    };
+    link.onconnectionstatechange = () => void this.#onLeafLink(link);
+    await link.setRemoteDescription({ type: "offer", sdp });
+    await link.setLocalDescription(await link.createAnswer());
+    await gathered(link);
+    if (this.#leafLink !== link) return;
+    this.#send({ type: "p2p_answer", sdp: link.localDescription?.sdp ?? "" });
+    this.#log("paired with a relay, answered its link");
+  }
+  async #onLeafLink(link) {
+    if (this.#leafLink !== link) return;
+    const state = link.connectionState;
+    this.#log(`link from relay ${state}`);
+    if (state === "connected" && !this.#linked && !this.#linking) {
+      this.#linking = true;
+      const ready = await decodedPast(link, 0, HANDOVER_TIMEOUT_MS);
+      this.#linking = false;
+      if (this.#leafLink !== link) return;
+      if (!ready) {
+        this.#log("the relay sent no picture, staying on the server's stream");
+        return;
+      }
+      for (const track of this.#relayTracks.values()) this.#show(track);
+      this.#setRole("leaf", true);
+      this.#lastLeafSnapshot = null;
+      this.#send({ type: "p2p_connected" });
+      this.#watchRelay(link);
+      this.#log("watching through the relay");
+    } else if ((state === "disconnected" || state === "failed") && this.#linked) {
+      this.#relayLost();
+    } else if (state === "failed") {
+      this.#dropLink("could not reach the relay");
+    }
+  }
+  #watchRelay(link) {
+    clearInterval(this.#watchTimer);
+    let packets = -1;
+    let quietSince = performance.now();
+    this.#watchTimer = setInterval(async () => {
+      const received = readSnapshot(Array.from((await link.getStats()).values())).packetsReceived;
+      if (this.#leafLink !== link || !this.#linked) return;
+      if (received !== packets) {
+        packets = received;
+        quietSince = performance.now();
+      } else if (performance.now() - quietSince >= RELAY_SILENCE_MS) {
+        this.#relayLost();
+      }
+    }, RELAY_WATCH_MS);
+  }
+  #relayLost() {
+    this.#send({ type: "p2p_disconnected" });
+    this.#dropLink("lost the relay, back on the server's stream");
+  }
+  /** Closes whichever relay link is open and plays the server's stream again. */
+  #dropLink(reason) {
+    if (this.#role === null) return;
+    if (reason) this.#log(reason);
+    const wasOnRelay = this.#onRelayStream();
+    const links = [this.#relayLink, this.#leafLink];
+    const relayTracks = [...this.#relayTracks.values()];
+    clearInterval(this.#watchTimer);
+    this.#relayLink = null;
+    this.#leafLink = null;
+    this.#relayTracks.clear();
+    this.#linking = false;
+    this.#lastSent = null;
+    this.#lastLeafSnapshot = null;
+    this.#setRole(null, false);
+    const close = () => {
+      for (const link of links) {
+        if (!link) continue;
+        link.ontrack = null;
+        link.onconnectionstatechange = null;
+        link.close();
+      }
+      for (const track of relayTracks) track.stop();
+    };
+    const audio = this.#sfuTracks.get("audio");
+    if (audio) this.#show(audio);
+    const pc = this.#pc;
+    if (!wasOnRelay || !pc) {
+      for (const track of this.#sfuTracks.values()) this.#show(track);
+      close();
+      return;
+    }
+    void framesDecoded(pc).then((before) => decodedPast(pc, before, HANDOVER_TIMEOUT_MS)).then((ready) => {
+      const video = this.#sfuTracks.get("video");
+      if (this.#pc === pc && !this.#onRelayStream() && video) this.#show(video);
+      if (!ready) this.#log("the server's stream sent no picture in time");
+      close();
+    });
+  }
+  #receivedKbps() {
+    return this.#received.length ? Math.max(...this.#received) : null;
+  }
+  #onRelayStream() {
+    return this.#role === "leaf" && this.#linked;
+  }
+  /** Puts `track` in the attached stream in place of any track of its kind. */
+  #show(track) {
+    for (const old of this.stream.getTracks()) {
+      if (old.kind === track.kind && old !== track) this.stream.removeTrack(old);
+    }
+    if (!this.stream.getTracks().includes(track)) this.stream.addTrack(track);
+  }
+  #setRole(role, linked) {
+    if (this.#role === role && this.#linked === linked) return;
+    this.#role = role;
+    this.#linked = linked;
+    this.#lastSource = null;
+    this.emit("role", { role, linked });
   }
   #request(rid) {
     const { state, messages } = requestLayer(this.#layers, rid);
@@ -418,6 +690,36 @@ var Viewer = class extends Emitter {
     if (previous) {
       const perf = perfReport(previous, next);
       if (perf) this.#send({ type: "perf_report", ...perf });
+      const mbps = viewerStats(previous, next).mbps;
+      if (mbps !== null && !this.#onRelayStream()) {
+        this.#received = [...this.#received.slice(-(RECEIVED_WINDOW - 1)), Math.round(mbps * 1e3)];
+      }
+    }
+    if (this.#relayLink) {
+      await this.#reportOutgoing(this.#relayLink);
+      await this.#holdRelayCeiling(this.#relayLink).catch((error) => this.emit("error", error));
+    }
+    const shown = this.#onRelayStream() && this.#leafLink ? await this.#readLeafStats(this.#leafLink) : null;
+    if (this.#pc !== pc) return;
+    if (shown) this.#describe(shown.previous, shown.next);
+    else this.#describe(previous, next);
+  }
+  async #readLeafStats(link) {
+    const next = readSnapshot(Array.from((await link.getStats()).values()));
+    const previous = this.#lastLeafSnapshot;
+    this.#lastLeafSnapshot = next;
+    return { previous, next };
+  }
+  async #reportOutgoing(link) {
+    const next = readSent(Array.from((await link.getStats()).values()));
+    const previous = this.#lastSent;
+    this.#lastSent = next;
+    if (this.#relayLink !== link || !this.#linked || !previous) return;
+    const kbps = outgoingKbps(previous, next);
+    if (kbps !== null) this.#send({ type: "relay_outgoing", kbps });
+  }
+  #describe(previous, next) {
+    if (previous) {
       const freezes = freezeNote(previous, next);
       if (freezes) this.#log(freezes);
       const before = previous.video;
@@ -437,7 +739,8 @@ var Viewer = class extends Emitter {
   // Read from the receiver, not from drawn frames: a browser draws a window
   // nobody can see about once a second.
   #probeTimestamp() {
-    const receiver = this.#pc?.getReceivers().find((r) => r.track?.kind === "video");
+    const link = this.#onRelayStream() ? this.#leafLink : this.#pc;
+    const receiver = link?.getReceivers().find((r) => r.track?.kind === "video");
     const source = receiver?.getSynchronizationSources().sort((a, b) => b.timestamp - a.timestamp)[0];
     if (!source || source.rtpTimestamp === void 0) return;
     const now = { timestamp: source.timestamp, rtpTimestamp: source.rtpTimestamp };
@@ -455,6 +758,8 @@ var Viewer = class extends Emitter {
     clearTimeout(this.#graceTimer);
     clearInterval(this.#statsTimer);
     clearInterval(this.#probeTimer);
+    clearInterval(this.#watchTimer);
+    this.#dropLink();
     const pc = this.#pc;
     this.#pc = null;
     this.#channel = null;
@@ -462,6 +767,7 @@ var Viewer = class extends Emitter {
     this.#lastSnapshot = null;
     this.#lastSource = null;
     this.#asked = null;
+    this.#received = [];
     if (pc) {
       pc.ontrack = null;
       pc.onconnectionstatechange = null;
@@ -471,6 +777,7 @@ var Viewer = class extends Emitter {
       track.stop();
       this.stream.removeTrack(track);
     }
+    this.#sfuTracks.clear();
   }
   #setState(state, reason) {
     if (this.#state === state) return;
@@ -484,6 +791,20 @@ var Viewer = class extends Emitter {
 function url(server, path) {
   const base = server ?? globalThis.location.origin;
   return `${base.replace(/\/+$/, "")}/${path}`;
+}
+async function framesDecoded(pc) {
+  if (pc.connectionState === "closed") return 0;
+  return readSnapshot(Array.from((await pc.getStats()).values())).video?.framesDecoded ?? 0;
+}
+async function decodedPast(pc, before, timeoutMs) {
+  if (!pc.getReceivers().some((r) => r.track?.kind === "video")) return true;
+  const giveUpAt = performance.now() + timeoutMs;
+  while (performance.now() < giveUpAt) {
+    if (pc.connectionState === "closed") return false;
+    if (await framesDecoded(pc) > before) return true;
+    await new Promise((resolve) => setTimeout(resolve, HANDOVER_POLL_MS));
+  }
+  return false;
 }
 function gathered(pc) {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
@@ -601,6 +922,9 @@ ${lastStats.mbps.toFixed(2)} Mbps`;
 layer ${layers.current}, ${layers.mode}`;
     if (layers.target) text += `
 waiting for a keyframe of ${layers.target}`;
+    const relay = viewer.debug ? relayText(viewer.role) : null;
+    if (relay) text += `
+${relay}`;
     if (viewer.debug && lastStats) {
       text += `
 freezes ${lastStats.freezeCount}, ${lastStats.freezeSeconds.toFixed(1)} s`;
@@ -646,6 +970,7 @@ rtt ${Math.round(lastStats.rttMs)} ms`;
       lastStats = next;
       renderStats();
     }),
+    viewer.on("role", () => renderStats()),
     viewer.on("log", ({ at, text }) => note(text, at))
   ];
   sound.onclick = () => {
@@ -707,6 +1032,11 @@ function statusText(state, room, reason) {
     case "closed":
       return "Stopped.";
   }
+}
+function relayText({ role, linked }) {
+  if (role === "relay") return linked ? "relaying to a viewer" : "linking to a viewer";
+  if (role === "leaf") return linked ? "watching through a relay" : "linking to a relay";
+  return null;
 }
 function clockText(now) {
   const pad = (n, width = 2) => String(n).padStart(width, "0");

@@ -137,6 +137,9 @@ export function createPlayer(container: HTMLElement, options: PlayerOptions): Pl
     if (lastStats?.mbps != null) text += `\n${lastStats.mbps.toFixed(2)} Mbps`;
     if (layers.current) text += `\nlayer ${layers.current}, ${layers.mode}`;
     if (layers.target) text += `\nwaiting for a keyframe of ${layers.target}`;
+    // A viewer has no reason to know where its picture comes from.
+    const relay = viewer.debug ? relayText(viewer.role) : null;
+    if (relay) text += `\n${relay}`;
     if (viewer.debug && lastStats) {
       text += `\nfreezes ${lastStats.freezeCount}, ${lastStats.freezeSeconds.toFixed(1)} s`;
       if (lastStats.rttMs !== null) text += `\nrtt ${Math.round(lastStats.rttMs)} ms`;
@@ -186,6 +189,7 @@ export function createPlayer(container: HTMLElement, options: PlayerOptions): Pl
       lastStats = next;
       renderStats();
     }),
+    viewer.on("role", () => renderStats()),
     viewer.on("log", ({ at, text }) => note(text, at)),
   ];
 
@@ -253,6 +257,12 @@ function statusText(state: ViewerState, room: string, reason?: string): string {
     case "closed":
       return "Stopped.";
   }
+}
+
+function relayText({ role, linked }: Viewer["role"]): string | null {
+  if (role === "relay") return linked ? "relaying to a viewer" : "linking to a viewer";
+  if (role === "leaf") return linked ? "watching through a relay" : "linking to a relay";
+  return null;
 }
 
 function clockText(now: Date): string {

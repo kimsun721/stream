@@ -12,6 +12,7 @@ export interface Snapshot {
     height: number;
     bytesReceived: number;
     framesPerSecond: number | null;
+    framesDecoded: number;
     framesDropped: number;
     freezeCount: number;
     freezeSeconds: number;
@@ -60,6 +61,7 @@ export function readSnapshot(entries: Iterable<Entry>): Snapshot {
         height: num(entry["frameHeight"]),
         bytesReceived: num(entry["bytesReceived"]),
         framesPerSecond: opt(entry["framesPerSecond"]),
+        framesDecoded: num(entry["framesDecoded"]),
         framesDropped: num(entry["framesDropped"]),
         freezeCount: num(entry["freezeCount"]),
         freezeSeconds: num(entry["totalFreezesDuration"]),

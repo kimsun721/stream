@@ -18,7 +18,8 @@ export type ServerMessage =
       layer_mode: LayerMode;
     }
   | { type: "layer_changed"; mid: string; rid: string }
-  // The relay protocol. Not answered yet, so the server never promotes this viewer.
+  // Left unanswered until the server measures upload itself, so a browser is
+  // not promoted to relay yet.
   | { type: "probe_available_upload" }
   | { type: "request_offer" }
   | { type: "p2p_offer"; sdp: string }
@@ -30,7 +31,12 @@ export type ClientMessage =
   | { type: "answer"; sdp: string }
   | { type: "set_layer"; mid: string; rid: string }
   | { type: "set_layer_mode"; mid: string; layer_mode: LayerMode }
-  | { type: "perf_report"; rtt_ms: number; loss_pct: number };
+  | { type: "perf_report"; rtt_ms: number; loss_pct: number }
+  | { type: "p2p_offer"; sdp: string }
+  | { type: "p2p_answer"; sdp: string }
+  | { type: "p2p_connected" }
+  | { type: "p2p_disconnected" }
+  | { type: "relay_outgoing"; kbps: number };
 
 export interface OfferRequest {
   type: "offer";

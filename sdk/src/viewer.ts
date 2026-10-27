@@ -13,6 +13,14 @@ import {
   type ServerMessage,
 } from "./protocol.js";
 import {
+  outgoingKbps,
+  readSent,
+  relayVideoCeiling,
+  withBitrateHints,
+  type RelayRole,
+  type SendSnapshot,
+} from "./relay.js";
+import {
   freezeNote,
   perfReport,
   readSnapshot,
@@ -49,8 +57,14 @@ export interface ViewerOptions {
   statsIntervalMs?: number;
   /** Emit `log` events. Can be switched later with `setDebug`. */
   debug?: boolean;
-  /** Passed to `RTCPeerConnection`, for ICE servers and the like. */
+  /** Passed to `RTCPeerConnection`, for ICE servers and the like. Also used for relay links. */
   rtcConfiguration?: RTCConfiguration;
+  /**
+   * Forward the stream to another viewer when the server makes this one a
+   * relay. Costs this viewer upload and the CPU to encode the stream again.
+   * Defaults to true. Receiving from a relay needs no option.
+   */
+  relay?: boolean;
 }
 
 export type ViewerEvents = {
@@ -59,6 +73,11 @@ export type ViewerEvents = {
   /** The server switched layer. `waitedMs` is set when this switch answers a request. */
   layerchange: { from: string | null; to: string; waitedMs: number | null };
   stats: ViewerStats;
+  /**
+   * This viewer's part in a P2P relay pair, or null for none. `linked` is
+   * whether the peer link is up: a linked leaf plays its relay's stream.
+   */
+  role: { role: RelayRole | null; linked: boolean };
   /** Debug mode only. */
   log: { at: Date; text: string };
   error: Error;
@@ -82,6 +101,17 @@ const DISCONNECTED_GRACE_MS = 5000;
 // finish before it is posted. Host candidates take milliseconds.
 const GATHERING_TIMEOUT_MS = 2000;
 const TIMESTAMP_PROBE_MS = 250;
+const RECEIVED_WINDOW = 5;
+// A picture is swapped only once the source taking over has decoded a frame,
+// so the viewer sees the old one meanwhile rather than a freeze. The server
+// asks the publisher for a keyframe when it takes a leaf back, and a publisher
+// on a fixed schedule, as OBS is, may take seconds to send one.
+const HANDOVER_TIMEOUT_MS = 10_000;
+const HANDOVER_POLL_MS = 100;
+// A relay that closes its page takes seconds to show in the connection state.
+// Its media stops at once, so a leaf goes by that.
+const RELAY_SILENCE_MS = 1000;
+const RELAY_WATCH_MS = 250;
 
 export class Viewer extends Emitter<ViewerEvents> {
   /** Carries the room's tracks across reconnects, so a `<video>` is attached once. */
@@ -96,6 +126,23 @@ export class Viewer extends Emitter<ViewerEvents> {
 
   #pc: RTCPeerConnection | null = null;
   #channel: RTCDataChannel | null = null;
+  #sfuTracks = new Map<string, MediaStreamTrack>();
+
+  // At most one of the two links is open: a relay's to its leaf, or a leaf's
+  // from its relay.
+  #role: RelayRole | null = null;
+  #linked = false;
+  #relayLink: RTCPeerConnection | null = null;
+  #leafLink: RTCPeerConnection | null = null;
+  #relayTracks = new Map<string, MediaStreamTrack>();
+  #lastSent: SendSnapshot | null = null;
+  #linking = false;
+  #watchTimer: ReturnType<typeof setInterval> | undefined;
+  // Video received from the server over the last few seconds, which a relay
+  // holds its encoder to. The highest of them, so a freeze just before a
+  // promotion does not start the relay near zero.
+  #received: number[] = [];
+  #lastLeafSnapshot: Snapshot | null = null;
   #messages: Promise<void> = Promise.resolve();
 
   #attempts = 0;
@@ -123,6 +170,7 @@ export class Viewer extends Emitter<ViewerEvents> {
       statsIntervalMs: options.statsIntervalMs ?? 1000,
       debug: options.debug ?? false,
       rtcConfiguration: options.rtcConfiguration,
+      relay: options.relay ?? true,
     };
     this.#debug = this.#options.debug;
   }
@@ -137,6 +185,10 @@ export class Viewer extends Emitter<ViewerEvents> {
 
   get debug(): boolean {
     return this.#debug;
+  }
+
+  get role(): { role: RelayRole | null; linked: boolean } {
+    return { role: this.#role, linked: this.#linked };
   }
 
   /**
@@ -250,11 +302,12 @@ export class Viewer extends Emitter<ViewerEvents> {
     this.emit("layers", this.#layers);
 
     pc.ontrack = (event) => {
-      for (const old of this.stream.getTracks().filter((t) => t.kind === event.track.kind)) {
-        this.stream.removeTrack(old);
-      }
-      this.stream.addTrack(event.track);
-      this.#log(`receiving ${event.track.kind}`);
+      const track = event.track;
+      this.#sfuTracks.set(track.kind, track);
+      if (!this.#onRelayStream()) this.#show(track);
+      const sender = this.#relayLink?.getSenders().find((s) => s.track?.kind === track.kind);
+      if (sender) void sender.replaceTrack(track).catch((error) => this.emit("error", error));
+      this.#log(`receiving ${track.kind}`);
     };
     pc.onconnectionstatechange = () => this.#onConnectionState(pc);
 
@@ -362,14 +415,254 @@ export class Viewer extends Emitter<ViewerEvents> {
         break;
       }
 
-      default: {
-        // The relay protocol. Left unanswered, the server never promotes this viewer.
+      case "probe_available_upload": {
+        // A browser cannot measure its own upload honestly. The server is to
+        // measure it instead, and until then this viewer is never promoted.
         if (!this.#ignored.has(message.type)) {
           this.#ignored.add(message.type);
-          this.#log(`${message.type} ignored, relay is not supported yet`);
+          this.#log("upload probe ignored, the server is to measure upload itself");
         }
+        break;
+      }
+
+      case "request_offer": {
+        await this.#offerToLeaf();
+        break;
+      }
+
+      case "p2p_answer": {
+        const link = this.#relayLink;
+        if (!link || link.signalingState !== "have-local-offer") break;
+        const kbps = this.#receivedKbps();
+        const sdp = kbps ? withBitrateHints(message.sdp, kbps) : message.sdp;
+        await link.setRemoteDescription({ type: "answer", sdp });
+        break;
+      }
+
+      case "p2p_offer": {
+        await this.#answerRelay(message.sdp);
+        break;
+      }
+
+      case "demote": {
+        this.#dropLink("demoted, back on the server's stream");
+        break;
       }
     }
+  }
+
+  // The relay side. The server has promoted this viewer and pairs it with a
+  // leaf, so this viewer offers the leaf what it receives.
+  async #offerToLeaf(): Promise<void> {
+    if (!this.#options.relay) {
+      this.#log("asked to relay, declined by the relay option");
+      return;
+    }
+    this.#dropLink();
+
+    const link = new RTCPeerConnection(this.#options.rtcConfiguration);
+    this.#relayLink = link;
+    this.#setRole("relay", false);
+
+    // The browser encodes the tracks again on the way out, so its own key
+    // frame starts the leaf's picture and no request reaches the publisher.
+    const kbps = this.#receivedKbps();
+    for (const track of this.#sfuTracks.values()) {
+      const ceiling = track.kind === "video" && kbps ? relayVideoCeiling(kbps) : null;
+      link.addTransceiver(track, {
+        direction: "sendonly",
+        streams: [this.stream],
+        ...(ceiling === null ? {} : { sendEncodings: [{ maxBitrate: ceiling }] }),
+      });
+    }
+
+    link.onconnectionstatechange = () => {
+      if (this.#relayLink !== link) return;
+      const state = link.connectionState;
+      this.#log(`link to leaf ${state}`);
+      if (state === "connected") this.#setRole("relay", true);
+      // The leaf reports a lost link and the server demotes both, so the
+      // relay only waits for that.
+      else if (this.#linked) this.#setRole("relay", false);
+    };
+
+    await link.setLocalDescription(await link.createOffer());
+    await gathered(link);
+    if (this.#relayLink !== link) return;
+    this.#send({ type: "p2p_offer", sdp: link.localDescription?.sdp ?? "" });
+    this.#log("promoted to relay, offered a link to the leaf");
+  }
+
+  // Follows the layer this viewer receives, which changes with its own
+  // bandwidth and its picks.
+  async #holdRelayCeiling(link: RTCPeerConnection): Promise<void> {
+    const sender = link.getSenders().find((s) => s.track?.kind === "video");
+    const kbps = this.#receivedKbps();
+    if (!sender || !kbps) return;
+
+    const ceiling = relayVideoCeiling(kbps);
+    const parameters = sender.getParameters();
+    const encoding = parameters.encodings[0];
+    const current = encoding?.maxBitrate;
+    if (!encoding || (current && Math.abs(current - ceiling) < current * 0.1)) return;
+
+    encoding.maxBitrate = ceiling;
+    await sender.setParameters(parameters);
+  }
+
+  // The leaf side. The server has paired this viewer with a relay, which
+  // offers a link. The server keeps sending until the link is up.
+  async #answerRelay(sdp: string): Promise<void> {
+    this.#dropLink();
+
+    const link = new RTCPeerConnection(this.#options.rtcConfiguration);
+    this.#leafLink = link;
+    this.#setRole("leaf", false);
+
+    link.ontrack = (event) => {
+      this.#relayTracks.set(event.track.kind, event.track);
+      if (this.#onRelayStream()) this.#show(event.track);
+    };
+    link.onconnectionstatechange = () => void this.#onLeafLink(link);
+
+    await link.setRemoteDescription({ type: "offer", sdp });
+    await link.setLocalDescription(await link.createAnswer());
+    await gathered(link);
+    if (this.#leafLink !== link) return;
+    this.#send({ type: "p2p_answer", sdp: link.localDescription?.sdp ?? "" });
+    this.#log("paired with a relay, answered its link");
+  }
+
+  async #onLeafLink(link: RTCPeerConnection): Promise<void> {
+    if (this.#leafLink !== link) return;
+    const state = link.connectionState;
+    this.#log(`link from relay ${state}`);
+
+    if (state === "connected" && !this.#linked && !this.#linking) {
+      // The server stops sending on p2p_connected, so it goes only once the
+      // relay's picture is there to take over. Left unsent, the server gives
+      // the link up on its own.
+      this.#linking = true;
+      const ready = await decodedPast(link, 0, HANDOVER_TIMEOUT_MS);
+      this.#linking = false;
+      if (this.#leafLink !== link) return;
+      if (!ready) {
+        this.#log("the relay sent no picture, staying on the server's stream");
+        return;
+      }
+
+      for (const track of this.#relayTracks.values()) this.#show(track);
+      this.#setRole("leaf", true);
+      this.#lastLeafSnapshot = null;
+      this.#send({ type: "p2p_connected" });
+      this.#watchRelay(link);
+      this.#log("watching through the relay");
+    } else if ((state === "disconnected" || state === "failed") && this.#linked) {
+      this.#relayLost();
+    } else if (state === "failed") {
+      // The link never came up. The server gives up on it by itself.
+      this.#dropLink("could not reach the relay");
+    }
+  }
+
+  #watchRelay(link: RTCPeerConnection): void {
+    clearInterval(this.#watchTimer);
+    let packets = -1;
+    let quietSince = performance.now();
+
+    this.#watchTimer = setInterval(async () => {
+      const received = readSnapshot(Array.from((await link.getStats()).values())).packetsReceived;
+      if (this.#leafLink !== link || !this.#linked) return;
+
+      if (received !== packets) {
+        packets = received;
+        quietSince = performance.now();
+      } else if (performance.now() - quietSince >= RELAY_SILENCE_MS) {
+        this.#relayLost();
+      }
+    }, RELAY_WATCH_MS);
+  }
+
+  #relayLost(): void {
+    // Not worth the grace the server connection gets: the server's stream is
+    // one message away.
+    this.#send({ type: "p2p_disconnected" });
+    this.#dropLink("lost the relay, back on the server's stream");
+  }
+
+  /** Closes whichever relay link is open and plays the server's stream again. */
+  #dropLink(reason?: string): void {
+    if (this.#role === null) return;
+    if (reason) this.#log(reason);
+
+    const wasOnRelay = this.#onRelayStream();
+    const links = [this.#relayLink, this.#leafLink];
+    const relayTracks = [...this.#relayTracks.values()];
+    clearInterval(this.#watchTimer);
+    this.#relayLink = null;
+    this.#leafLink = null;
+    this.#relayTracks.clear();
+    this.#linking = false;
+    this.#lastSent = null;
+    this.#lastLeafSnapshot = null;
+    this.#setRole(null, false);
+
+    const close = () => {
+      for (const link of links) {
+        if (!link) continue;
+        link.ontrack = null;
+        link.onconnectionstatechange = null;
+        link.close();
+      }
+      for (const track of relayTracks) track.stop();
+    };
+
+    // Audio needs no keyframe and comes back at once.
+    const audio = this.#sfuTracks.get("audio");
+    if (audio) this.#show(audio);
+
+    const pc = this.#pc;
+    if (!wasOnRelay || !pc) {
+      for (const track of this.#sfuTracks.values()) this.#show(track);
+      close();
+      return;
+    }
+
+    // The relay's picture stays up, or its last frame if the relay is gone,
+    // until the server's stream has a frame of its own.
+    void framesDecoded(pc)
+      .then((before) => decodedPast(pc, before, HANDOVER_TIMEOUT_MS))
+      .then((ready) => {
+        const video = this.#sfuTracks.get("video");
+        if (this.#pc === pc && !this.#onRelayStream() && video) this.#show(video);
+        if (!ready) this.#log("the server's stream sent no picture in time");
+        close();
+      });
+  }
+
+  #receivedKbps(): number | null {
+    return this.#received.length ? Math.max(...this.#received) : null;
+  }
+
+  #onRelayStream(): boolean {
+    return this.#role === "leaf" && this.#linked;
+  }
+
+  /** Puts `track` in the attached stream in place of any track of its kind. */
+  #show(track: MediaStreamTrack): void {
+    for (const old of this.stream.getTracks()) {
+      if (old.kind === track.kind && old !== track) this.stream.removeTrack(old);
+    }
+    if (!this.stream.getTracks().includes(track)) this.stream.addTrack(track);
+  }
+
+  #setRole(role: RelayRole | null, linked: boolean): void {
+    if (this.#role === role && this.#linked === linked) return;
+    this.#role = role;
+    this.#linked = linked;
+    // The relay's stream has RTP timestamps of its own.
+    this.#lastSource = null;
+    this.emit("role", { role, linked });
   }
 
   #request(rid: string | null): void {
@@ -404,10 +697,48 @@ export class Viewer extends Emitter<ViewerEvents> {
     this.#lastSnapshot = next;
     if (this.#pc !== pc) return;
 
+    // The server judges its own link to this viewer, so perf reports come
+    // from it even while the picture comes from a relay.
     if (previous) {
       const perf = perfReport(previous, next);
       if (perf) this.#send({ type: "perf_report", ...perf });
 
+      const mbps = viewerStats(previous, next).mbps;
+      if (mbps !== null && !this.#onRelayStream()) {
+        this.#received = [...this.#received.slice(-(RECEIVED_WINDOW - 1)), Math.round(mbps * 1000)];
+      }
+    }
+
+    if (this.#relayLink) {
+      await this.#reportOutgoing(this.#relayLink);
+      await this.#holdRelayCeiling(this.#relayLink).catch((error) => this.emit("error", error));
+    }
+
+    const shown = this.#onRelayStream() && this.#leafLink ? await this.#readLeafStats(this.#leafLink) : null;
+    if (this.#pc !== pc) return;
+    if (shown) this.#describe(shown.previous, shown.next);
+    else this.#describe(previous, next);
+  }
+
+  async #readLeafStats(link: RTCPeerConnection): Promise<{ previous: Snapshot | null; next: Snapshot }> {
+    const next = readSnapshot(Array.from((await link.getStats()).values()));
+    const previous = this.#lastLeafSnapshot;
+    this.#lastLeafSnapshot = next;
+    return { previous, next };
+  }
+
+  async #reportOutgoing(link: RTCPeerConnection): Promise<void> {
+    const next = readSent(Array.from((await link.getStats()).values()));
+    const previous = this.#lastSent;
+    this.#lastSent = next;
+    if (this.#relayLink !== link || !this.#linked || !previous) return;
+
+    const kbps = outgoingKbps(previous, next);
+    if (kbps !== null) this.#send({ type: "relay_outgoing", kbps });
+  }
+
+  #describe(previous: Snapshot | null, next: Snapshot): void {
+    if (previous) {
       const freezes = freezeNote(previous, next);
       if (freezes) this.#log(freezes);
 
@@ -431,7 +762,8 @@ export class Viewer extends Emitter<ViewerEvents> {
   // Read from the receiver, not from drawn frames: a browser draws a window
   // nobody can see about once a second.
   #probeTimestamp(): void {
-    const receiver = this.#pc?.getReceivers().find((r) => r.track?.kind === "video");
+    const link = this.#onRelayStream() ? this.#leafLink : this.#pc;
+    const receiver = link?.getReceivers().find((r) => r.track?.kind === "video");
     const source = receiver?.getSynchronizationSources().sort((a, b) => b.timestamp - a.timestamp)[0];
     if (!source || source.rtpTimestamp === undefined) return;
 
@@ -451,6 +783,9 @@ export class Viewer extends Emitter<ViewerEvents> {
     clearTimeout(this.#graceTimer);
     clearInterval(this.#statsTimer);
     clearInterval(this.#probeTimer);
+    clearInterval(this.#watchTimer);
+    // The server drops this viewer's pairing along with the connection.
+    this.#dropLink();
 
     const pc = this.#pc;
     this.#pc = null;
@@ -459,6 +794,7 @@ export class Viewer extends Emitter<ViewerEvents> {
     this.#lastSnapshot = null;
     this.#lastSource = null;
     this.#asked = null;
+    this.#received = [];
 
     if (pc) {
       pc.ontrack = null;
@@ -469,6 +805,7 @@ export class Viewer extends Emitter<ViewerEvents> {
       track.stop();
       this.stream.removeTrack(track);
     }
+    this.#sfuTracks.clear();
   }
 
   #setState(state: ViewerState, reason?: string): void {
@@ -485,6 +822,23 @@ export class Viewer extends Emitter<ViewerEvents> {
 function url(server: string | undefined, path: string): string {
   const base = server ?? globalThis.location.origin;
   return `${base.replace(/\/+$/, "")}/${path}`;
+}
+
+async function framesDecoded(pc: RTCPeerConnection): Promise<number> {
+  if (pc.connectionState === "closed") return 0;
+  return readSnapshot(Array.from((await pc.getStats()).values())).video?.framesDecoded ?? 0;
+}
+
+/** Whether `pc` decodes a video frame past `before` within `timeoutMs`. */
+async function decodedPast(pc: RTCPeerConnection, before: number, timeoutMs: number): Promise<boolean> {
+  if (!pc.getReceivers().some((r) => r.track?.kind === "video")) return true;
+  const giveUpAt = performance.now() + timeoutMs;
+  while (performance.now() < giveUpAt) {
+    if (pc.connectionState === "closed") return false;
+    if ((await framesDecoded(pc)) > before) return true;
+    await new Promise((resolve) => setTimeout(resolve, HANDOVER_POLL_MS));
+  }
+  return false;
 }
 
 function gathered(pc: RTCPeerConnection): Promise<void> {
