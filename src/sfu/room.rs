@@ -17,8 +17,8 @@ use crate::{metrics, shards::types::extract_shard_id, types::Viewer};
 use crate::{
     shards::types::ShardRouteMsg,
     types::{
-        ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
-        StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
+        ClientId, LayerMode, LinkState, P2pFailedPairs, RelayStatus, Room, RoomId, RoomState,
+        Rooms, SocketRoutes, StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
     },
 };
 
@@ -75,6 +75,8 @@ impl Rooms {
                 viewers: Viewers::new(),
                 state: RoomState::Idle,
                 hashed_stream_key,
+                p2p_failed_pairs: P2pFailedPairs::default(),
+                p2p_matched_at: None,
             },
         );
 
@@ -172,7 +174,7 @@ impl Room {
         let Some(leaf_id) = self
             .viewers
             .values()
-            .filter(|c| c.relay_state.relay_status.is_none() && c.id != relay_id)
+            .filter(|c| c.relay_state.role.is_none() && c.id != relay_id)
             .min_by_key(|c| c.relay_state.relay_potential())
             .map(|c| c.id)
         else {
@@ -182,7 +184,7 @@ impl Room {
         let Some(relay) = self
             .viewers
             .get_mut(&relay_id)
-            .filter(|c| c.relay_state.relay_status.is_none())
+            .filter(|c| c.relay_state.role.is_none())
         else {
             return;
         };
@@ -192,18 +194,18 @@ impl Room {
             return;
         };
 
-        relay.relay_state.relay_status = Some(RelayStatus::Relay {
-            leaf: leaf_id,
+        relay.relay_state.role = Some(RelayStatus::Relay {
+            leaf_id,
             p2p_connected_at: None,
+            outgoing_kbps: None,
         });
-        relay.relay_state.relay_outgoing_kbps = None;
 
         let Some(leaf) = self.viewers.get_mut(&leaf_id) else {
             return;
         };
 
-        leaf.relay_state.relay_status = Some(RelayStatus::Leaf {
-            relay: relay_id,
+        leaf.relay_state.role = Some(RelayStatus::Leaf {
+            relay_id,
             link_state: LinkState::Connecting { at: Instant::now() },
         });
 
@@ -336,7 +338,10 @@ mod tests {
 
     use crate::{
         shards::types::ShardRouteMsg,
-        types::{ClientId, ClientType, Room, RoomId, RoomState, Rooms, StreamKey, Viewers},
+        types::{
+            ClientId, ClientType, P2pFailedPairs, Room, RoomId, RoomState, Rooms, StreamKey,
+            Viewers,
+        },
     };
 
     /// The receiver is handed back so the test keeps it alive; dropping it
@@ -500,6 +505,8 @@ mod tests {
             viewers: Viewers::new(),
             state: RoomState::Live,
             hashed_stream_key: [0; 32],
+            p2p_failed_pairs: P2pFailedPairs::default(),
+            p2p_matched_at: None,
         };
 
         for _ in 0..3 {
@@ -524,6 +531,8 @@ mod tests {
                 viewers: Viewers::new(),
                 state,
                 hashed_stream_key: [0; 32],
+                p2p_failed_pairs: P2pFailedPairs::default(),
+                p2p_matched_at: None,
             };
 
             let (tx, _rx) = reply::<StatusCode>();

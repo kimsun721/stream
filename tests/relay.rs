@@ -158,7 +158,7 @@ async fn the_server_stops_sending_to_a_connected_leaf() {
         "the relay still gets its own copy"
     );
 
-    leaf.send(&json!({ "type": "p2p_disconnected" }));
+    leaf.send(&json!({ "type": "p2p_disconnected", "reason": "link_lost" }));
     leaf.run_until(SETTLE, |_| false);
 
     assert!(

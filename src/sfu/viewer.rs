@@ -21,9 +21,9 @@ use crate::{
     metrics,
     sfu::error::{ClientError, ClientResult},
     types::{
-        AvailableSimulcastLayer, C2sDcPayload, ClientId, LayerMode, LinkState, Peer, PollResult,
-        RelayState, RelayStatus, S2cDcPayload, TickResult, TrackOut, TrackOutState,
-        UploadProbeResult, Viewer, ViewerEffects, Viewers,
+        AvailableSimulcastLayer, C2sDcPayload, ClientId, LayerMode, LinkState, Peer, PerfSample,
+        PerfWindow, PollResult, RelayState, RelayStatus, S2cDcPayload, TickResult, TrackOut,
+        TrackOutState, UploadProbeResult, Viewer, ViewerEffects, Viewers,
     },
 };
 
@@ -41,7 +41,49 @@ impl Viewer {
             relay_state: RelayState::new(),
             tracks_out: Vec::new(),
             last_twcc_bitrate: None,
+            perf: PerfWindow::new(),
         }
+    }
+
+    pub fn is_perf_healthy(&self) -> bool {
+        if self.perf.is_empty() {
+            return false;
+        }
+
+        let mut rtt_ms_avg = 0;
+        let mut loss_pct_avg = 0.0;
+        let len = self.perf.len() as u32;
+
+        for p in self.perf.iter() {
+            rtt_ms_avg += p.rtt_ms;
+            loss_pct_avg += p.loss_pct;
+        }
+
+        rtt_ms_avg /= len;
+        loss_pct_avg /= len as f32;
+
+        rtt_ms_avg < tuning().perf.rtt_ms_cutoff
+            && loss_pct_avg < tuning().perf.loss_pct_cutoff
+            && len > tuning().perf.min_samples_len
+    }
+
+    pub fn perf_report(&mut self, rtt_ms: u32, loss_pct: f32) -> ClientResult<()> {
+        let now = Instant::now();
+
+        self.perf.push_back(PerfSample {
+            rtt_ms,
+            loss_pct,
+            timestamp: now,
+        });
+
+        while self.perf.front().is_some_and(|p| {
+            now.duration_since(p.timestamp) > tuning().perf.window_max_age()
+                || self.perf.len() > tuning().perf.window_max_len
+        }) {
+            self.perf.pop_front();
+        }
+
+        Ok(())
     }
 
     pub fn tick(
@@ -161,9 +203,7 @@ impl Viewer {
             C2sDcPayload::SetLayerMode { mid, layer_mode } => {
                 self.set_layer_mode(Mid::from(mid.as_str()), layer_mode, keyframe_requests)
             }
-            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => {
-                self.relay_state.perf_report(rtt_ms, loss_pct)
-            }
+            C2sDcPayload::PerfReport { rtt_ms, loss_pct } => self.perf_report(rtt_ms, loss_pct),
             C2sDcPayload::P2pOffer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pOffer { sdp }, p2p_sdps)
             }
@@ -177,7 +217,7 @@ impl Viewer {
 
                 Ok(())
             }
-            C2sDcPayload::P2pDisconnected => {
+            C2sDcPayload::P2pDisconnected { .. } => {
                 self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
             }
             C2sDcPayload::AvailableUpload {
@@ -289,16 +329,20 @@ impl Viewer {
     }
 
     fn handle_p2p_connected(&mut self) -> ClientResult<Option<ClientId>> {
-        if let Some(RelayStatus::Leaf { link_state, relay }) = &mut self.relay_state.relay_status {
+        if let Some(RelayStatus::Leaf {
+            link_state,
+            relay_id,
+        }) = &mut self.relay_state.role
+        {
             *link_state = LinkState::Connected;
-            Ok(Some(*relay))
+            Ok(Some(*relay_id))
         } else {
             Ok(None)
         }
     }
 
     pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
-        self.relay_state.relay_status = None;
+        self.relay_state.role = None;
 
         let keyframe_requests: Vec<_> = self
             .tracks_out
@@ -327,11 +371,11 @@ impl Viewer {
     }
 
     pub fn demote_relay(&mut self) -> ClientResult<()> {
-        self.relay_state.relay_status = None;
+        self.relay_state.role = None;
 
-        self.relay_state.available_upload = Some(UploadProbeResult::Failed { at: Instant::now() });
-
-        self.relay_state.relay_outgoing_kbps = None;
+        self.relay_state.available_upload = Some(UploadProbeResult::Failed {
+            failed_at: Instant::now(),
+        });
 
         if let Some(mut channel) = self.peer.cid.and_then(|id| self.peer.rtc.channel(id)) {
             let json = serde_json::to_string(&S2cDcPayload::Demote)?;
@@ -355,7 +399,7 @@ impl Viewer {
             };
 
             self.relay_state.available_upload = Some(UploadProbeResult::Probing {
-                probed_at: (Instant::now()),
+                started_at: Instant::now(),
             });
         }
     }
@@ -431,15 +475,15 @@ impl Viewer {
         sdp: S2cDcPayload,
         p2p_sdps: &mut Vec<(ClientId, S2cDcPayload)>,
     ) -> ClientResult<()> {
-        match self.relay_state.relay_status {
-            Some(RelayStatus::Relay { leaf, .. }) => {
-                p2p_sdps.push((leaf, sdp));
+        match self.relay_state.role {
+            Some(RelayStatus::Relay { leaf_id, .. }) => {
+                p2p_sdps.push((leaf_id, sdp));
             }
             Some(RelayStatus::Leaf {
-                relay,
+                relay_id,
                 link_state: LinkState::Connecting { .. },
             }) => {
-                p2p_sdps.push((relay, sdp));
+                p2p_sdps.push((relay_id, sdp));
             }
             _ => (),
         };
@@ -451,10 +495,13 @@ impl Viewer {
         keyframe_requests: &mut Vec<KeyframeRequest>,
         disconnected_relays: &mut Vec<ClientId>,
     ) -> ClientResult<()> {
-        if let Some(RelayStatus::Leaf { relay, link_state }) = &self.relay_state.relay_status
+        if let Some(RelayStatus::Leaf {
+            relay_id,
+            link_state,
+        }) = &self.relay_state.role
             && matches!(link_state, LinkState::Connected)
         {
-            disconnected_relays.push(*relay);
+            disconnected_relays.push(*relay_id);
             for kf in self.demote_leaf()? {
                 keyframe_requests.push(kf);
             }

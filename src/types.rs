@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt,
     net::SocketAddr,
     rc::{Rc, Weak},
@@ -46,10 +46,9 @@ pub struct Peer {
 
 #[derive(Debug)]
 pub struct RelayState {
-    pub relay_status: Option<RelayStatus>,
-    pub perf: PerfWindow,
+    pub role: Option<RelayStatus>,
+    pub role_changed_at: Option<Instant>,
     pub available_upload: Option<UploadProbeResult>,
-    pub relay_outgoing_kbps: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -59,6 +58,7 @@ pub struct Viewer {
     pub tracks_out: Vec<TrackOut>,
     pub relay_state: RelayState,
     pub last_twcc_bitrate: Option<Bitrate>,
+    pub perf: PerfWindow,
 }
 
 #[derive(Debug)]
@@ -71,7 +71,7 @@ pub struct Streamer {
 #[derive(Debug)]
 pub struct Viewers(pub HashMap<ClientId, Viewer>);
 
-#[derive(Debug, Clone, Copy, PartialEq, Display, Hash, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Display, Hash, Eq, PartialOrd, Ord)]
 pub struct ClientId(u64);
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -80,6 +80,9 @@ pub struct RoomId(pub String);
 pub struct StreamKey(pub String);
 
 pub type PerfWindow = VecDeque<PerfSample>;
+
+#[derive(Debug, Default)]
+pub struct P2pFailedPairs(pub HashSet<(ClientId, ClientId)>);
 
 #[derive(Debug)]
 pub struct PerfSample {
@@ -103,9 +106,16 @@ pub enum PushOutcome {
 
 #[derive(Debug)]
 pub enum UploadProbeResult {
-    Probing { probed_at: Instant },
-    Probed { available_upload_kbps: u32 },
-    Failed { at: Instant },
+    Probing {
+        started_at: Instant,
+    },
+    Probed {
+        available_upload_kbps: u32,
+        probed_at: Instant,
+    },
+    Failed {
+        failed_at: Instant,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -121,6 +131,8 @@ pub struct Room {
     pub viewers: Viewers,
     pub state: RoomState,
     pub hashed_stream_key: [u8; 32],
+    pub p2p_failed_pairs: P2pFailedPairs,
+    pub p2p_matched_at: Option<Instant>,
 }
 
 pub struct Rooms {
@@ -255,6 +267,29 @@ pub enum SfuMessage {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum P2pDemoteReason {
+    LeafAskedHigher,
+    RelayChangedLower,
+    Rebalance,
+    RelayUnhealthy,
+    RelayLeft,
+    LeafLeft,
+    RelayCpu,
+    LinkTimeout,
+    LinkLost,
+    LinkPoor,
+    RateShort,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum P2pDisconnectedReason {
+    RelayCpu,
+    LinkPoor,
+    LinkLost,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum C2sDcPayload {
@@ -266,7 +301,7 @@ pub enum C2sDcPayload {
     P2pOffer { sdp: String },
     P2pAnswer { sdp: String },
     P2pConnected,
-    P2pDisconnected,
+    P2pDisconnected { reason: P2pDisconnectedReason },
     AvailableUpload { available_upload_kbps: u32 },
     RelayOutgoing { kbps: u32 },
 }
@@ -294,6 +329,11 @@ pub enum S2cDcPayload {
         target_layer: Option<String>,
         layer_mode: LayerMode,
     },
+    LeafLayerChanged {
+        rid: String,
+        mid: String,
+        bitrate: u64,
+    },
 }
 
 #[derive(Serialize)]
@@ -305,12 +345,13 @@ pub struct AvailableSimulcastLayer {
 #[derive(Debug)]
 pub enum RelayStatus {
     Relay {
-        leaf: ClientId,
+        leaf_id: ClientId,
         p2p_connected_at: Option<Instant>,
+        outgoing_kbps: Option<u32>,
     },
 
     Leaf {
-        relay: ClientId,
+        relay_id: ClientId,
         link_state: LinkState,
     },
 }
@@ -494,10 +535,9 @@ impl Peer {
 impl RelayState {
     pub fn new() -> RelayState {
         RelayState {
-            relay_status: None,
-            perf: VecDeque::new(),
+            role: None,
+            role_changed_at: None,
             available_upload: None,
-            relay_outgoing_kbps: None,
         }
     }
 }

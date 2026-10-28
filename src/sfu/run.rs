@@ -118,12 +118,12 @@ pub fn run(
                     Ok(TickResult::Disconnected) => {
                         metrics::client_disconnected();
 
-                        match &viewer.relay_state.relay_status {
-                            Some(RelayStatus::Relay { leaf, .. }) => {
-                                fallback_leafs.push(*leaf);
+                        match &viewer.relay_state.role {
+                            Some(RelayStatus::Relay { leaf_id, .. }) => {
+                                fallback_leafs.push(*leaf_id);
                             }
-                            Some(RelayStatus::Leaf { relay, .. }) => {
-                                viewer_effects.disconnected_relays.push(*relay);
+                            Some(RelayStatus::Leaf { relay_id, .. }) => {
+                                viewer_effects.disconnected_relays.push(*relay_id);
                             }
                             _ => (),
                         }
@@ -199,7 +199,7 @@ pub fn run(
 
             for c in room.viewers.values_mut() {
                 if matches!(
-                    c.relay_state.relay_status,
+                    c.relay_state.role,
                     Some(RelayStatus::Leaf {
                         link_state: LinkState::Connected,
                         ..
@@ -253,26 +253,27 @@ pub fn run(
             for c in room
                 .viewers
                 .values_mut()
-                .filter(|c| !c.relay_state.perf.is_empty() && c.relay_state.relay_status.is_none())
+                .filter(|c| !c.perf.is_empty() && c.relay_state.role.is_none())
             {
                 match c.relay_state.available_upload {
-                    Some(UploadProbeResult::Failed { at }) => {
-                        if at.elapsed() > tuning().relay.probe_interval()
-                            && c.relay_state.is_perf_healthy()
+                    Some(UploadProbeResult::Failed { failed_at }) => {
+                        if failed_at.elapsed() > tuning().relay.probe_interval()
+                            && c.is_perf_healthy()
                         {
                             c.probe_available_upload()
                         }
                     }
                     None => {
-                        if c.relay_state.is_perf_healthy() {
+                        if c.is_perf_healthy() {
                             c.probe_available_upload();
                         }
                     }
-                    Some(UploadProbeResult::Probing { probed_at })
-                        if probed_at.elapsed() > tuning().relay.probe_timeout() =>
+                    Some(UploadProbeResult::Probing { started_at })
+                        if started_at.elapsed() > tuning().relay.probe_timeout() =>
                     {
-                        c.relay_state.available_upload =
-                            Some(UploadProbeResult::Failed { at: Instant::now() });
+                        c.relay_state.available_upload = Some(UploadProbeResult::Failed {
+                            failed_at: Instant::now(),
+                        });
                     }
 
                     _ => (),
@@ -284,9 +285,9 @@ pub fn run(
                 .values()
                 .filter_map(|c| {
                     if c.relay_state.relay_potential() == RelayPotential::Qualified
-                        && c.relay_state.relay_status.is_none()
+                        && c.relay_state.role.is_none()
                         && c.peer.connected_at.elapsed() >= tuning().relay.min_connection_age()
-                        && c.relay_state.is_perf_healthy()
+                        && c.is_perf_healthy()
                     {
                         return Some(c.id);
                     };
@@ -303,7 +304,7 @@ pub fn run(
                 if let Some(relay) = room.viewers.get_mut(&relay_id)
                     && let Some(RelayStatus::Relay {
                         p2p_connected_at, ..
-                    }) = &mut relay.relay_state.relay_status
+                    }) = &mut relay.relay_state.role
                 {
                     *p2p_connected_at = Some(Instant::now());
                 };
@@ -314,14 +315,15 @@ pub fn run(
                 .values()
                 .filter_map(|c| {
                     let Some(RelayStatus::Relay {
-                        leaf,
+                        leaf_id,
                         p2p_connected_at,
-                    }) = c.relay_state.relay_status
+                        outgoing_kbps,
+                    }) = c.relay_state.role
                     else {
                         return None;
                     };
 
-                    let relay_outgoing_kbps = c.relay_state.relay_outgoing_kbps? as u64;
+                    let relay_outgoing_kbps = outgoing_kbps? as u64;
 
                     let relay_outgoing_cutoff_kbps = c
                         .tracks_out
@@ -346,10 +348,8 @@ pub fn run(
                         return None;
                     };
 
-                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps
-                        || !c.relay_state.is_perf_healthy()
-                    {
-                        return Some((c.id, leaf));
+                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
+                        return Some((c.id, leaf_id));
                     };
 
                     None
@@ -358,12 +358,12 @@ pub fn run(
 
             for client in room.viewers.values() {
                 if let Some(RelayStatus::Leaf {
-                    relay,
+                    relay_id,
                     link_state: LinkState::Connecting { at },
-                }) = client.relay_state.relay_status
+                }) = client.relay_state.role
                     && at.elapsed() >= P2P_CONNECT_TIMEOUT
                 {
-                    leaf_relay_ids_to_demote.push((relay, client.id));
+                    leaf_relay_ids_to_demote.push((relay_id, client.id));
                 }
             }
 
@@ -483,7 +483,7 @@ fn count_gauges(rooms: &Rooms) -> Gauges {
         gauges.viewers += room.viewers.len() as u64;
 
         for client in room.viewers.values() {
-            match client.relay_state.relay_status {
+            match client.relay_state.role {
                 Some(RelayStatus::Relay { .. }) => gauges.relays += 1,
                 Some(RelayStatus::Leaf {
                     link_state: LinkState::Connected,
