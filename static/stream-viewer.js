@@ -599,7 +599,7 @@ var Viewer = class extends Emitter {
     }, RELAY_WATCH_MS);
   }
   #relayLost() {
-    this.#send({ type: "p2p_disconnected" });
+    this.#send({ type: "p2p_disconnected", reason: "link_lost" });
     this.#dropLink("lost the relay, back on the server's stream");
   }
   /** Closes whichever relay link is open and plays the server's stream again. */

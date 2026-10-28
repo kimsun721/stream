@@ -586,7 +586,7 @@ export class Viewer extends Emitter<ViewerEvents> {
   #relayLost(): void {
     // Not worth the grace the server connection gets: the server's stream is
     // one message away.
-    this.#send({ type: "p2p_disconnected" });
+    this.#send({ type: "p2p_disconnected", reason: "link_lost" });
     this.#dropLink("lost the relay, back on the server's stream");
   }
 

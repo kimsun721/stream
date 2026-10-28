@@ -35,7 +35,7 @@ export type ClientMessage =
   | { type: "p2p_offer"; sdp: string }
   | { type: "p2p_answer"; sdp: string }
   | { type: "p2p_connected" }
-  | { type: "p2p_disconnected" }
+  | { type: "p2p_disconnected"; reason: "relay_cpu" | "link_poor" | "link_lost" }
   | { type: "relay_outgoing"; kbps: number };
 
 export interface OfferRequest {
