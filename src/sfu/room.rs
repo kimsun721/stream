@@ -214,29 +214,6 @@ impl Room {
         info!("promote relay={relay_id} leaf={}", leaf_id);
     }
 
-    pub fn demote(&mut self, relay_id: ClientId, leaf_id: ClientId) {
-        let Some(relay) = self.viewers.get_mut(&relay_id) else {
-            return;
-        };
-
-        metrics::demoted();
-
-        if let Err(e) = relay.demote_relay() {
-            error!("demote relay failed error={e}");
-        };
-
-        let Some(leaf) = self.viewers.get_mut(&leaf_id) else {
-            return;
-        };
-
-        if let Ok(keyframe_requests) = leaf.demote_leaf()
-            && let Some(streamer) = &mut self.streamer
-            && let Err(e) = streamer.handle_keyframe_requests(keyframe_requests)
-        {
-            error!("demote keyframe requests failed: {e}");
-        };
-    }
-
     fn view_count(&self) -> usize {
         self.viewers.len()
     }

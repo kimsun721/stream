@@ -7,4 +7,5 @@ pub mod socket;
 pub mod streamer;
 pub mod viewer;
 
+pub mod p2p;
 pub mod peer;

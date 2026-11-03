@@ -82,7 +82,24 @@ pub struct StreamKey(pub String);
 pub type PerfWindow = VecDeque<PerfSample>;
 
 #[derive(Debug, Default)]
-pub struct P2pFailedPairs(pub HashSet<(ClientId, ClientId)>);
+pub struct P2pFailedPairs(pub HashSet<P2pPair>);
+
+#[derive(Debug)]
+pub enum P2pEvent {
+    Connected {
+        pair: P2pPair,
+    },
+    Disconnected {
+        pair: P2pPair,
+        reason: P2pDemoteReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct P2pPair {
+    pub relay: ClientId,
+    pub leaf: ClientId,
+}
 
 #[derive(Debug)]
 pub struct PerfSample {
@@ -207,8 +224,7 @@ pub enum TickResult {
 pub struct ViewerEffects {
     pub keyframe_requests: Vec<KeyframeRequest>,
     pub p2p_sdps: Vec<(ClientId, S2cDcPayload)>,
-    pub connected_relays: Vec<ClientId>,
-    pub disconnected_relays: Vec<ClientId>,
+    pub p2p_events: Vec<P2pEvent>,
 }
 
 pub struct StreamerEffects {
@@ -282,7 +298,7 @@ pub enum P2pDemoteReason {
     RateShort,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum P2pDisconnectedReason {
     RelayCpu,
@@ -602,6 +618,27 @@ impl SocketRoutes {
                 error!("send Disowned to mux failed error={e}");
             }
         }
+    }
+}
+
+impl P2pEvent {
+    pub fn connected(relay: ClientId, leaf: ClientId) -> P2pEvent {
+        P2pEvent::Connected {
+            pair: P2pPair::new(relay, leaf),
+        }
+    }
+
+    pub fn disconnected(relay: ClientId, leaf: ClientId, reason: P2pDemoteReason) -> P2pEvent {
+        P2pEvent::Disconnected {
+            pair: P2pPair::new(relay, leaf),
+            reason,
+        }
+    }
+}
+
+impl P2pPair {
+    pub fn new(relay: ClientId, leaf: ClientId) -> P2pPair {
+        P2pPair { relay, leaf }
     }
 }
 

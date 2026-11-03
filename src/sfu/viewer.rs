@@ -21,9 +21,10 @@ use crate::{
     metrics,
     sfu::error::{ClientError, ClientResult},
     types::{
-        AvailableSimulcastLayer, C2sDcPayload, ClientId, LayerMode, LinkState, Peer, PerfSample,
-        PerfWindow, PollResult, RelayState, RelayStatus, S2cDcPayload, TickResult, TrackOut,
-        TrackOutState, UploadProbeResult, Viewer, ViewerEffects, Viewers,
+        AvailableSimulcastLayer, C2sDcPayload, ClientId, LayerMode, LinkState, P2pDemoteReason,
+        P2pDisconnectedReason, P2pEvent, Peer, PerfSample, PerfWindow, PollResult, RelayState,
+        RelayStatus, S2cDcPayload, TickResult, TrackOut, TrackOutState, UploadProbeResult, Viewer,
+        ViewerEffects, Viewers,
     },
 };
 
@@ -169,8 +170,7 @@ impl Viewer {
         let ViewerEffects {
             keyframe_requests,
             p2p_sdps,
-            connected_relays,
-            disconnected_relays,
+            p2p_events,
         } = effects;
 
         let payload: C2sDcPayload = match serde_json::from_slice(&data.data) {
@@ -210,16 +210,11 @@ impl Viewer {
             C2sDcPayload::P2pAnswer { sdp } => {
                 self.handle_p2p_sdp(S2cDcPayload::P2pAnswer { sdp }, p2p_sdps)
             }
-            C2sDcPayload::P2pConnected => {
-                if let Ok(Some(relay_id)) = self.handle_p2p_connected() {
-                    connected_relays.push(relay_id);
-                };
+            C2sDcPayload::P2pConnected => self.handle_p2p_connected(p2p_events),
+            C2sDcPayload::P2pDisconnected { reason } => {
+                self.handle_p2p_disconnected(reason, p2p_events)
+            }
 
-                Ok(())
-            }
-            C2sDcPayload::P2pDisconnected { .. } => {
-                self.handle_p2p_disconnected(keyframe_requests, disconnected_relays)
-            }
             C2sDcPayload::AvailableUpload {
                 available_upload_kbps,
             } => self
@@ -328,17 +323,53 @@ impl Viewer {
         None
     }
 
-    fn handle_p2p_connected(&mut self) -> ClientResult<Option<ClientId>> {
-        if let Some(RelayStatus::Leaf {
-            link_state,
-            relay_id,
-        }) = &mut self.relay_state.role
-        {
-            *link_state = LinkState::Connected;
-            Ok(Some(*relay_id))
-        } else {
-            Ok(None)
+    fn handle_p2p_disconnected(
+        &self,
+        reason: P2pDisconnectedReason,
+        p2p_events: &mut Vec<P2pEvent>,
+    ) -> ClientResult<()> {
+        match self.relay_state.role {
+            Some(RelayStatus::Leaf {
+                relay_id,
+                link_state: LinkState::Connected,
+            }) => {
+                let reason = match reason {
+                    P2pDisconnectedReason::LinkLost => Some(P2pDemoteReason::LinkLost),
+                    P2pDisconnectedReason::LinkPoor => Some(P2pDemoteReason::LinkPoor),
+                    _ => None,
+                };
+
+                if let Some(reason) = reason {
+                    p2p_events.push(P2pEvent::disconnected(relay_id, self.id, reason));
+                };
+            }
+            Some(RelayStatus::Relay {
+                leaf_id,
+                p2p_connected_at: Some(_),
+                ..
+            }) => {
+                let reason = match reason {
+                    P2pDisconnectedReason::LinkLost => P2pDemoteReason::LinkLost,
+                    P2pDisconnectedReason::LinkPoor => P2pDemoteReason::LinkPoor,
+                    P2pDisconnectedReason::RelayCpu => P2pDemoteReason::RelayCpu,
+                };
+
+                p2p_events.push(P2pEvent::disconnected(self.id, leaf_id, reason));
+            }
+            _ => {}
         }
+        Ok(())
+    }
+
+    fn handle_p2p_connected(&mut self, p2p_events: &mut Vec<P2pEvent>) -> ClientResult<()> {
+        match self.relay_state.role {
+            Some(RelayStatus::Leaf { relay_id, .. }) => {
+                p2p_events.push(P2pEvent::connected(relay_id, self.id));
+            }
+            _ => {}
+        };
+
+        Ok(())
     }
 
     pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
@@ -487,26 +518,6 @@ impl Viewer {
             }
             _ => (),
         };
-        Ok(())
-    }
-
-    fn handle_p2p_disconnected(
-        &mut self,
-        keyframe_requests: &mut Vec<KeyframeRequest>,
-        disconnected_relays: &mut Vec<ClientId>,
-    ) -> ClientResult<()> {
-        if let Some(RelayStatus::Leaf {
-            relay_id,
-            link_state,
-        }) = &self.relay_state.role
-            && matches!(link_state, LinkState::Connected)
-        {
-            disconnected_relays.push(*relay_id);
-            for kf in self.demote_leaf()? {
-                keyframe_requests.push(kf);
-            }
-        }
-
         Ok(())
     }
 

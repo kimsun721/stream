@@ -17,9 +17,9 @@ use crate::{
     sfu::error::{SfuError::ChannelDisconnected, SfuResult},
     shards::types::ShardRouteMsg,
     types::{
-        ClientId, ClientType, LayerMode, LinkState, RelayPotential, RelayStatus, RoomState, Rooms,
-        SfuMessage, StreamerEffects, TickResult, TrackOut, TrackOutState, UploadProbeResult,
-        ViewerEffects,
+        ClientId, ClientType, LayerMode, LinkState, P2pDemoteReason, P2pEvent, P2pPair,
+        RelayPotential, RelayStatus, RoomState, Rooms, SfuMessage, StreamerEffects, TickResult,
+        TrackOut, TrackOutState, UploadProbeResult, ViewerEffects,
     },
 };
 
@@ -81,14 +81,12 @@ pub fn run(
             let client_tick = metrics::time(Phase::ClientTick);
 
             let mut to_remove = Vec::new();
-            let mut fallback_leafs = Vec::new();
             let mut needs_init = false;
 
             let mut viewer_effects = ViewerEffects {
                 keyframe_requests: Vec::new(),
                 p2p_sdps: Vec::new(),
-                connected_relays: Vec::new(),
-                disconnected_relays: Vec::new(),
+                p2p_events: Vec::new(),
             };
 
             let mut streamer_effects = StreamerEffects {
@@ -120,11 +118,18 @@ pub fn run(
 
                         match &viewer.relay_state.role {
                             Some(RelayStatus::Relay { leaf_id, .. }) => {
-                                fallback_leafs.push(*leaf_id);
+                                viewer_effects.p2p_events.push(P2pEvent::Disconnected {
+                                    pair: P2pPair::new(viewer.id, *leaf_id),
+                                    reason: P2pDemoteReason::RelayLeft,
+                                })
                             }
                             Some(RelayStatus::Leaf { relay_id, .. }) => {
-                                viewer_effects.disconnected_relays.push(*relay_id);
+                                viewer_effects.p2p_events.push(P2pEvent::Disconnected {
+                                    pair: P2pPair::new(*relay_id, viewer.id),
+                                    reason: P2pDemoteReason::LeafLeft,
+                                })
                             }
+
                             _ => (),
                         }
                         to_remove.push(viewer.id);
@@ -185,16 +190,6 @@ pub fn run(
                 room.viewers.remove(id);
             }
 
-            for leaf_id in fallback_leafs {
-                if let Some(leaf) = room.viewers.get_mut(&leaf_id)
-                    && let Ok(leaf_keyframe_requests) = leaf.demote_leaf()
-                {
-                    for request in leaf_keyframe_requests {
-                        viewer_effects.keyframe_requests.push(request);
-                    }
-                };
-            }
-
             let media_fanout = metrics::time(Phase::MediaFanout);
 
             for c in room.viewers.values_mut() {
@@ -238,14 +233,6 @@ pub fn run(
                         error!("send p2p_offer via dc failed: {e}");
                     };
                 }
-            }
-
-            for relay_id in viewer_effects.disconnected_relays {
-                if let Some(relay) = room.viewers.get_mut(&relay_id)
-                    && let Err(e) = relay.demote_relay()
-                {
-                    error!("demote relay failed error={e}")
-                };
             }
 
             let relay_policy = metrics::time(Phase::RelayPolicy);
@@ -300,17 +287,11 @@ pub fn run(
                 room.promote(relay_id);
             }
 
-            for relay_id in viewer_effects.connected_relays {
-                if let Some(relay) = room.viewers.get_mut(&relay_id)
-                    && let Some(RelayStatus::Relay {
-                        p2p_connected_at, ..
-                    }) = &mut relay.relay_state.role
-                {
-                    *p2p_connected_at = Some(Instant::now());
-                };
+            for event in viewer_effects.p2p_events {
+                room.apply_event(event);
             }
 
-            let mut leaf_relay_ids_to_demote: Vec<(ClientId, ClientId)> = room
+            let mut leaf_relay_ids_to_demote: Vec<(P2pPair, P2pDemoteReason)> = room
                 .viewers
                 .values()
                 .filter_map(|c| {
@@ -349,7 +330,10 @@ pub fn run(
                     };
 
                     if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
-                        return Some((c.id, leaf_id));
+                        return Some((
+                            P2pPair::new(c.id, leaf_id),
+                            P2pDemoteReason::RelayUnhealthy,
+                        ));
                     };
 
                     None
@@ -363,12 +347,15 @@ pub fn run(
                 }) = client.relay_state.role
                     && at.elapsed() >= P2P_CONNECT_TIMEOUT
                 {
-                    leaf_relay_ids_to_demote.push((relay_id, client.id));
+                    leaf_relay_ids_to_demote.push((
+                        P2pPair::new(relay_id, client.id),
+                        P2pDemoteReason::LinkTimeout,
+                    ));
                 }
             }
 
-            for (relay_id, leaf_id) in leaf_relay_ids_to_demote {
-                room.demote(relay_id, leaf_id);
+            for (p2p_pair, reason) in leaf_relay_ids_to_demote {
+                room.demote_p2p_pair(p2p_pair, reason);
             }
 
             drop(relay_policy);
