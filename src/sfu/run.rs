@@ -187,6 +187,10 @@ pub fn run(
             rooms.socket_routes.clean_routes_by_clients(&to_remove);
 
             for id in to_remove.iter() {
+                room.mismatched_pairs
+                    .0
+                    .retain(|pair| &pair.relay != id && &pair.leaf != id);
+
                 room.viewers.remove(id);
             }
 
@@ -243,24 +247,18 @@ pub fn run(
                 .filter(|c| !c.perf.is_empty() && c.relay_state.role.is_none())
             {
                 match c.relay_state.available_upload {
-                    Some(UploadProbeResult::Failed { failed_at }) => {
-                        if failed_at.elapsed() > tuning().relay.probe_interval()
-                            && c.is_perf_healthy()
-                        {
-                            c.probe_available_upload()
-                        }
-                    }
                     None => {
-                        if c.is_perf_healthy() {
+                        if c.is_perf_healthy() && c.relay_state.is_cooldown_over() {
                             c.probe_available_upload();
                         }
                     }
                     Some(UploadProbeResult::Probing { started_at })
                         if started_at.elapsed() > tuning().relay.probe_timeout() =>
                     {
-                        c.relay_state.available_upload = Some(UploadProbeResult::Failed {
-                            failed_at: Instant::now(),
-                        });
+                        c.relay_state.available_upload = None;
+
+                        c.relay_state.cooldown_until =
+                            Some(Instant::now() + tuning().relay.probe_interval())
                     }
 
                     _ => (),
@@ -275,6 +273,7 @@ pub fn run(
                         && c.relay_state.role.is_none()
                         && c.peer.connected_at.elapsed() >= tuning().relay.min_connection_age()
                         && c.is_perf_healthy()
+                        && c.relay_state.is_cooldown_over()
                     {
                         return Some(c.id);
                     };
@@ -329,7 +328,9 @@ pub fn run(
                         return None;
                     };
 
-                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps || !c.is_perf_healthy() {
+                    if relay_outgoing_kbps < relay_outgoing_cutoff_kbps {
+                        return Some((P2pPair::new(c.id, leaf_id), P2pDemoteReason::RateShort));
+                    } else if !c.is_perf_healthy() {
                         return Some((
                             P2pPair::new(c.id, leaf_id),
                             P2pDemoteReason::RelayUnhealthy,

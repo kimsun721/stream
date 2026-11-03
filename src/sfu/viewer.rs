@@ -362,18 +362,17 @@ impl Viewer {
     }
 
     fn handle_p2p_connected(&mut self, p2p_events: &mut Vec<P2pEvent>) -> ClientResult<()> {
-        match self.relay_state.role {
-            Some(RelayStatus::Leaf { relay_id, .. }) => {
-                p2p_events.push(P2pEvent::connected(relay_id, self.id));
-            }
-            _ => {}
-        };
+        if let Some(RelayStatus::Leaf { relay_id, .. }) = self.relay_state.role {
+            p2p_events.push(P2pEvent::connected(relay_id, self.id));
+        }
 
         Ok(())
     }
 
     pub fn demote_leaf(&mut self) -> ClientResult<Vec<KeyframeRequest>> {
         self.relay_state.role = None;
+
+        self.relay_state.role_changed_at = Some(Instant::now());
 
         let keyframe_requests: Vec<_> = self
             .tracks_out
@@ -404,9 +403,7 @@ impl Viewer {
     pub fn demote_relay(&mut self) -> ClientResult<()> {
         self.relay_state.role = None;
 
-        self.relay_state.available_upload = Some(UploadProbeResult::Failed {
-            failed_at: Instant::now(),
-        });
+        self.relay_state.role_changed_at = Some(Instant::now());
 
         if let Some(mut channel) = self.peer.cid.and_then(|id| self.peer.rtc.channel(id)) {
             let json = serde_json::to_string(&S2cDcPayload::Demote)?;

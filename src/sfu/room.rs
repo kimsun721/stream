@@ -13,12 +13,16 @@ use tokio::sync::oneshot;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{metrics, shards::types::extract_shard_id, types::Viewer};
+use crate::{
+    metrics,
+    shards::types::extract_shard_id,
+    types::{MismatchedPairs, Viewer},
+};
 use crate::{
     shards::types::ShardRouteMsg,
     types::{
-        ClientId, LayerMode, LinkState, P2pFailedPairs, RelayStatus, Room, RoomId, RoomState,
-        Rooms, SocketRoutes, StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
+        ClientId, LayerMode, LinkState, RelayStatus, Room, RoomId, RoomState, Rooms, SocketRoutes,
+        StreamKey, Streamer, TrackOut, TrackOutState, Viewers,
     },
 };
 
@@ -75,7 +79,7 @@ impl Rooms {
                 viewers: Viewers::new(),
                 state: RoomState::Idle,
                 hashed_stream_key,
-                p2p_failed_pairs: P2pFailedPairs::default(),
+                mismatched_pairs: MismatchedPairs::default(),
                 p2p_matched_at: None,
             },
         );
@@ -316,7 +320,7 @@ mod tests {
     use crate::{
         shards::types::ShardRouteMsg,
         types::{
-            ClientId, ClientType, P2pFailedPairs, Room, RoomId, RoomState, Rooms, StreamKey,
+            ClientId, ClientType, MismatchedPairs, Room, RoomId, RoomState, Rooms, StreamKey,
             Viewers,
         },
     };
@@ -482,7 +486,7 @@ mod tests {
             viewers: Viewers::new(),
             state: RoomState::Live,
             hashed_stream_key: [0; 32],
-            p2p_failed_pairs: P2pFailedPairs::default(),
+            mismatched_pairs: MismatchedPairs::default(),
             p2p_matched_at: None,
         };
 
@@ -508,7 +512,7 @@ mod tests {
                 viewers: Viewers::new(),
                 state,
                 hashed_stream_key: [0; 32],
-                p2p_failed_pairs: P2pFailedPairs::default(),
+                mismatched_pairs: MismatchedPairs::default(),
                 p2p_matched_at: None,
             };
 

@@ -48,6 +48,7 @@ pub struct Peer {
 pub struct RelayState {
     pub role: Option<RelayStatus>,
     pub role_changed_at: Option<Instant>,
+    pub cooldown_until: Option<Instant>,
     pub available_upload: Option<UploadProbeResult>,
 }
 
@@ -82,7 +83,7 @@ pub struct StreamKey(pub String);
 pub type PerfWindow = VecDeque<PerfSample>;
 
 #[derive(Debug, Default)]
-pub struct P2pFailedPairs(pub HashSet<P2pPair>);
+pub struct MismatchedPairs(pub HashSet<P2pPair>);
 
 #[derive(Debug)]
 pub enum P2pEvent {
@@ -130,9 +131,6 @@ pub enum UploadProbeResult {
         available_upload_kbps: u32,
         probed_at: Instant,
     },
-    Failed {
-        failed_at: Instant,
-    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
@@ -148,7 +146,7 @@ pub struct Room {
     pub viewers: Viewers,
     pub state: RoomState,
     pub hashed_stream_key: [u8; 32],
-    pub p2p_failed_pairs: P2pFailedPairs,
+    pub mismatched_pairs: MismatchedPairs,
     pub p2p_matched_at: Option<Instant>,
 }
 
@@ -553,6 +551,7 @@ impl RelayState {
         RelayState {
             role: None,
             role_changed_at: None,
+            cooldown_until: None,
             available_upload: None,
         }
     }
@@ -618,27 +617,6 @@ impl SocketRoutes {
                 error!("send Disowned to mux failed error={e}");
             }
         }
-    }
-}
-
-impl P2pEvent {
-    pub fn connected(relay: ClientId, leaf: ClientId) -> P2pEvent {
-        P2pEvent::Connected {
-            pair: P2pPair::new(relay, leaf),
-        }
-    }
-
-    pub fn disconnected(relay: ClientId, leaf: ClientId, reason: P2pDemoteReason) -> P2pEvent {
-        P2pEvent::Disconnected {
-            pair: P2pPair::new(relay, leaf),
-            reason,
-        }
-    }
-}
-
-impl P2pPair {
-    pub fn new(relay: ClientId, leaf: ClientId) -> P2pPair {
-        P2pPair { relay, leaf }
     }
 }
 
